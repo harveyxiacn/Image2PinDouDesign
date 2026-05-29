@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="拼豆图纸工坊">
+  <rect width="512" height="512" rx="96" fill="#0f172a"/>
+  <g transform="translate(80 80)">
+    <g fill="none">
+      <circle cx="44" cy="44" r="34" fill="#fb7185"/>
+      <circle cx="132" cy="44" r="34" fill="#fbbf24"/>
+      <circle cx="220" cy="44" r="34" fill="#34d399"/>
+      <circle cx="308" cy="44" r="34" fill="#38bdf8"/>
+      <circle cx="44" cy="132" r="34" fill="#fbbf24"/>
+      <circle cx="132" cy="132" r="34" fill="#f8fafc"/>
+      <circle cx="220" cy="132" r="34" fill="#38bdf8"/>
+      <circle cx="308" cy="132" r="34" fill="#a78bfa"/>
+      <circle cx="44" cy="220" r="34" fill="#34d399"/>
+      <circle cx="132" cy="220" r="34" fill="#38bdf8"/>
+      <circle cx="220" cy="220" r="34" fill="#fb7185"/>
+      <circle cx="308" cy="220" r="34" fill="#fbbf24"/>
+      <circle cx="44" cy="308" r="34" fill="#38bdf8"/>
+      <circle cx="132" cy="308" r="34" fill="#a78bfa"/>
+      <circle cx="220" cy="308" r="34" fill="#fbbf24"/>
+      <circle cx="308" cy="308" r="34" fill="#34d399"/>
+    </g>
+    <g fill="#0f172a">
+      <circle cx="44" cy="44" r="12"/>
+      <circle cx="132" cy="44" r="12"/>
+      <circle cx="220" cy="44" r="12"/>
+      <circle cx="308" cy="44" r="12"/>
+      <circle cx="44" cy="132" r="12"/>
+      <circle cx="132" cy="132" r="12"/>
+      <circle cx="220" cy="132" r="12"/>
+      <circle cx="308" cy="132" r="12"/>
+      <circle cx="44" cy="220" r="12"/>
+      <circle cx="132" cy="220" r="12"/>
+      <circle cx="220" cy="220" r="12"/>
+      <circle cx="308" cy="220" r="12"/>
+      <circle cx="44" cy="308" r="12"/>
+      <circle cx="132" cy="308" r="12"/>
+      <circle cx="220" cy="308" r="12"/>
+      <circle cx="308" cy="308" r="12"/>
+    </g>
+  </g>
+</svg>
