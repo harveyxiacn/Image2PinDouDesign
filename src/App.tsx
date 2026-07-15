@@ -9,10 +9,10 @@ import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backg
 import { getBoardSize } from "./domain/boards";
 import { summarizeProject } from "./domain/conversion";
 import { autoCropToContent, cropPixelSource, rectFromFractions } from "./domain/crop";
-import { countsToCsv, downloadDataUrl, downloadTextFile, openPrintableSheet } from "./domain/exporters";
+import { countsToCsv, downloadBlob, downloadTextFile, openPrintableSheet } from "./domain/exporters";
 import { imageFileToPixelSource, pixelSourceToDataUrl } from "./domain/image";
 import { MARD_PALETTE } from "./domain/palette";
-import { renderDesignToDataUrl } from "./domain/rendering";
+import { getHighResolutionCellSize, renderDesignToBlob } from "./domain/rendering";
 import type { BeadDesign, PixelSource } from "./domain/types";
 import type { ConversionRequest, ConversionResponse } from "./worker/conversion.worker";
 
@@ -76,6 +76,7 @@ export default function App() {
   const [cropImageId, setCropImageId] = useState<string | null>(null);
   const [cropBusy, setCropBusy] = useState(false);
   const [cropProgress, setCropProgress] = useState<RemovalProgress | null>(null);
+  const [isExportingPng, setIsExportingPng] = useState(false);
 
   const workerRef = useRef<Worker | null>(null);
   const generationRef = useRef(0);
@@ -298,17 +299,27 @@ export default function App() {
     downloadTextFile("project-bead-shopping-list.csv", countsToCsv(projectTotals, MARD_PALETTE));
   };
 
-  const exportActivePng = () => {
+  const exportActivePng = async () => {
     if (!activeDesign) {
       return;
     }
-    const url = renderDesignToDataUrl(activeDesign, MARD_PALETTE, {
-      cellSize: 16,
-      showLabels: settings.showLabels,
-      boardLineEvery: 52,
-      showCoordinates: true
-    });
-    downloadDataUrl(`${stripExtension(activeDesign.fileName)}-pattern.png`, url);
+    setIsExportingPng(true);
+    setError(null);
+    // 先让浏览器绘制“生成中”，避免大图编码期间用户以为按钮没有响应。
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    try {
+      const blob = await renderDesignToBlob(activeDesign, MARD_PALETTE, {
+        cellSize: getHighResolutionCellSize(activeDesign),
+        showLabels: true,
+        boardLineEvery: 52,
+        showCoordinates: true
+      });
+      downloadBlob(`${stripExtension(activeDesign.fileName)}-高清色号图.png`, blob);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "高清图生成失败，请稍后重试。");
+    } finally {
+      setIsExportingPng(false);
+    }
   };
 
   const exportActivePdf = () => {
@@ -349,6 +360,13 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      <nav className="mobile-nav" aria-label="手机端快捷导航">
+        <a href="#upload-title"><span aria-hidden="true">＋</span>上传</a>
+        <a href="#preview-title"><span aria-hidden="true">▦</span>图纸</a>
+        <a href="#settings-title"><span aria-hidden="true">⚙</span>设置</a>
+        <a href="#download-pattern"><span aria-hidden="true">↓</span>保存</a>
+      </nav>
 
       <main className="workspace">
         <aside className="sidebar">
@@ -399,6 +417,8 @@ export default function App() {
             palette={MARD_PALETTE}
             showLabels={settings.showLabels}
             originalUrl={activeOriginalUrl}
+            onDownload={activeDesign ? () => { void exportActivePng(); } : undefined}
+            isDownloading={isExportingPng}
           />
 
           <div className="stats-grid">
@@ -408,7 +428,14 @@ export default function App() {
               palette={MARD_PALETTE}
               action={activeDesign && (
                 <div className="button-row">
-                  <button type="button" className="button small" onClick={exportActivePng}>导出 PNG</button>
+                  <button
+                    type="button"
+                    className="button small"
+                    onClick={() => { void exportActivePng(); }}
+                    disabled={isExportingPng}
+                  >
+                    {isExportingPng ? "生成中…" : "高清色号 PNG"}
+                  </button>
                   <button type="button" className="button small" onClick={exportActivePdf}>导出 PDF</button>
                   <button type="button" className="button small" onClick={exportActiveCsv}>导出 CSV</button>
                 </div>

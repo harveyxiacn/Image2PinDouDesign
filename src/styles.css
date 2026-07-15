@@ -39,6 +39,10 @@ select {
     linear-gradient(135deg, #fffaf2 0%, #f4efe7 44%, #e9f0f7 100%);
 }
 
+.mobile-nav {
+  display: none;
+}
+
 .hero {
   padding: 28px clamp(18px, 5vw, 72px) 42px;
 }
@@ -443,15 +447,107 @@ h2 {
   padding: 18px;
 }
 
+.canvas-toolbar,
+.canvas-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.canvas-toolbar {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.zoom-controls {
+  display: inline-flex;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid #dbe3eb;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.zoom-controls button {
+  display: grid;
+  min-width: 38px;
+  min-height: 36px;
+  place-items: center;
+  border: 0;
+  border-right: 1px solid #e2e8f0;
+  background: transparent;
+  color: var(--brand-dark);
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.zoom-controls button:last-child {
+  border-right: 0;
+}
+
+.zoom-controls button:disabled {
+  color: #cbd5e1;
+  cursor: default;
+}
+
+.zoom-controls .zoom-value {
+  min-width: 88px;
+  padding-inline: 10px;
+  color: var(--accent);
+  font-size: 0.75rem;
+}
+
+.canvas-viewport {
+  max-width: 100%;
+  max-height: min(72vh, 760px);
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+}
+
+.canvas-viewport:focus-visible {
+  outline: 3px solid rgba(61, 90, 128, 0.32);
+  outline-offset: 2px;
+}
+
+.canvas-viewport.is-zoomed {
+  cursor: grab;
+}
+
 .canvas-shell canvas {
   display: block;
-  width: 100%;
-  max-width: 100%;
+  max-width: none;
   height: auto;
   /* 高分辨率画布缩放到卡片宽度时保持像素清晰，不发虚 */
   image-rendering: pixelated;
-  border-radius: 8px;
   box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18);
+}
+
+.canvas-viewport.is-fit canvas {
+  width: 100%;
+  max-width: 100%;
+}
+
+.canvas-footer {
+  margin-top: 12px;
+}
+
+.canvas-footer figcaption {
+  margin: 0;
+  text-align: left;
+}
+
+.pattern-download {
+  flex: 0 0 auto;
+  padding: 10px 16px;
+  font-size: 0.84rem;
 }
 
 .empty-state {
@@ -768,15 +864,248 @@ td:first-child {
 
 @media (max-width: 980px) {
   .hero-grid,
-  .workspace,
   .stats-grid {
     grid-template-columns: 1fr;
+  }
+
+  .workspace {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .sidebar {
+    display: contents;
+  }
+
+  .upload-panel {
+    order: 1;
+  }
+
+  .sidebar .error-box {
+    order: 2;
+  }
+
+  .main-column {
+    order: 3;
+  }
+
+  .settings-panel {
+    order: 4;
+  }
+
+  .palette-panel {
+    order: 5;
   }
 
   .nav {
     align-items: flex-start;
     flex-direction: column;
     margin-bottom: 34px;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    padding-bottom: calc(78px + env(safe-area-inset-bottom));
+  }
+
+  .hero {
+    padding: 16px 14px 22px;
+  }
+
+  .nav {
+    margin-bottom: 20px;
+    gap: 4px;
+  }
+
+  .nav span {
+    display: none;
+  }
+
+  h1 {
+    font-size: clamp(2.35rem, 15vw, 3.8rem);
+    line-height: 1;
+  }
+
+  .hero-grid {
+    gap: 18px;
+  }
+
+  .hero-copy {
+    margin-top: 14px;
+    font-size: 0.95rem;
+    line-height: 1.65;
+  }
+
+  .hero-actions {
+    margin-top: 18px;
+  }
+
+  .hero-card {
+    grid-template-columns: repeat(4, auto);
+    align-items: baseline;
+    justify-content: start;
+    gap: 4px 10px;
+    padding: 14px 16px;
+    border-radius: 20px;
+  }
+
+  .hero-card span {
+    grid-column: 1 / -1;
+  }
+
+  .hero-card strong {
+    font-size: 1.65rem;
+  }
+
+  .workspace {
+    gap: 14px;
+    padding: 0 12px 24px;
+  }
+
+  .main-column {
+    gap: 14px;
+    min-width: 0;
+  }
+
+  .panel {
+    padding: 16px;
+    border-radius: 20px;
+  }
+
+  .dropzone {
+    min-height: 138px;
+    padding: 16px;
+  }
+
+  .preview-panel {
+    min-height: 0;
+  }
+
+  .preview-original {
+    position: static;
+  }
+
+  .preview-original img {
+    max-height: 160px;
+  }
+
+  .canvas-shell {
+    padding: 10px;
+    border-radius: 16px;
+  }
+
+  .canvas-toolbar {
+    align-items: flex-start;
+    margin-bottom: 10px;
+  }
+
+  .canvas-toolbar > span {
+    max-width: 130px;
+    line-height: 1.45;
+  }
+
+  .zoom-controls button {
+    min-width: 42px;
+    min-height: 42px;
+  }
+
+  .zoom-controls .zoom-value {
+    min-width: 78px;
+    padding-inline: 6px;
+  }
+
+  .canvas-viewport {
+    max-height: 62vh;
+    scrollbar-gutter: auto;
+  }
+
+  .canvas-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .canvas-footer figcaption {
+    text-align: center;
+  }
+
+  .pattern-download {
+    width: 100%;
+    min-height: 46px;
+  }
+
+  .preview-toolbar .button,
+  .button-row .button {
+    min-height: 42px;
+  }
+
+  .stats-panel .section-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .stats-panel .button-row {
+    justify-content: flex-start;
+  }
+
+  .stats-panel th:nth-child(3),
+  .stats-panel td:nth-child(3) {
+    display: none;
+  }
+
+  .stats-panel td:first-child {
+    min-width: 112px;
+  }
+
+  th,
+  td {
+    padding: 9px 6px;
+  }
+
+  .mobile-nav {
+    position: fixed;
+    z-index: 40;
+    right: 12px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    left: 12px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.82);
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 14px 40px rgba(15, 23, 42, 0.2);
+    backdrop-filter: blur(16px);
+  }
+
+  .mobile-nav a {
+    display: grid;
+    min-height: 56px;
+    place-items: center;
+    align-content: center;
+    gap: 2px;
+    color: var(--brand-dark);
+    font-size: 0.7rem;
+    font-weight: 800;
+    text-decoration: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mobile-nav a:active {
+    background: #fff1ed;
+    color: var(--brand);
+  }
+
+  .mobile-nav a span {
+    font-size: 1.05rem;
+    line-height: 1;
+  }
+
+  #upload-title,
+  #preview-title,
+  #settings-title,
+  #download-pattern {
+    scroll-margin-top: 16px;
   }
 }
 

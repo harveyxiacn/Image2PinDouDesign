@@ -8,6 +8,10 @@ export type RenderOptions = {
   showCoordinates?: boolean;
 };
 
+const PREFERRED_EXPORT_CELL_SIZE = 32;
+const MIN_EXPORT_CELL_SIZE = 20;
+const MAX_EXPORT_PIXELS = 24_000_000;
+
 const GUTTER_RATIO = 1.4;
 const MIN_GUTTER = 16;
 
@@ -36,7 +40,7 @@ export function renderDesignToCanvas(
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.textAlign = "center";
   context.textBaseline = "middle";
-  context.font = `${Math.max(7, Math.floor(options.cellSize * 0.36))}px ui-monospace, monospace`;
+  context.font = `700 ${Math.max(8, Math.floor(options.cellSize * 0.4))}px ui-monospace, monospace`;
 
   const byCode = new Map(palette.map((color) => [color.code, color]));
 
@@ -74,6 +78,33 @@ export function renderDesignToDataUrl(design: BeadDesign, palette: PaletteColor[
   const canvas = document.createElement("canvas");
   renderDesignToCanvas(canvas, design, palette, options);
   return canvas.toDataURL("image/png");
+}
+
+export function renderDesignToBlob(
+  design: BeadDesign,
+  palette: PaletteColor[],
+  options: RenderOptions
+): Promise<Blob> {
+  const canvas = document.createElement("canvas");
+  renderDesignToCanvas(canvas, design, palette, options);
+
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error("无法生成 PNG 文件，请缩小图纸后重试。"));
+      }
+    }, "image/png");
+  });
+}
+
+// 手机浏览器对超大 Canvas 的内存较敏感：小图优先使用 32px/格保证色号清楚，
+// 大图则按总像素预算自适应，但不低于 20px/格。
+export function getHighResolutionCellSize(design: Pick<BeadDesign, "boardWidth" | "boardHeight">): number {
+  const cells = Math.max(1, design.boardWidth * design.boardHeight);
+  const sizeByPixelBudget = Math.floor(Math.sqrt(MAX_EXPORT_PIXELS / cells));
+  return Math.max(MIN_EXPORT_CELL_SIZE, Math.min(PREFERRED_EXPORT_CELL_SIZE, sizeByPixelBudget));
 }
 
 function drawGrid(
