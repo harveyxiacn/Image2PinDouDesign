@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { applyAdjustmentsToGrid, hasAdjustments } from "../domain/adjustments";
 import { dropBorderWhite } from "../domain/background";
+import { isDynamicImportFailure, removeBackgroundFromSource, removeUniformBorderBackground } from "../domain/backgroundRemoval";
 import { BOARD_PRESETS, getBoardSize } from "../domain/boards";
 import { autoCropToContent, cropPixelSource, findOpaqueBounds, rectFromFractions } from "../domain/crop";
 import { ciede2000, hexToRgb } from "../domain/color";
@@ -145,9 +146,65 @@ describe("H7 outline", () => {
     ]);
   });
 
-  it("is a no-op for a fully opaque matrix (no border frame added)", () => {
-    const m = [["A1", "A1"], ["A1", "A1"]];
-    expect(outlineMatrix(m, "H7")).toEqual(m);
+  it("turns the outermost cells black when the subject touches the canvas edge", () => {
+    const m = [
+      ["A1", "A1", "A1"],
+      ["A1", "A1", "A1"],
+      ["A1", "A1", "A1"]
+    ];
+    expect(outlineMatrix(m, "H7")).toEqual([
+      ["H7", "H7", "H7"],
+      ["H7", "A1", "H7"],
+      ["H7", "H7", "H7"]
+    ]);
+  });
+});
+
+describe("uniform border background removal", () => {
+  it("recognizes stale dynamic-module errors used by the one-time reload recovery", () => {
+    expect(isDynamicImportFailure(new TypeError("Failed to fetch dynamically imported module: /assets/old.js"))).toBe(true);
+    expect(isDynamicImportFailure(new Error("network timeout"))).toBe(false);
+  });
+
+  it("keeps an already-transparent cutout unchanged without loading AI", async () => {
+    const data = new Uint8ClampedArray(3 * 3 * 4);
+    data.set([240, 120, 20, 255], (1 * 3 + 1) * 4);
+    const source = { width: 3, height: 3, data };
+    await expect(removeBackgroundFromSource(source)).resolves.toBe(source);
+  });
+
+  it("removes border-connected solid color while preserving an enclosed matching detail", () => {
+    const width = 7;
+    const height = 7;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < width * height; index += 1) {
+      data.set([10, 190, 225, 255], index * 4);
+    }
+    for (let y = 1; y <= 5; y += 1) {
+      for (let x = 1; x <= 5; x += 1) {
+        data.set([250, 180, 20, 255], (y * width + x) * 4);
+      }
+    }
+    data.set([10, 190, 225, 255], (3 * width + 3) * 4);
+
+    const output = removeUniformBorderBackground({ width, height, data });
+    expect(output).not.toBeNull();
+    expect(output!.data[3]).toBe(0);
+    expect(output!.data[(3 * width + 3) * 4 + 3]).toBe(255);
+    expect(output!.data[(2 * width + 2) * 4 + 3]).toBe(255);
+  });
+
+  it("defers to AI when border colors are not uniform", () => {
+    const width = 8;
+    const height = 8;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const value = (x + y) % 2 === 0 ? 0 : 255;
+        data.set([value, 255 - value, value, 255], (y * width + x) * 4);
+      }
+    }
+    expect(removeUniformBorderBackground({ width, height, data })).toBeNull();
   });
 });
 

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { RemovalProgress } from "../domain/backgroundRemoval";
 
@@ -20,6 +20,14 @@ export function CropDialog({ previewUrl, title, busy, progress, onCancel, onSubm
   const [rect, setRect] = useState<DragRect | null>(null);
   const [removeBg, setRemoveBg] = useState(true);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [busy, onCancel]);
 
   const relativePoint = (event: ReactPointerEvent) => {
     const frame = frameRef.current;
@@ -77,6 +85,15 @@ export function CropDialog({ previewUrl, title, busy, progress, onCancel, onSubm
   };
 
   const progressPercent = progress ? Math.round(progress.ratio * 100) : null;
+  const progressText = !progress
+    ? "正在分析背景…"
+    : progress.stage === "analyze"
+      ? "正在识别背景类型…"
+      : progress.stage === "solid-background"
+        ? "纯色背景已清理"
+        : progress.stage === "already-transparent"
+          ? "图片已有透明背景"
+          : `AI 正在抠图… ${progressPercent}%`;
 
   return (
     <div className="crop-overlay" role="dialog" aria-modal="true" aria-label="裁剪与抠图">
@@ -86,7 +103,7 @@ export function CropDialog({ previewUrl, title, busy, progress, onCancel, onSubm
           <button type="button" className="link-button" onClick={onCancel} disabled={busy}>关闭</button>
         </div>
 
-        <p className="muted">在图上拖一个框圈住一个主体（不框则用整张图）。勾选 AI 去背景会自动抠出主体并裁到主体边界。</p>
+        <p className="muted">在图上拖一个框圈住一个主体（不框则用整张图）。智能去背景会优先精准清除纯色底，复杂背景再使用 AI，并自动裁到主体边界。</p>
 
         <div
           className="crop-frame"
@@ -103,10 +120,19 @@ export function CropDialog({ previewUrl, title, busy, progress, onCancel, onSubm
             />
           )}
           {busy && (
-            <div className="crop-busy">
-              <span>{progress ? `AI 去背景… ${progressPercent}%` : "处理中…"}</span>
+            <div className="crop-busy" role="status" aria-live="polite">
+              <span>{progressText}</span>
               {progressPercent !== null && (
-                <div className="crop-progress"><div style={{ width: `${progressPercent}%` }} /></div>
+                <div
+                  className="crop-progress"
+                  role="progressbar"
+                  aria-label="去背景进度"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={progressPercent}
+                >
+                  <div style={{ width: `${progressPercent}%` }} />
+                </div>
               )}
             </div>
           )}
@@ -115,7 +141,7 @@ export function CropDialog({ previewUrl, title, busy, progress, onCancel, onSubm
         <div className="crop-controls">
           <label className="toggle">
             <input type="checkbox" checked={removeBg} onChange={(event) => setRemoveBg(event.target.checked)} disabled={busy} />
-            <span>AI 去背景（首次会下载模型，稍等片刻）</span>
+            <span>智能去背景（复杂背景首次会下载 AI 模型）</span>
           </label>
           <div className="button-row">
             <button type="button" className="button secondary" onClick={() => setRect(null)} disabled={busy || !rect}>清除选框</button>

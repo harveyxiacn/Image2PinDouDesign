@@ -215,7 +215,7 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
           checked={settings.outline}
           onChange={(event) => onChange({ ...settings, outline: event.target.checked })}
         />
-        <span>黑色描边（H7 勾勒主体边框）</span>
+        <span>黑色描边（H7，包含画布最外圈）</span>
       </label>
     </section>
   );

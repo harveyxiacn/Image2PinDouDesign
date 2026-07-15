@@ -40,10 +40,10 @@ MVP 包含：
 
 ## 部署
 
-构建产物 `dist/` 通过 `scp` 上传到 `root@136.175.83.102:/var/www/image2pindou/`。远端 Nginx 配置监听 80 端口并回退到 `index.html`。
+构建产物 `dist/` 通过 `scp` 上传到 `root@203.0.113.10:/var/www/image2pindou/`。远端 Nginx 配置监听 80 端口并回退到 `index.html`。
 
 ## 验证
 
 - Vitest 覆盖核心算法：颜色解析、最近色匹配、数量统计、项目汇总、CSV 导出。
 - `npm run build` 验证 TypeScript 与 Vite 构建。
-- 部署后用 `curl http://136.175.83.102/` 验证页面可访问。
+- 部署后用 `curl http://203.0.113.10/` 验证页面可访问。
