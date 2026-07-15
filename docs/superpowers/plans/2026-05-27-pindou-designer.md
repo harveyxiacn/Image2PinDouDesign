@@ -56,4 +56,4 @@
 - [ ] Upload `dist/` to `/var/www/image2pindou/`.
 - [ ] Install/update Nginx site config.
 - [ ] Reload Nginx.
-- [ ] Verify `http://203.0.113.20/`.
+- [ ] Verify `http://203.0.113.10/`.

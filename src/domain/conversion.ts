@@ -92,9 +92,9 @@ export const OUTLINE_CODE = "H7"; // 黑色
 export function outlineMatrix(matrix: BeadMatrix, code: string): BeadMatrix {
   const height = matrix.length;
   const width = height > 0 ? matrix[0].length : 0;
-  // 出界不算"空"：只对与真正透明格相邻的边缘描边；整幅不透明的图则不加边框。
+  // 画布外也算空：主体即使贴到板边，最外圈仍会变成黑色描边。
   const isEmpty = (x: number, y: number) =>
-    x >= 0 && y >= 0 && x < width && y < height && !matrix[y][x];
+    x < 0 || y < 0 || x >= width || y >= height || !matrix[y][x];
 
   return matrix.map((row, y) =>
     row.map((cell, x) => {

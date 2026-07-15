@@ -388,9 +388,9 @@ export default function App() {
                 className="button small"
                 onClick={() => setCropImageId(activeDesign.id)}
               >
-                ✂️ 裁剪 / AI 去背景
+                ✂️ 裁剪 / 智能去背景
               </button>
-              <small className="muted">框选一个主体 → 抠图 → 生成独立图纸；可对同一张总图重复操作拆出多个。</small>
+              <small className="muted">框选一个主体 → 智能去背景 → 生成独立图纸；可对同一张总图重复操作拆出多个。</small>
             </div>
           )}
 

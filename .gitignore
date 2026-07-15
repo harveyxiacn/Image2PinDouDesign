@@ -14,3 +14,6 @@ tsconfig.tsbuildinfo
 
 # Local verification screenshots & copied reference images (kept out of the repo)
 docs/samples/
+
+# Local regression fixtures may contain third-party reference artwork.
+testimage/

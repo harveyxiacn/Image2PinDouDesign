@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
@@ -36,8 +36,20 @@ export default defineConfig({
       }
     })
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        // ONNX runtime 的 .mjs 内容可能跨版本不变；加语义后缀可避免旧站点曾以错误
+        // MIME 缓存过同一 URL 时继续命中，同时仍保留 Rollup 的内容哈希。
+        assetFileNames: (assetInfo) => assetInfo.name?.endsWith(".mjs")
+          ? "assets/[name]-[hash]-module[extname]"
+          : "assets/[name]-[hash][extname]"
+      }
+    }
+  },
   test: {
     environment: "node",
-    globals: true
+    globals: true,
+    pool: "forks"
   }
 });
