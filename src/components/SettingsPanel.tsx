@@ -53,7 +53,7 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
   const hasAdjustment = adjustmentControls.some(({ key }) => settings.adjustments[key] !== 0);
 
   return (
-    <section className="panel" aria-labelledby="settings-title">
+    <section className="panel settings-panel" aria-labelledby="settings-title">
       <p className="eyebrow">Step 02</p>
       <h2 id="settings-title">生成设置</h2>
 

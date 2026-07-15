@@ -16,6 +16,7 @@ import {
   summarizeProject
 } from "../domain/conversion";
 import { countsToCsv } from "../domain/exporters";
+import { getHighResolutionCellSize } from "../domain/rendering";
 import { medianSmoothGrid } from "../domain/simplify";
 import type { PixelSource } from "../domain/types";
 
@@ -569,5 +570,11 @@ describe("project statistics and exports", () => {
       "R1,红色,#ff0000,3",
       "W1,白色,#ffffff,1"
     ]);
+  });
+
+  it("keeps mobile PNG labels large without exceeding the large-board pixel budget", () => {
+    expect(getHighResolutionCellSize({ boardWidth: 52, boardHeight: 52 })).toBe(32);
+    expect(getHighResolutionCellSize({ boardWidth: 156, boardHeight: 156 })).toBe(31);
+    expect(getHighResolutionCellSize({ boardWidth: 208, boardHeight: 208 })).toBe(23);
   });
 });

@@ -34,6 +34,13 @@ export function downloadDataUrl(fileName: string, dataUrl: string): void {
   triggerDownload(fileName, dataUrl);
 }
 
+export function downloadBlob(fileName: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  triggerDownload(fileName, url);
+  // Safari 需要下载动作开始后再释放 Object URL，立即释放可能得到空文件。
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
 function triggerDownload(fileName: string, url: string): void {
   const link = document.createElement("a");
   link.href = url;
