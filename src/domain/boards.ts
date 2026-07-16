@@ -2,6 +2,13 @@ import type { BoardPreset } from "./types";
 
 export const BOARD_PRESETS: BoardPreset[] = [
   {
+    id: "smart",
+    name: "智能尺寸（最多 52 针）",
+    width: 52,
+    height: 52,
+    description: "像素画自动恢复原始逻辑格数，照片则使用 52 针。"
+  },
+  {
     id: "52",
     name: "52 针",
     width: 52,

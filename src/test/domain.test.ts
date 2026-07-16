@@ -3,16 +3,19 @@ import { applyAdjustmentsToGrid, hasAdjustments } from "../domain/adjustments";
 import { dropBorderWhite } from "../domain/background";
 import { isDynamicImportFailure, removeBackgroundFromSource, removeUniformBorderBackground } from "../domain/backgroundRemoval";
 import { BOARD_PRESETS, getBoardSize } from "../domain/boards";
-import { autoCropToContent, cropPixelSource, findOpaqueBounds, rectFromFractions } from "../domain/crop";
+import { autoCropToContent, autoFramePixelSource, cropPixelSource, findOpaqueBounds, rectFromFractions } from "../domain/crop";
 import { ciede2000, hexToRgb } from "../domain/color";
 import type { Lab, SampledGrid } from "../domain/types";
 import {
   convertPixelSourceToDesign,
   countMatrixColors,
+  estimatePixelArtScale,
   findNearestPaletteColor,
+  isLikelyPixelArt,
   outlineMatrix,
   preparePalette,
   resampleToGrid,
+  resolveSmartGridSize,
   summarizeProject
 } from "../domain/conversion";
 import { countsToCsv } from "../domain/exporters";
@@ -134,11 +137,11 @@ describe("ignore white background (border flood-fill)", () => {
 });
 
 describe("H7 outline", () => {
-  it("replaces cells adjacent to transparent with the outline code, keeps interior", () => {
+  it("adds black outside a subject while preserving its original colored cell", () => {
     const m = [
+      [null, null, null],
       [null, "A1", null],
-      ["A1", "A1", "A1"],
-      [null, "A1", null]
+      [null, null, null]
     ];
     expect(outlineMatrix(m, "H7")).toEqual([
       [null, "H7", null],
@@ -278,6 +281,135 @@ describe("crop and auto-crop", () => {
     expect(out.height).toBe(1);
     expect(out.data[3]).toBe(255);
   });
+
+  it("auto-frames a colored subject before white margins consume bead resolution", () => {
+    const width = 10;
+    const height = 10;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < width * height; index += 1) {
+      data.set([255, 255, 255, 255], index * 4);
+    }
+    for (let y = 3; y <= 6; y += 1) {
+      for (let x = 4; x <= 5; x += 1) {
+        data.set([240, 90, 20, 255], (y * width + x) * 4);
+      }
+    }
+
+    const framed = autoFramePixelSource({ width, height, data }, { ignoreWhiteBg: true, paddingRatio: 0 });
+    expect(framed.width).toBe(4);
+    expect(framed.height).toBe(6);
+  });
+});
+
+describe("pixel-art detail recovery", () => {
+  const makeUpscaledChecker = (logicalWidth: number, logicalHeight: number, scale: number): PixelSource => {
+    const width = logicalWidth * scale;
+    const height = logicalHeight * scale;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const light = (Math.floor(x / scale) + Math.floor(y / scale)) % 2 === 0;
+        data.set(light ? [245, 170, 35, 255] : [10, 15, 22, 255], (y * width + x) * 4);
+      }
+    }
+    return { width, height, data };
+  };
+
+  it("recognizes hard-edged block art and recovers its logical pixel dimensions", () => {
+    const source = makeUpscaledChecker(12, 16, 6);
+    expect(isLikelyPixelArt(source)).toBe(true);
+    expect(estimatePixelArtScale(source)).toBe(6);
+    expect(resolveSmartGridSize(source, { boardWidth: 52, boardHeight: 52, smartSize: true }))
+      .toEqual({ width: 12, height: 16 });
+  });
+
+  it("still recognizes periodic pixel art with JPEG-like soft noise inside blocks", () => {
+    const source = makeUpscaledChecker(18, 24, 9);
+    for (let y = 0; y < source.height; y += 1) {
+      for (let x = 0; x < source.width; x += 1) {
+        if (x % 9 !== 4 && y % 9 !== 4) continue;
+        const index = (y * source.width + x) * 4;
+        source.data[index] = Math.min(255, source.data[index] + 15);
+        source.data[index + 1] = Math.min(255, source.data[index + 1] + 15);
+        source.data[index + 2] = Math.min(255, source.data[index + 2] + 15);
+      }
+    }
+
+    expect(isLikelyPixelArt(source)).toBe(true);
+    expect(estimatePixelArtScale(source)).toBe(9);
+  });
+
+  it("frames an Agumon-like 9px sprite into the expected 23 by 31 logical chart", () => {
+    const subject = makeUpscaledChecker(21, 29, 9);
+    const width = subject.width + 36;
+    const height = subject.height + 36;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < subject.height; y += 1) {
+      const sourceStart = y * subject.width * 4;
+      const targetStart = ((y + 18) * width + 18) * 4;
+      data.set(subject.data.subarray(sourceStart, sourceStart + subject.width * 4), targetStart);
+    }
+
+    const framed = autoCropToContent({ width, height, data });
+    expect(framed.width).toBe(205);
+    expect(framed.height).toBe(277);
+    expect(estimatePixelArtScale(framed)).toBe(9);
+    expect(resolveSmartGridSize(framed, { boardWidth: 52, boardHeight: 52, smartSize: true }))
+      .toEqual({ width: 23, height: 31 });
+  });
+
+  it("does not treat a high-resolution flat illustration as periodic pixel art", () => {
+    const width = 120;
+    const height = 100;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const subject = x >= 20 && x < 100 && y >= 20 && y < 80;
+        data.set(subject ? [245, 170, 35, 255] : [20, 190, 235, 255], (y * width + x) * 4);
+      }
+    }
+
+    expect(isLikelyPixelArt({ width, height, data })).toBe(false);
+  });
+
+  it("does not invent a larger grid when a small pixel-art source is already one pixel per bead", () => {
+    const width = 23;
+    const height = 31;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const light = x < 12 !== y < 16;
+        data.set(light ? [245, 170, 35, 255] : [10, 15, 22, 255], (y * width + x) * 4);
+      }
+    }
+    const source = { width, height, data };
+    expect(resolveSmartGridSize(source, { boardWidth: 52, boardHeight: 52, smartSize: true }))
+      .toEqual({ width: 23, height: 31 });
+  });
+
+  it("keeps area averaging available for photos while nearest mode preserves hard colors", () => {
+    const source: PixelSource = {
+      width: 2,
+      height: 2,
+      data: new Uint8ClampedArray([
+        0, 0, 0, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 0, 0, 0, 255
+      ])
+    };
+    const base = {
+      boardWidth: 1,
+      boardHeight: 1,
+      maxColors: "all" as const,
+      keepTransparent: false,
+      transparentThreshold: 10,
+      dither: false,
+      fit: "stretch" as const
+    };
+    const smooth = resampleToGrid(source, { ...base, sampling: "area" });
+    const crisp = resampleToGrid(source, { ...base, sampling: "nearest" });
+    expect(Math.round(smooth.cells[0]!.r)).toBe(128);
+    expect([0, 255]).toContain(Math.round(crisp.cells[0]!.r));
+  });
 });
 
 describe("color conversion", () => {
@@ -344,6 +476,55 @@ describe("image to bead design conversion", () => {
     }, palette);
 
     expect(countMatrixColors(design.matrix)).toEqual({ R1: 4 });
+  });
+
+  it("reserves a limited-palette slot for a rare high-contrast feature color", () => {
+    const detailPalette = preparePalette([
+      { code: "O", nameZh: "主体橙", hex: "#f0a020" },
+      { code: "S1", nameZh: "橙影1", hex: "#e89c24" },
+      { code: "S2", nameZh: "橙影2", hex: "#e09828" },
+      { code: "S3", nameZh: "橙影3", hex: "#d8942c" },
+      { code: "S4", nameZh: "橙影4", hex: "#d09030" },
+      { code: "S5", nameZh: "橙影5", hex: "#c88c34" },
+      { code: "S6", nameZh: "橙影6", hex: "#c08838" },
+      { code: "S7", nameZh: "橙影7", hex: "#b8843c" },
+      { code: "EYE", nameZh: "眼睛绿", hex: "#00b84a" }
+    ]);
+    const width = 12;
+    const height = 12;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < width * height; index += 1) {
+      data.set([240, 160, 32, 255], index * 4);
+    }
+    const shades = [
+      [232, 156, 36], [224, 152, 40], [216, 148, 44], [208, 144, 48],
+      [200, 140, 52], [192, 136, 56], [184, 132, 60]
+    ];
+    shades.forEach((rgb, shadeIndex) => {
+      const startX = (shadeIndex % 4) * 3;
+      const startY = Math.floor(shadeIndex / 4) * 3;
+      for (let y = startY; y < startY + 2; y += 1) {
+        for (let x = startX; x < startX + 2; x += 1) {
+          data.set([...rgb, 255], (y * width + x) * 4);
+        }
+      }
+    });
+    data.set([0, 184, 74, 255], (6 * width + 6) * 4);
+
+    const design = convertPixelSourceToDesign({ width, height, data }, "eye-detail.png", {
+      boardWidth: width,
+      boardHeight: height,
+      maxColors: 8,
+      keepTransparent: false,
+      transparentThreshold: 10,
+      dither: false,
+      fit: "stretch",
+      sampling: "nearest",
+      autoFrame: false
+    }, detailPalette);
+
+    expect(design.colorCounts.EYE).toBe(1);
+    expect(Object.keys(design.colorCounts)).toHaveLength(8);
   });
 });
 
