@@ -102,7 +102,7 @@ describe("mobile pattern preview", () => {
       toJSON: () => ({})
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "改单格" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始编辑图纸" }));
     fireEvent.change(screen.getByLabelText("绘制色号"), { target: { value: "A4" } });
     fireEvent.click(canvas, { clientX: 42, clientY: 42 });
     expect(onCellChange).toHaveBeenCalledWith(0, 0, "A4");
@@ -150,6 +150,9 @@ describe("local pattern drafts", () => {
     expect(screen.getByText("2 x 2")).toBeInTheDocument();
     expect(screen.getAllByText("A4").length).toBeGreaterThan(0);
     expect(screen.queryByText("NOT-A-CODE")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "图纸预览与编辑" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "编辑图纸" })).toHaveAttribute("href", "#pattern-editor");
+    expect(screen.getByRole("link", { name: "编辑" })).toHaveAttribute("href", "#pattern-editor");
 
     fireEvent.click(screen.getByRole("button", { name: "移除 亚古兽-本机草稿" }));
     expect(screen.queryByRole("button", { name: "亚古兽-本机草稿" })).not.toBeInTheDocument();

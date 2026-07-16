@@ -451,10 +451,59 @@ h2 {
   display: grid;
   gap: 12px;
   margin-bottom: 14px;
+  scroll-margin-top: 18px;
   padding: 12px;
   border: 1px solid #dbe3eb;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.94);
+}
+
+.editor-entry {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border: 1px solid #fecfc2;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #fff7f3, #fff);
+  box-shadow: 0 14px 30px rgba(239, 102, 75, 0.12);
+}
+
+.editor-entry > div,
+.workbench-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.editor-entry strong,
+.workbench-heading strong {
+  color: var(--ink);
+  font-size: 0.96rem;
+}
+
+.editor-entry small,
+.workbench-heading small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.editor-entry .button {
+  flex: 0 0 auto;
+}
+
+.workbench-heading {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #edf2f7;
+}
+
+.workbench-heading .button {
+  flex: 0 0 auto;
+  min-height: 42px;
 }
 
 .workbench-modes {
@@ -1122,6 +1171,18 @@ td:first-child {
     gap: 10px;
     margin-bottom: 10px;
     padding: 9px;
+  }
+
+  .editor-entry,
+  .workbench-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .editor-entry .button,
+  .workbench-heading .button {
+    width: 100%;
+    min-height: 46px;
   }
 
   .workbench-modes {

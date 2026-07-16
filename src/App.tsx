@@ -549,7 +549,9 @@ export default function App() {
 
       <nav className="mobile-nav" aria-label="手机端快捷导航">
         <a href="#upload-title"><span aria-hidden="true">＋</span>上传</a>
-        <a href="#preview-title"><span aria-hidden="true">▦</span>图纸</a>
+        <a href={activeDesign ? "#pattern-editor" : "#preview-title"}>
+          <span aria-hidden="true">✎</span>{activeDesign ? "编辑" : "图纸"}
+        </a>
         <a href="#settings-title"><span aria-hidden="true">⚙</span>设置</a>
         <a href="#download-pattern"><span aria-hidden="true">↓</span>保存</a>
       </nav>
@@ -595,6 +597,16 @@ export default function App() {
                 ✂️ 裁剪 / 智能去背景
               </button>
               <small className="muted">框选一个主体 → 智能去背景 → 生成独立图纸；可对同一张总图重复操作拆出多个。</small>
+            </div>
+          )}
+
+          {activeDesign && (
+            <div className="editor-entry" role="status">
+              <div>
+                <strong>图纸已经可以编辑</strong>
+                <small>逐格改色、取色、擦除，支持撤销和恢复。</small>
+              </div>
+              <a className="button primary" href="#pattern-editor"><span aria-hidden="true">✎ </span>编辑图纸</a>
             </div>
           )}
 

@@ -236,6 +236,16 @@ export function DesignPreview({
       : ZOOM_LEVELS[Math.max(0, ZOOM_LEVELS.indexOf(current) - 1)]);
   };
 
+  const selectMode = (nextMode: InteractionMode) => {
+    setMode(nextMode);
+    if (nextMode !== "view" && zoom === "fit") {
+      setZoom(1);
+    }
+    if (nextMode !== "view") {
+      window.requestAnimationFrame(() => viewportRef.current?.focus());
+    }
+  };
+
   const zoomLabel = zoom === "fit" ? "适应屏幕" : `${Math.round(zoom * 100)}%`;
   const canvasStyle = zoom === "fit" || canvasWidth === 0
     ? undefined
@@ -247,7 +257,7 @@ export function DesignPreview({
       <div className="section-header">
         <div>
           <p className="eyebrow">Step 03</p>
-          <h2 id="preview-title">图纸预览</h2>
+          <h2 id="preview-title">图纸预览与编辑</h2>
         </div>
         {design && <span className="badge">{design.boardWidth} x {design.boardHeight}</span>}
       </div>
@@ -262,11 +272,22 @@ export function DesignPreview({
           )}
           <figure className="canvas-shell">
             {onCellChange && (
-              <div className="pattern-workbench" aria-label="图纸编辑与制作工具">
+              <div id="pattern-editor" className="pattern-workbench" aria-label="图纸编辑与制作工具">
+                <div className="workbench-heading">
+                  <div>
+                    <strong>编辑图纸</strong>
+                    <small>选择工具后直接点击图纸格子，修改会立即反映到下载文件。</small>
+                  </div>
+                  {mode === "view" ? (
+                    <button type="button" className="button primary" onClick={() => selectMode("paint")}><span aria-hidden="true">✎ </span>开始编辑图纸</button>
+                  ) : (
+                    <button type="button" className="button secondary" onClick={() => selectMode("view")}><span aria-hidden="true">✓ </span>完成编辑</button>
+                  )}
+                </div>
                 <div className="workbench-modes" role="group" aria-label="图纸操作模式">
                   {([
-                    ["view", "查看"],
-                    ["paint", "改单格"],
+                    ["view", "查看成品"],
+                    ["paint", "逐格改色"],
                     ["pick", "取色"],
                     ["erase", "擦除"],
                     ["build", "制作打卡"]
@@ -276,7 +297,7 @@ export function DesignPreview({
                       type="button"
                       className={mode === value ? "active" : ""}
                       aria-pressed={mode === value}
-                      onClick={() => setMode(value)}
+                      onClick={() => selectMode(value)}
                     >
                       {label}
                     </button>
@@ -308,7 +329,7 @@ export function DesignPreview({
                         ))}
                       </select>
                     </label>
-                    <small>{mode === "pick" ? "点图纸中的颜色后自动切回改单格。" : "点一个格子即可替换；每步都能撤销。"}</small>
+                    <small>{mode === "pick" ? "点图纸中的颜色后自动切回逐格改色。" : "点一个格子即可替换；每步都能撤销。"}</small>
                   </div>
                 )}
 
@@ -380,7 +401,7 @@ export function DesignPreview({
       ) : (
         <div className="empty-state">
           <strong>还没有图纸</strong>
-          <span>上传图片后会在这里生成网格预览。</span>
+          <span>上传图片后会自动生成，并显示“编辑图纸”入口。</span>
         </div>
       )}
     </section>
