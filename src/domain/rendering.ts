@@ -6,6 +6,9 @@ export type RenderOptions = {
   boardLineEvery: number;
   // 绘制行列坐标尺与分块编号，便于多块拼接对位。默认关闭。
   showCoordinates?: boolean;
+  // 制作模式：淡化非当前色号，并在已完成格上画勾；仅用于交互预览。
+  focusCode?: string | null;
+  completedCells?: ReadonlySet<number>;
 };
 
 const PREFERRED_EXPORT_CELL_SIZE = 32;
@@ -40,7 +43,8 @@ export function renderDesignToCanvas(
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.textAlign = "center";
   context.textBaseline = "middle";
-  context.font = `700 ${Math.max(8, Math.floor(options.cellSize * 0.4))}px ui-monospace, monospace`;
+  const labelFont = `700 ${Math.max(8, Math.floor(options.cellSize * 0.4))}px ui-monospace, monospace`;
+  context.font = labelFont;
 
   const byCode = new Map(palette.map((color) => [color.code, color]));
 
@@ -64,6 +68,21 @@ export function renderDesignToCanvas(
         context.fillRect(left, top, options.cellSize, options.cellSize);
         context.fillStyle = "#e2e8f0";
         context.fillRect(left + 2, top + 2, options.cellSize - 4, options.cellSize - 4);
+      }
+
+      if (options.focusCode && code !== options.focusCode) {
+        context.fillStyle = "rgba(255, 255, 255, 0.82)";
+        context.fillRect(left, top, options.cellSize, options.cellSize);
+      }
+
+      const cellIndex = y * design.boardWidth + x;
+      if (code && options.completedCells?.has(cellIndex)) {
+        context.fillStyle = "rgba(255, 255, 255, 0.72)";
+        context.fillRect(left, top, options.cellSize, options.cellSize);
+        context.fillStyle = "#166534";
+        context.font = `900 ${Math.max(10, Math.floor(options.cellSize * 0.7))}px ui-sans-serif, system-ui, sans-serif`;
+        context.fillText("✓", left + options.cellSize / 2, top + options.cellSize / 2);
+        context.font = labelFont;
       }
     }
   }

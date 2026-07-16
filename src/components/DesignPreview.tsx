@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { renderDesignToCanvas } from "../domain/rendering";
 import type { BeadDesign, PaletteColor } from "../domain/types";
+import { designFingerprint, getColorBuildProgress } from "../domain/workbench";
 
 type DesignPreviewProps = {
   design?: BeadDesign;
@@ -9,11 +11,22 @@ type DesignPreviewProps = {
   originalUrl?: string;
   onDownload?: () => void;
   isDownloading?: boolean;
+  onCellChange?: (x: number, y: number, code: string | null) => void;
+  onMirror?: () => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
+  onReset?: () => void;
+  onSaveDraft?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  canReset?: boolean;
 };
 
 type PreviewZoom = "fit" | 1 | 1.5 | 2;
+type InteractionMode = "view" | "paint" | "pick" | "erase" | "build";
 
 const ZOOM_LEVELS: Array<Exclude<PreviewZoom, "fit">> = [1, 1.5, 2];
+const PROGRESS_PREFIX = "image2pindou:build-progress:v1:";
 
 export function DesignPreview({
   design,
@@ -21,17 +34,81 @@ export function DesignPreview({
   showLabels,
   originalUrl,
   onDownload,
-  isDownloading = false
+  isDownloading = false,
+  onCellChange,
+  onMirror,
+  onUndo,
+  onRedo,
+  onReset,
+  onSaveDraft,
+  canUndo = false,
+  canRedo = false,
+  canReset = false
 }: DesignPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const previousZoomRef = useRef<PreviewZoom>("fit");
+  const renderCellSizeRef = useRef(22);
   const [zoom, setZoom] = useState<PreviewZoom>("fit");
   const [canvasWidth, setCanvasWidth] = useState(0);
+  const [mode, setMode] = useState<InteractionMode>("view");
+  const [paintCode, setPaintCode] = useState("H7");
+  const [focusCode, setFocusCode] = useState("H7");
+  const [completedCells, setCompletedCells] = useState<Set<number>>(() => new Set());
+  const [draftSaved, setDraftSaved] = useState(false);
+
+  const byCode = useMemo(() => new Map(palette.map((color) => [color.code, color])), [palette]);
+  const designCodes = useMemo(() => Object.entries(design?.colorCounts ?? {})
+    .sort(([, leftCount], [, rightCount]) => rightCount - leftCount), [design?.colorCounts]);
+  const progressStorageKey = useMemo(
+    () => design ? `${PROGRESS_PREFIX}${designFingerprint(design)}` : "",
+    [design]
+  );
+  const buildProgress = useMemo(
+    () => design ? getColorBuildProgress(design, completedCells, focusCode) : { total: 0, completed: 0, remaining: 0 },
+    [completedCells, design, focusCode]
+  );
 
   useEffect(() => {
     setZoom("fit");
+    setMode("view");
+    setDraftSaved(false);
+    const defaultCode = designCodes[0]?.[0] ?? "H7";
+    setPaintCode(defaultCode);
+    setFocusCode(defaultCode);
+  // 只在切换图纸时重置工具；改单格仍沿用当前画笔。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [design?.id]);
+
+  useEffect(() => {
+    setDraftSaved(false);
+  }, [progressStorageKey]);
+
+  useEffect(() => {
+    if (designCodes.length === 0) {
+      return;
+    }
+    if (!designCodes.some(([code]) => code === focusCode)) {
+      setFocusCode(designCodes[0][0]);
+    }
+  }, [designCodes, focusCode]);
+
+  useEffect(() => {
+    if (!design || !progressStorageKey || typeof window === "undefined") {
+      setCompletedCells(new Set());
+      return;
+    }
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(progressStorageKey) ?? "[]") as unknown;
+      const maximum = design.boardWidth * design.boardHeight;
+      const restored = Array.isArray(parsed)
+        ? parsed.filter((value): value is number => Number.isInteger(value) && value >= 0 && value < maximum)
+        : [];
+      setCompletedCells(new Set(restored));
+    } catch {
+      setCompletedCells(new Set());
+    }
+  }, [design?.boardHeight, design?.boardWidth, progressStorageKey]);
 
   useEffect(() => {
     if (!design || !canvasRef.current) {
@@ -39,18 +116,20 @@ export function DesignPreview({
     }
 
     // 预览先适应卡片宽度；切到 100% 后保留足够的单格像素，手机可滚动逐格查看。
-    // 大板按总像素预算降低单格尺寸，避免移动端 Canvas 占用过多内存。
     const cellCount = design.boardWidth * design.boardHeight;
     const cellSize = Math.max(16, Math.min(22, Math.floor(Math.sqrt(16_000_000 / cellCount))));
+    renderCellSizeRef.current = cellSize;
 
     renderDesignToCanvas(canvasRef.current, design, palette, {
       cellSize,
       showLabels,
       boardLineEvery: 52,
-      showCoordinates: true
+      showCoordinates: true,
+      focusCode: mode === "build" ? focusCode : null,
+      completedCells: mode === "build" ? completedCells : undefined
     });
     setCanvasWidth(canvasRef.current.width);
-  }, [design, palette, showLabels]);
+  }, [completedCells, design, focusCode, mode, palette, showLabels]);
 
   useEffect(() => {
     const previousZoom = previousZoomRef.current;
@@ -70,28 +149,98 @@ export function DesignPreview({
     return () => window.cancelAnimationFrame(frame);
   }, [zoom]);
 
-  const zoomIn = () => {
-    setZoom((current) => {
-      if (current === "fit") {
-        return ZOOM_LEVELS[0];
-      }
-      return ZOOM_LEVELS[Math.min(ZOOM_LEVELS.indexOf(current) + 1, ZOOM_LEVELS.length - 1)];
-    });
+  const persistCompleted = (next: Set<number>) => {
+    setCompletedCells(next);
+    if (!progressStorageKey || typeof window === "undefined") {
+      return;
+    }
+    try {
+      window.localStorage.setItem(progressStorageKey, JSON.stringify(Array.from(next)));
+    } catch {
+      // 隐私模式或配额不足时仍保留当前会话进度。
+    }
   };
 
-  const zoomOut = () => {
-    setZoom((current) => {
-      if (current === "fit" || current === ZOOM_LEVELS[0]) {
-        return "fit";
+  const toggleCompletedCell = (cellIndex: number) => {
+    const next = new Set(completedCells);
+    if (next.has(cellIndex)) {
+      next.delete(cellIndex);
+    } else {
+      next.add(cellIndex);
+    }
+    persistCompleted(next);
+  };
+
+  const markFocusedColorComplete = () => {
+    if (!design) return;
+    const next = new Set(completedCells);
+    for (let y = 0; y < design.boardHeight; y += 1) {
+      for (let x = 0; x < design.boardWidth; x += 1) {
+        if (design.matrix[y]?.[x] === focusCode) {
+          next.add(y * design.boardWidth + x);
+        }
       }
-      return ZOOM_LEVELS[Math.max(0, ZOOM_LEVELS.indexOf(current) - 1)];
-    });
+    }
+    persistCompleted(next);
+  };
+
+  const clearBuildProgress = () => persistCompleted(new Set());
+
+  const handleCanvasClick = (event: ReactMouseEvent<HTMLCanvasElement>) => {
+    if (!design || mode === "view") {
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+
+    const cellSize = renderCellSizeRef.current;
+    const gutterX = canvas.width - design.boardWidth * cellSize;
+    const gutterY = canvas.height - design.boardHeight * cellSize;
+    const intrinsicX = (event.clientX - bounds.left) * canvas.width / bounds.width;
+    const intrinsicY = (event.clientY - bounds.top) * canvas.height / bounds.height;
+    const x = Math.floor((intrinsicX - gutterX) / cellSize);
+    const y = Math.floor((intrinsicY - gutterY) / cellSize);
+    if (x < 0 || y < 0 || x >= design.boardWidth || y >= design.boardHeight) return;
+
+    const currentCode = design.matrix[y]?.[x] ?? null;
+    if (mode === "pick") {
+      if (currentCode) {
+        setPaintCode(currentCode);
+        setMode("paint");
+      }
+      return;
+    }
+    if (mode === "build") {
+      if (currentCode === focusCode) {
+        toggleCompletedCell(y * design.boardWidth + x);
+      }
+      return;
+    }
+    if (mode === "paint") {
+      onCellChange?.(x, y, paintCode);
+    } else if (mode === "erase") {
+      onCellChange?.(x, y, null);
+    }
+  };
+
+  const zoomIn = () => {
+    setZoom((current) => current === "fit"
+      ? ZOOM_LEVELS[0]
+      : ZOOM_LEVELS[Math.min(ZOOM_LEVELS.indexOf(current) + 1, ZOOM_LEVELS.length - 1)]);
+  };
+  const zoomOut = () => {
+    setZoom((current) => current === "fit" || current === ZOOM_LEVELS[0]
+      ? "fit"
+      : ZOOM_LEVELS[Math.max(0, ZOOM_LEVELS.indexOf(current) - 1)]);
   };
 
   const zoomLabel = zoom === "fit" ? "适应屏幕" : `${Math.round(zoom * 100)}%`;
   const canvasStyle = zoom === "fit" || canvasWidth === 0
     ? undefined
     : { width: `${Math.round(canvasWidth * zoom)}px` };
+  const paintColor = byCode.get(paintCode);
 
   return (
     <section className="panel preview-panel" aria-labelledby="preview-title">
@@ -100,9 +249,7 @@ export function DesignPreview({
           <p className="eyebrow">Step 03</p>
           <h2 id="preview-title">图纸预览</h2>
         </div>
-        {design && (
-          <span className="badge">{design.boardWidth} x {design.boardHeight}</span>
-        )}
+        {design && <span className="badge">{design.boardWidth} x {design.boardHeight}</span>}
       </div>
 
       {design ? (
@@ -114,8 +261,86 @@ export function DesignPreview({
             </figure>
           )}
           <figure className="canvas-shell">
+            {onCellChange && (
+              <div className="pattern-workbench" aria-label="图纸编辑与制作工具">
+                <div className="workbench-modes" role="group" aria-label="图纸操作模式">
+                  {([
+                    ["view", "查看"],
+                    ["paint", "改单格"],
+                    ["pick", "取色"],
+                    ["erase", "擦除"],
+                    ["build", "制作打卡"]
+                  ] as Array<[InteractionMode, string]>).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={mode === value ? "active" : ""}
+                      aria-pressed={mode === value}
+                      onClick={() => setMode(value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="workbench-actions">
+                  <button type="button" className="button small" onClick={onUndo} disabled={!canUndo}>撤销</button>
+                  <button type="button" className="button small" onClick={onRedo} disabled={!canRedo}>重做</button>
+                  <button type="button" className="button small" onClick={onMirror}>水平镜像</button>
+                  <button type="button" className="button small" onClick={onReset} disabled={!canReset}>恢复生成结果</button>
+                  <button
+                    type="button"
+                    className="button small"
+                    onClick={() => { onSaveDraft?.(); setDraftSaved(true); }}
+                  >
+                    {draftSaved ? "已保存到本机 ✓" : "保存本机草稿"}
+                  </button>
+                </div>
+
+                {(mode === "paint" || mode === "pick") && (
+                  <div className="workbench-detail">
+                    <span className="workbench-swatch" style={{ backgroundColor: paintColor?.hex ?? "#000" }} />
+                    <label>
+                      <span>{mode === "pick" ? "当前取色" : "绘制色号"}</span>
+                      <select aria-label="绘制色号" value={paintCode} onChange={(event) => setPaintCode(event.target.value)}>
+                        {palette.map((color) => (
+                          <option key={color.code} value={color.code}>{color.code} · {color.nameZh}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <small>{mode === "pick" ? "点图纸中的颜色后自动切回改单格。" : "点一个格子即可替换；每步都能撤销。"}</small>
+                  </div>
+                )}
+
+                {mode === "erase" && <p className="workbench-hint">点一个格子清成空格；可随时撤销。</p>}
+
+                {mode === "build" && (
+                  <div className="build-assistant">
+                    <label>
+                      <span>当前制作色号</span>
+                      <select aria-label="制作聚焦色号" value={focusCode} onChange={(event) => setFocusCode(event.target.value)}>
+                        {designCodes.map(([code, count]) => (
+                          <option key={code} value={code}>{code} · {byCode.get(code)?.nameZh ?? code} · {count} 颗</option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="build-progress-copy">
+                      <strong>{focusCode} 剩余 {buildProgress.remaining} 颗</strong>
+                      <span>{buildProgress.completed} / {buildProgress.total}</span>
+                    </div>
+                    <progress value={buildProgress.completed} max={Math.max(1, buildProgress.total)} aria-label={`${focusCode} 制作进度`} />
+                    <div className="workbench-actions">
+                      <button type="button" className="button small" onClick={markFocusedColorComplete}>此色全部完成</button>
+                      <button type="button" className="button small" onClick={clearBuildProgress} disabled={completedCells.size === 0}>清空全部进度</button>
+                    </div>
+                    <small>非当前色会淡化；点当前色格子打勾。进度自动保存在本机。</small>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="canvas-toolbar">
-              <span>放大后可滑动查看每格色号与坐标</span>
+              <span>{mode === "view" ? "放大后可滑动查看每格色号与坐标" : "当前可直接点格子操作"}</span>
               <div className="zoom-controls" role="group" aria-label="图纸缩放">
                 <button type="button" onClick={zoomOut} disabled={zoom === "fit"} aria-label="缩小图纸">−</button>
                 <button type="button" className="zoom-value" onClick={() => setZoom("fit")}>{zoomLabel}</button>
@@ -124,15 +349,16 @@ export function DesignPreview({
             </div>
             <div
               ref={viewportRef}
-              className={`canvas-viewport ${zoom === "fit" ? "is-fit" : "is-zoomed"}`}
+              className={`canvas-viewport ${zoom === "fit" ? "is-fit" : "is-zoomed"} ${mode !== "view" ? "is-interactive" : ""}`}
               tabIndex={0}
-              aria-label="可缩放和滚动的拼豆图纸"
-              onDoubleClick={() => setZoom((current) => current === "fit" ? 1 : "fit")}
+              aria-label="可缩放、编辑和标记进度的拼豆图纸"
+              onDoubleClick={() => { if (mode === "view") setZoom((current) => current === "fit" ? 1 : "fit"); }}
             >
               <canvas
                 ref={canvasRef}
                 style={canvasStyle}
                 aria-label={`${design.fileName} 拼豆图纸`}
+                onClick={handleCanvasClick}
               />
             </div>
             <div className="canvas-footer">
