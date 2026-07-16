@@ -18,6 +18,8 @@ The hard part of a bead-pattern tool isn't the UI — it's **mapping millions of
 - **Two-tier color matching for speed.** A cheap squared ΔE\*76 pre-selects palette candidates; the expensive CIEDE2000 runs only on the finalists per cell. This keeps full-image conversion interactive.
 - **Off-main-thread conversion.** The pixelize → match → count pipeline runs in a **Web Worker** (`src/worker/conversion.worker.ts`) so the UI never blocks on large images.
 - **Smart in-browser background removal.** Uniform borders use a fast edge-connected color key that preserves fine details; complex scenes fall back to `@imgly/background-removal` (WASM).
+- **Pixel-art grid recovery.** Repeated edge periods are detected before resampling, so an enlarged 23×31 sprite returns to its real logical grid instead of being stretched into a blurry, duplicate-filled 52×52 chart. Photos and illustrations keep area-filtered scaling.
+- **Saliency-aware palette limiting.** High-contrast rare colors such as eyes and highlights reserve a small part of the color budget instead of losing every tie to large background/body regions.
 - **Real palette.** Color codes come from the MARD bead color chart (source attributed in `src/domain/palette.ts`); the matcher works against actual purchasable bead colors, and the stats table tells you exactly how many of each to buy.
 
 Everything runs **client-side** — images never leave the device, and the built output is a static bundle you can host anywhere.
@@ -27,10 +29,10 @@ Everything runs **client-side** — images never leave the device, and the built
 ## Features
 
 - Upload one or many images; crop / scale / center.
-- Board sizes: 52‑pin, 104‑pin, or custom width × height (with multi-board tiling).
-- Automatic pixelation + perceptual color matching to the bead palette.
+- Smart logical size (up to 52 pins), fixed 52/104-pin boards, or custom width × height (with multi-board tiling).
+- Automatic subject framing, pixel-art/photo sampling selection, and perceptual color matching to the bead palette.
 - Per-image and whole-**project** color/count aggregation (buy-once shopping list).
-- Adjustments: brightness/contrast, color simplification (merge near colors), dithering, black-edge enhancement.
+- Adjustments: brightness/contrast, color simplification, dithering, and non-destructive outer H7 black outlining.
 - Palette panel, stats table, grid/color-code preview with zoom.
 - Exports of the chart and counts.
 - Installable **PWA** (works offline once loaded).

@@ -26,13 +26,15 @@ type UploadedImage = {
 const STORAGE_KEY = "image2pindou:inventory:v1";
 
 const initialSettings: UiSettings = {
-  boardPreset: "52",
+  boardPreset: "smart",
   customWidth: 64,
   customHeight: 64,
   maxColors: 24,
   keepTransparent: true,
   showLabels: true,
   fit: "contain",
+  sampling: "auto",
+  autoFrame: true,
   dither: false,
   adjustments: { brightness: 0, contrast: 0, saturation: 0 },
   smooth: 0,
@@ -172,6 +174,9 @@ export default function App() {
             transparentThreshold: 10,
             dither: settings.dither,
             fit: settings.fit,
+            sampling: settings.sampling,
+            autoFrame: settings.autoFrame,
+            smartSize: settings.boardPreset === "smart",
             allowedColorCodes: allowedCodesArray,
             adjustments: settings.adjustments,
             smooth: settings.smooth,
@@ -193,12 +198,15 @@ export default function App() {
     boardSize.width,
     images,
     settings.adjustments,
+    settings.autoFrame,
+    settings.boardPreset,
     settings.dither,
     settings.fit,
     settings.ignoreWhiteBg,
     settings.keepTransparent,
     settings.maxColors,
     settings.outline,
+    settings.sampling,
     settings.smooth
   ]);
 

@@ -41,6 +41,7 @@ export type BoardPreset = {
 export type MaxColors = 1 | 8 | 16 | 24 | 32 | 48 | "all";
 
 export type FitMode = "contain" | "cover" | "stretch";
+export type SamplingMode = "auto" | "nearest" | "area";
 
 // 量化前的图像微调，取值区间 [-100, 100]，0 表示不变。
 export type ImageAdjustments = {
@@ -63,11 +64,17 @@ export type ConversionSettings = {
   transparentThreshold: number;
   dither: boolean;
   fit?: FitMode;
+  // 自动识别像素画并保持硬边；nearest 强制锐利采样，area 适合照片的面积平均。
+  sampling?: SamplingMode;
+  // 在缩放到板面之前裁掉透明/近白留白，让有效针数尽量用于主体细节。
+  autoFrame?: boolean;
+  // 像素画按原始逻辑像素输出，不为铺满板面制造重复豆位；boardWidth/Height 作为上限。
+  smartSize?: boolean;
   allowedColorCodes?: string[] | null;
   adjustments?: ImageAdjustments;
   // 色块简化/降噪强度：0=关，1/2=中值滤波遍数（量化前合并碎噪点为干净色块）。
   smooth?: number;
-  // 用黑色 H7 给主体边缘勾边（与透明相邻的格子换成 H7），便于摆边框。
+  // 用黑色 H7 向主体外侧扩一格勾边；优先保留原边缘颜色和细肢。
   outline?: boolean;
   // 忽略白色背景：与边缘相连的近白色格清成空格，不计入用豆、不标色号（主体内部白保留）。
   ignoreWhiteBg?: boolean;

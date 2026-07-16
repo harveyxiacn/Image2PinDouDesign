@@ -1,6 +1,7 @@
 import { applyAdjustmentsToGrid } from "./adjustments";
 import { dropBorderWhite } from "./background";
 import { ciede2000, clamp, labDistanceSquared, rgbToLab } from "./color";
+import { autoFramePixelSource } from "./crop";
 import { preparePalette } from "./palette";
 import { medianSmoothGrid } from "./simplify";
 import type {
@@ -64,45 +65,57 @@ export function convertPixelSourceToDesign(
   settings: ConversionSettings,
   palette: PaletteColor[]
 ): BeadDesign {
-  const sampled = resampleToGrid(source, settings);
-  const cleaned = settings.ignoreWhiteBg ? dropBorderWhite(sampled) : sampled;
-  const adjusted = settings.adjustments ? applyAdjustmentsToGrid(cleaned, settings.adjustments) : cleaned;
-  const grid = settings.smooth ? medianSmoothGrid(adjusted, settings.smooth) : adjusted;
-  const activePalette = selectActivePalette(grid, settings, palette);
-  const quantized = settings.dither
-    ? quantizeWithFloydSteinberg(grid, activePalette, settings)
-    : quantize(grid, activePalette, settings);
-  const matrix = settings.outline ? outlineMatrix(quantized, OUTLINE_CODE) : quantized;
+  const framedSource = settings.autoFrame === false
+    ? source
+    : autoFramePixelSource(source, { ignoreWhiteBg: settings.ignoreWhiteBg });
+  const outputSize = resolveSmartGridSize(framedSource, settings);
+  const effectiveSettings: ConversionSettings = {
+    ...settings,
+    boardWidth: outputSize.width,
+    boardHeight: outputSize.height
+  };
+  const sampled = resampleToGrid(framedSource, effectiveSettings);
+  const cleaned = effectiveSettings.ignoreWhiteBg ? dropBorderWhite(sampled) : sampled;
+  const adjusted = effectiveSettings.adjustments
+    ? applyAdjustmentsToGrid(cleaned, effectiveSettings.adjustments)
+    : cleaned;
+  const grid = effectiveSettings.smooth ? medianSmoothGrid(adjusted, effectiveSettings.smooth) : adjusted;
+  const activePalette = selectActivePalette(grid, effectiveSettings, palette);
+  const quantized = effectiveSettings.dither
+    ? quantizeWithFloydSteinberg(grid, activePalette, effectiveSettings)
+    : quantize(grid, activePalette, effectiveSettings);
+  const matrix = effectiveSettings.outline ? outlineMatrix(quantized, OUTLINE_CODE) : quantized;
 
   return {
     id: createDesignId(fileName),
     fileName,
-    boardWidth: settings.boardWidth,
-    boardHeight: settings.boardHeight,
+    boardWidth: effectiveSettings.boardWidth,
+    boardHeight: effectiveSettings.boardHeight,
     matrix,
     colorCounts: countMatrixColors(matrix),
-    settings
+    settings: effectiveSettings
   };
 }
 
 export const OUTLINE_CODE = "H7"; // 黑色
 
-// 给主体描边：任意非空格子，只要 4-邻域里有空格（透明/出界），就换成黑色 H7，
-// 形成沿主体轮廓与内部空洞的 1 格黑边。仅在有透明区域（如抠图后）时有意义。
+// 给主体描边：优先把主体外侧空格扩成 H7，保留原本边缘的颜色和细肢；
+// 如果主体已经贴到画布边缘、无法向外扩，才把画布边缘格改为 H7。
+// 已经存在的 H7 外圈不会再膨胀一层。
 export function outlineMatrix(matrix: BeadMatrix, code: string): BeadMatrix {
   const height = matrix.length;
   const width = height > 0 ? matrix[0].length : 0;
-  // 画布外也算空：主体即使贴到板边，最外圈仍会变成黑色描边。
-  const isEmpty = (x: number, y: number) =>
-    x < 0 || y < 0 || x >= width || y >= height || !matrix[y][x];
+  const at = (x: number, y: number) =>
+    x < 0 || y < 0 || x >= width || y >= height ? null : matrix[y][x];
 
   return matrix.map((row, y) =>
     row.map((cell, x) => {
-      if (!cell) {
-        return cell;
+      if (cell) {
+        const touchesCanvasEdge = x === 0 || y === 0 || x === width - 1 || y === height - 1;
+        return touchesCanvasEdge && cell !== code ? code : cell;
       }
-      const edge = isEmpty(x - 1, y) || isEmpty(x + 1, y) || isEmpty(x, y - 1) || isEmpty(x, y + 1);
-      return edge ? code : cell;
+      const neighbors = [at(x - 1, y), at(x + 1, y), at(x, y - 1), at(x, y + 1)];
+      return neighbors.some((neighbor) => Boolean(neighbor && neighbor !== code)) ? code : null;
     })
   );
 }
@@ -140,6 +153,8 @@ export function resampleToGrid(source: PixelSource, settings: ConversionSettings
   const th = settings.boardHeight;
   const sw = source.width;
   const sh = source.height;
+  const sampling = settings.sampling ?? "area";
+  const useNearest = sampling === "nearest" || (sampling === "auto" && isLikelyPixelArt(source));
 
   let scaleX: number;
   let scaleY: number;
@@ -180,11 +195,214 @@ export function resampleToGrid(source: PixelSource, settings: ConversionSettings
       const srcTop = dy * scaleY;
       const srcRight = (dx + 1) * scaleX;
       const srcBottom = (dy + 1) * scaleY;
-      cells[ty * tw + tx] = sampleArea(source, srcLeft, srcTop, srcRight, srcBottom);
+      cells[ty * tw + tx] = useNearest
+        ? sampleNearest(source, (srcLeft + srcRight) / 2, (srcTop + srcBottom) / 2)
+        : sampleArea(source, srcLeft, srcTop, srcRight, srcBottom);
     }
   }
 
   return { width: tw, height: th, cells };
+}
+
+function sampleNearest(source: PixelSource, x: number, y: number): SampledCell {
+  const px = Math.max(0, Math.min(source.width - 1, Math.floor(x)));
+  const py = Math.max(0, Math.min(source.height - 1, Math.floor(y)));
+  const index = (py * source.width + px) * 4;
+  return {
+    r: source.data[index],
+    g: source.data[index + 1],
+    b: source.data[index + 2],
+    a: source.data[index + 3]
+  };
+}
+
+const pixelArtLikelihoodCache = new WeakMap<PixelSource, boolean>();
+const pixelArtScaleCache = new WeakMap<PixelSource, number | null>();
+
+// 像素画通常同时具备：大面积相邻像素完全/近似相同、颜色种类较少、
+// 色块边界是跳变而非渐变。大图还必须能检测到稳定网格周期，避免把带大块
+// 纯色背景的普通插画误判成像素画；JPEG 压缩产生的少量软边不会阻断识别。
+export function isLikelyPixelArt(source: PixelSource): boolean {
+  const cached = pixelArtLikelihoodCache.get(source);
+  if (cached !== undefined) {
+    return cached;
+  }
+  if (source.width < 2 || source.height < 2) {
+    pixelArtLikelihoodCache.set(source, true);
+    return true;
+  }
+
+  const targetSamples = 24_000;
+  const stride = Math.max(1, Math.floor(Math.sqrt((source.width * source.height) / targetSamples)));
+  const coarseColors = new Set<number>();
+  let evaluated = 0;
+  let flat = 0;
+  let soft = 0;
+  let hard = 0;
+
+  const inspectPair = (leftIndex: number, rightIndex: number) => {
+    if (source.data[leftIndex + 3] < 32 || source.data[rightIndex + 3] < 32) {
+      return;
+    }
+    const distance = Math.max(
+      Math.abs(source.data[leftIndex] - source.data[rightIndex]),
+      Math.abs(source.data[leftIndex + 1] - source.data[rightIndex + 1]),
+      Math.abs(source.data[leftIndex + 2] - source.data[rightIndex + 2])
+    );
+    evaluated += 1;
+    if (distance <= 10) {
+      flat += 1;
+    } else if (distance >= 42) {
+      hard += 1;
+    } else {
+      soft += 1;
+    }
+  };
+
+  for (let y = 0; y < source.height; y += stride) {
+    for (let x = 0; x < source.width; x += stride) {
+      const index = (y * source.width + x) * 4;
+      if (source.data[index + 3] >= 32) {
+        coarseColors.add(
+          (source.data[index] >> 5) << 6 |
+          (source.data[index + 1] >> 5) << 3 |
+          (source.data[index + 2] >> 5)
+        );
+      }
+      if (x + 1 < source.width) inspectPair(index, index + 4);
+      if (y + 1 < source.height) inspectPair(index, index + source.width * 4);
+    }
+  }
+
+  if (evaluated < 24) {
+    const result = coarseColors.size <= 32;
+    pixelArtLikelihoodCache.set(source, result);
+    return result;
+  }
+  const flatRatio = flat / evaluated;
+  const hardRatio = hard / evaluated;
+  const blockLike = coarseColors.size <= 128 && flatRatio >= 0.48 && hardRatio >= 0.015 && hard > soft * 0.45;
+  const needsPeriodicProof = source.width > 64 || source.height > 64;
+  const result = blockLike && (!needsPeriodicProof || estimatePixelArtScale(source) !== null);
+  pixelArtLikelihoodCache.set(source, result);
+  return result;
+}
+
+export function estimatePixelArtScale(source: PixelSource): number | null {
+  if (pixelArtScaleCache.has(source)) {
+    return pixelArtScaleCache.get(source) ?? null;
+  }
+  const maxPeriod = Math.min(32, Math.floor(Math.min(source.width, source.height) / 8));
+  if (maxPeriod < 2) {
+    pixelArtScaleCache.set(source, null);
+    return null;
+  }
+
+  const vertical = new Float64Array(source.width);
+  const horizontal = new Float64Array(source.height);
+  const rowStride = Math.max(1, Math.floor(source.height / 256));
+  const columnStride = Math.max(1, Math.floor(source.width / 256));
+
+  const edgeWeight = (leftIndex: number, rightIndex: number) => {
+    const leftOpaque = source.data[leftIndex + 3] >= 32;
+    const rightOpaque = source.data[rightIndex + 3] >= 32;
+    if (leftOpaque !== rightOpaque) {
+      return 255;
+    }
+    if (!leftOpaque) {
+      return 0;
+    }
+    const distance = Math.max(
+      Math.abs(source.data[leftIndex] - source.data[rightIndex]),
+      Math.abs(source.data[leftIndex + 1] - source.data[rightIndex + 1]),
+      Math.abs(source.data[leftIndex + 2] - source.data[rightIndex + 2])
+    );
+    return distance >= 30 ? distance : 0;
+  };
+
+  for (let y = 0; y < source.height; y += rowStride) {
+    for (let x = 1; x < source.width; x += 1) {
+      const right = (y * source.width + x) * 4;
+      vertical[x] += edgeWeight(right - 4, right);
+    }
+  }
+  for (let x = 0; x < source.width; x += columnStride) {
+    for (let y = 1; y < source.height; y += 1) {
+      const bottom = (y * source.width + x) * 4;
+      horizontal[y] += edgeWeight(bottom - source.width * 4, bottom);
+    }
+  }
+
+  const activeVerticalEdges = Array.from(vertical).filter((score) => score > 0).length;
+  const activeHorizontalEdges = Array.from(horizontal).filter((score) => score > 0).length;
+  if (activeVerticalEdges < 4 || activeHorizontalEdges < 4) {
+    pixelArtScaleCache.set(source, null);
+    return null;
+  }
+
+  const alignment = (scores: Float64Array, period: number) => {
+    const buckets = new Float64Array(period);
+    let total = 0;
+    for (let position = 1; position < scores.length; position += 1) {
+      const score = scores[position];
+      buckets[position % period] += score;
+      total += score;
+    }
+    if (total <= 0) {
+      return 0;
+    }
+    let strongest = 0;
+    for (const score of buckets) {
+      if (score > strongest) strongest = score;
+    }
+    return strongest / total;
+  };
+
+  const candidates: Array<{ period: number; raw: number; gain: number }> = [];
+  let bestGain = 0;
+  for (let period = 2; period <= maxPeriod; period += 1) {
+    const xAlignment = alignment(vertical, period);
+    const yAlignment = alignment(horizontal, period);
+    const raw = Math.sqrt(xAlignment * yAlignment);
+    const gain = raw - 1 / period;
+    if (gain > bestGain) bestGain = gain;
+    candidates.push({ period, raw, gain });
+  }
+
+  const credible = candidates.filter(({ raw, gain }) =>
+    raw >= 0.34 && gain >= Math.max(0.12, bestGain * 0.65));
+  const result = credible.length > 0 ? credible[credible.length - 1].period : null;
+  pixelArtScaleCache.set(source, result);
+  return result;
+}
+
+export function resolveSmartGridSize(
+  source: PixelSource,
+  settings: Pick<ConversionSettings, "boardWidth" | "boardHeight" | "smartSize">
+): { width: number; height: number } {
+  const maximum = { width: settings.boardWidth, height: settings.boardHeight };
+  if (!settings.smartSize || !isLikelyPixelArt(source)) {
+    return maximum;
+  }
+
+  const scale = estimatePixelArtScale(source);
+  let logicalWidth: number;
+  let logicalHeight: number;
+  if (scale) {
+    logicalWidth = Math.max(1, Math.round(source.width / scale));
+    logicalHeight = Math.max(1, Math.round(source.height / scale));
+  } else if (source.width <= maximum.width && source.height <= maximum.height) {
+    logicalWidth = source.width;
+    logicalHeight = source.height;
+  } else {
+    return maximum;
+  }
+
+  const shrink = Math.min(1, maximum.width / logicalWidth, maximum.height / logicalHeight);
+  return {
+    width: Math.max(8, Math.min(maximum.width, Math.round(logicalWidth * shrink))),
+    height: Math.max(8, Math.min(maximum.height, Math.round(logicalHeight * shrink)))
+  };
 }
 
 function sampleArea(source: PixelSource, left: number, top: number, right: number, bottom: number): SampledCell {
@@ -271,24 +489,81 @@ function selectActivePalette(
   }
 
   const counts: Record<string, number> = {};
-  for (const cell of grid.cells) {
+  const nearestCodes: Array<string | null> = new Array(grid.cells.length).fill(null);
+  for (let index = 0; index < grid.cells.length; index += 1) {
+    const cell = grid.cells[index];
     if (!isOpaqueEnough(cell, settings)) {
       continue;
     }
     const nearestCode = findNearestCodeByLab(rgbToLab(cell), pool);
+    nearestCodes[index] = nearestCode;
     counts[nearestCode] = (counts[nearestCode] ?? 0) + 1;
   }
 
   const byCode = new Map(pool.map((color) => [color.code, color]));
-  const sorted = Object.entries(counts)
-    .sort(([leftCode, leftCount], [rightCode, rightCount]) => {
+  const entries = Object.entries(counts);
+  if (entries.length <= settings.maxColors) {
+    return entries
+      .sort(([leftCode], [rightCode]) =>
+        (byCode.get(leftCode)?.sortOrder ?? 0) - (byCode.get(rightCode)?.sortOrder ?? 0))
+      .map(([code]) => byCode.get(code))
+      .filter((color): color is PaletteColor => Boolean(color));
+  }
+
+  const byFrequency = entries.sort(([leftCode, leftCount], [rightCode, rightCount]) => {
       if (rightCount !== leftCount) {
         return rightCount - leftCount;
       }
       return (byCode.get(leftCode)?.sortOrder ?? 0) - (byCode.get(rightCode)?.sortOrder ?? 0);
+    });
+
+  // 少量高对比色往往是眼睛、高光、徽章等识别关键。为它们保留少数名额，
+  // 避免纯按数量限色时被大面积肤色/背景色挤掉。
+  const detailSlots = settings.maxColors >= 8
+    ? Math.min(4, Math.max(1, Math.floor(settings.maxColors / 8)))
+    : 0;
+  const frequentCodes = byFrequency
+    .slice(0, settings.maxColors - detailSlots)
+    .map(([code]) => code);
+  const selected = new Set(frequentCodes);
+  const detailScores: Record<string, number> = {};
+
+  const scorePair = (leftIndex: number, rightIndex: number) => {
+    const leftCode = nearestCodes[leftIndex];
+    const rightCode = nearestCodes[rightIndex];
+    const left = grid.cells[leftIndex];
+    const right = grid.cells[rightIndex];
+    if (!leftCode || !rightCode || leftCode === rightCode || !left || !right) {
+      return;
+    }
+    const contrast = Math.hypot(left.r - right.r, left.g - right.g, left.b - right.b);
+    const score = Math.min(6, contrast / 42);
+    detailScores[leftCode] = (detailScores[leftCode] ?? 0) + score;
+    detailScores[rightCode] = (detailScores[rightCode] ?? 0) + score;
+  };
+
+  for (let y = 0; y < grid.height; y += 1) {
+    for (let x = 0; x < grid.width; x += 1) {
+      const index = y * grid.width + x;
+      if (x + 1 < grid.width) scorePair(index, index + 1);
+      if (y + 1 < grid.height) scorePair(index, index + grid.width);
+    }
+  }
+
+  const detailCodes = byFrequency
+    .filter(([code]) => !selected.has(code))
+    .sort(([leftCode, leftCount], [rightCode, rightCount]) => {
+      const scoreDifference = (detailScores[rightCode] ?? 0) - (detailScores[leftCode] ?? 0);
+      if (scoreDifference !== 0) {
+        return scoreDifference;
+      }
+      return rightCount - leftCount;
     })
-    .slice(0, settings.maxColors)
-    .map(([code]) => byCode.get(code))
+    .slice(0, detailSlots)
+    .map(([code]) => code);
+
+  const sorted = [...frequentCodes, ...detailCodes]
+    .map((code) => byCode.get(code))
     .filter((color): color is PaletteColor => Boolean(color));
 
   return sorted.length > 0 ? sorted : pool.slice(0, settings.maxColors);
