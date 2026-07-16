@@ -22,6 +22,12 @@ import { countsToCsv } from "../domain/exporters";
 import { getHighResolutionCellSize } from "../domain/rendering";
 import { medianSmoothGrid } from "../domain/simplify";
 import type { PixelSource } from "../domain/types";
+import {
+  designFingerprint,
+  getColorBuildProgress,
+  mirrorDesignHorizontally,
+  replaceDesignCell
+} from "../domain/workbench";
 
 const palette = preparePalette([
   { code: "K1", nameZh: "黑色", hex: "#000000" },
@@ -525,6 +531,49 @@ describe("image to bead design conversion", () => {
 
     expect(design.colorCounts.EYE).toBe(1);
     expect(Object.keys(design.colorCounts)).toHaveLength(8);
+  });
+});
+
+describe("pattern workbench", () => {
+  const design = {
+    id: "workbench",
+    fileName: "agumon.png",
+    boardWidth: 3,
+    boardHeight: 2,
+    matrix: [["A1", "H7", null], ["B1", "A1", "H7"]],
+    colorCounts: { A1: 2, H7: 2, B1: 1 }
+  };
+
+  it("recolors and erases one cell while keeping counts exact and source immutable", () => {
+    const recolored = replaceDesignCell(design, 0, 0, "B1");
+    expect(recolored.matrix).toEqual([["B1", "H7", null], ["B1", "A1", "H7"]]);
+    expect(recolored.colorCounts).toEqual({ A1: 1, H7: 2, B1: 2 });
+    expect(design.matrix[0][0]).toBe("A1");
+
+    const erased = replaceDesignCell(recolored, 1, 1, null);
+    expect(erased.colorCounts).toEqual({ H7: 2, B1: 2 });
+    expect(replaceDesignCell(erased, -1, 0, "A1")).toBe(erased);
+  });
+
+  it("mirrors the chart horizontally without changing bead totals", () => {
+    const mirrored = mirrorDesignHorizontally(design);
+    expect(mirrored.matrix).toEqual([[null, "H7", "A1"], ["H7", "A1", "B1"]]);
+    expect(mirrored.colorCounts).toEqual(design.colorCounts);
+    expect(design.matrix[0]).toEqual(["A1", "H7", null]);
+  });
+
+  it("uses a stable fingerprint that changes when the pattern changes", () => {
+    const samePatternWithAnotherId = { ...design, id: "another-id" };
+    expect(designFingerprint(design)).toBe(designFingerprint(samePatternWithAnotherId));
+    expect(designFingerprint(replaceDesignCell(design, 0, 0, "B1"))).not.toBe(designFingerprint(design));
+  });
+
+  it("calculates remaining beads for the focused build color", () => {
+    const completed = new Set([0, 4]);
+    expect(getColorBuildProgress(design, completed, "A1"))
+      .toEqual({ total: 2, completed: 2, remaining: 0 });
+    expect(getColorBuildProgress(design, completed, "H7"))
+      .toEqual({ total: 2, completed: 0, remaining: 2 });
   });
 });
 

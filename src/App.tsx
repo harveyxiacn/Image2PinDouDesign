@@ -7,13 +7,14 @@ import { StatsTable } from "./components/StatsTable";
 import { UploadPanel } from "./components/UploadPanel";
 import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
 import { getBoardSize } from "./domain/boards";
-import { summarizeProject } from "./domain/conversion";
+import { countMatrixColors, summarizeProject } from "./domain/conversion";
 import { autoCropToContent, cropPixelSource, rectFromFractions } from "./domain/crop";
 import { countsToCsv, downloadBlob, downloadTextFile, openPrintableSheet } from "./domain/exporters";
 import { imageFileToPixelSource, pixelSourceToDataUrl } from "./domain/image";
 import { MARD_PALETTE } from "./domain/palette";
 import { getHighResolutionCellSize, renderDesignToBlob } from "./domain/rendering";
 import type { BeadDesign, PixelSource } from "./domain/types";
+import { mirrorDesignHorizontally, replaceDesignCell } from "./domain/workbench";
 import type { ConversionRequest, ConversionResponse } from "./worker/conversion.worker";
 
 type UploadedImage = {
@@ -24,6 +25,9 @@ type UploadedImage = {
 };
 
 const STORAGE_KEY = "image2pindou:inventory:v1";
+const DRAFTS_STORAGE_KEY = "image2pindou:design-drafts:v1";
+const MAX_LOCAL_DRAFTS = 6;
+const VALID_COLOR_CODES = new Set(MARD_PALETTE.map((color) => color.code));
 
 const initialSettings: UiSettings = {
   boardPreset: "smart",
@@ -47,6 +51,13 @@ type InventoryState = {
   allowedCodes: Set<string>;
 };
 
+type EditHistory = {
+  past: BeadDesign[];
+  future: BeadDesign[];
+};
+
+const MAX_EDIT_HISTORY = 30;
+
 function loadInventory(): InventoryState {
   if (typeof window === "undefined") {
     return { restrictEnabled: false, allowedCodes: new Set() };
@@ -66,22 +77,72 @@ function loadInventory(): InventoryState {
   }
 }
 
+function loadDesignDrafts(): BeadDesign[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(DRAFTS_STORAGE_KEY) ?? "[]") as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.slice(0, MAX_LOCAL_DRAFTS).map((candidate, index): BeadDesign | null => {
+      if (!candidate || typeof candidate !== "object") return null;
+      const value = candidate as Partial<BeadDesign>;
+      const width = Number(value.boardWidth);
+      const height = Number(value.boardHeight);
+      if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 208 || height > 208) {
+        return null;
+      }
+      const rawMatrix = Array.isArray(value.matrix) ? value.matrix : [];
+      const matrix = Array.from({ length: height }, (_, y) => {
+        const rawRow = Array.isArray(rawMatrix[y]) ? rawMatrix[y] : [];
+        return Array.from({ length: width }, (_, x) => {
+          const code = rawRow[x];
+          return typeof code === "string" && VALID_COLOR_CODES.has(code) ? code : null;
+        });
+      });
+      return {
+        id: typeof value.id === "string" && value.id.startsWith("draft-") ? value.id : `draft-restored-${index}-${Date.now()}`,
+        fileName: typeof value.fileName === "string" ? value.fileName : `本机草稿 ${index + 1}`,
+        boardWidth: width,
+        boardHeight: height,
+        matrix,
+        colorCounts: countMatrixColors(matrix),
+        settings: value.settings
+      };
+    }).filter((draft): draft is BeadDesign => Boolean(draft));
+  } catch {
+    return [];
+  }
+}
+
+function persistDesignDrafts(drafts: BeadDesign[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(drafts.slice(0, MAX_LOCAL_DRAFTS)));
+  } catch {
+    // 隐私模式或存储空间不足时不阻断编辑。
+  }
+}
+
 export default function App() {
   const [settings, setSettings] = useState<UiSettings>(initialSettings);
   const [images, setImages] = useState<UploadedImage[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isConverting, setIsConverting] = useState(false);
-  const [designs, setDesigns] = useState<BeadDesign[]>([]);
+  const [designs, setDesigns] = useState<BeadDesign[]>(loadDesignDrafts);
   const [error, setError] = useState<string | null>(null);
   const [inventory, setInventory] = useState<InventoryState>(() => loadInventory());
   const [cropImageId, setCropImageId] = useState<string | null>(null);
   const [cropBusy, setCropBusy] = useState(false);
   const [cropProgress, setCropProgress] = useState<RemovalProgress | null>(null);
   const [isExportingPng, setIsExportingPng] = useState(false);
+  const [editHistories, setEditHistories] = useState<Record<string, EditHistory>>({});
 
   const workerRef = useRef<Worker | null>(null);
   const generationRef = useRef(0);
+  const generatedDesignsRef = useRef(new Map<string, BeadDesign>());
+  const localDraftsRef = useRef<BeadDesign[]>(designs);
+  const localDraftIdsRef = useRef(new Set(designs.map((design) => design.id)));
+  const savedCopyIdsRef = useRef(new Map<string, string>());
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -125,7 +186,9 @@ export default function App() {
     }
     if (images.length === 0) {
       generationRef.current += 1;
-      setDesigns([]);
+      setDesigns((current) => current.filter((design) => localDraftIdsRef.current.has(design.id)));
+      setEditHistories({});
+      generatedDesignsRef.current.clear();
       setIsConverting(false);
       return;
     }
@@ -142,6 +205,13 @@ export default function App() {
       }
       if ("design" in data) {
         results.set(data.id, data.design);
+        generatedDesignsRef.current.set(data.id, data.design);
+        setEditHistories((current) => {
+          if (!current[data.id]) return current;
+          const next = { ...current };
+          delete next[data.id];
+          return next;
+        });
       } else {
         pending -= 1;
         setError(data.error);
@@ -150,7 +220,10 @@ export default function App() {
         }
         return;
       }
-      setDesigns(images.map((image) => results.get(image.id)).filter((design): design is BeadDesign => Boolean(design)));
+      setDesigns((current) => [
+        ...current.filter((design) => localDraftIdsRef.current.has(design.id)),
+        ...images.map((image) => results.get(image.id)).filter((design): design is BeadDesign => Boolean(design))
+      ]);
       pending -= 1;
       if (pending <= 0) {
         setIsConverting(false);
@@ -219,6 +292,98 @@ export default function App() {
   const currentDesignCodes = useMemo(() => {
     return activeDesign ? new Set(Object.keys(activeDesign.colorCounts)) : new Set<string>();
   }, [activeDesign]);
+  const activeHistory = activeDesign ? editHistories[activeDesign.id] : undefined;
+  const activeGeneratedDesign = activeDesign ? generatedDesignsRef.current.get(activeDesign.id) : undefined;
+
+  const persistDraftMutation = (nextDesign: BeadDesign) => {
+    if (!localDraftIdsRef.current.has(nextDesign.id)) return;
+    localDraftsRef.current = localDraftsRef.current.map((draft) => draft.id === nextDesign.id ? nextDesign : draft);
+    persistDesignDrafts(localDraftsRef.current);
+  };
+
+  const commitActiveDesign = (nextDesign: BeadDesign) => {
+    if (!activeDesign || nextDesign === activeDesign) {
+      return;
+    }
+    setEditHistories((current) => {
+      const history = current[activeDesign.id] ?? { past: [], future: [] };
+      return {
+        ...current,
+        [activeDesign.id]: {
+          past: [...history.past.slice(-(MAX_EDIT_HISTORY - 1)), activeDesign],
+          future: []
+        }
+      };
+    });
+    persistDraftMutation(nextDesign);
+    setDesigns((current) => current.map((design) => design.id === activeDesign.id ? nextDesign : design));
+  };
+
+  const editActiveCell = (x: number, y: number, code: string | null) => {
+    if (!activeDesign) return;
+    commitActiveDesign(replaceDesignCell(activeDesign, x, y, code));
+  };
+
+  const mirrorActiveDesign = () => {
+    if (!activeDesign) return;
+    commitActiveDesign(mirrorDesignHorizontally(activeDesign));
+  };
+
+  const undoActiveEdit = () => {
+    if (!activeDesign || !activeHistory || activeHistory.past.length === 0) return;
+    const previous = activeHistory.past[activeHistory.past.length - 1];
+    setEditHistories((current) => ({
+      ...current,
+      [activeDesign.id]: {
+        past: activeHistory.past.slice(0, -1),
+        future: [activeDesign, ...activeHistory.future].slice(0, MAX_EDIT_HISTORY)
+      }
+    }));
+    persistDraftMutation(previous);
+    setDesigns((current) => current.map((design) => design.id === activeDesign.id ? previous : design));
+  };
+
+  const redoActiveEdit = () => {
+    if (!activeDesign || !activeHistory || activeHistory.future.length === 0) return;
+    const nextDesign = activeHistory.future[0];
+    setEditHistories((current) => ({
+      ...current,
+      [activeDesign.id]: {
+        past: [...activeHistory.past, activeDesign].slice(-MAX_EDIT_HISTORY),
+        future: activeHistory.future.slice(1)
+      }
+    }));
+    persistDraftMutation(nextDesign);
+    setDesigns((current) => current.map((design) => design.id === activeDesign.id ? nextDesign : design));
+  };
+
+  const resetActiveDesign = () => {
+    if (activeGeneratedDesign) {
+      commitActiveDesign(activeGeneratedDesign);
+    }
+  };
+
+  const saveActiveDraft = () => {
+    if (!activeDesign) return;
+    const existingDraftId = localDraftIdsRef.current.has(activeDesign.id)
+      ? activeDesign.id
+      : savedCopyIdsRef.current.get(activeDesign.id);
+    const draftId = existingDraftId ?? `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const snapshot: BeadDesign = {
+      ...activeDesign,
+      id: draftId,
+      fileName: localDraftIdsRef.current.has(activeDesign.id)
+        ? activeDesign.fileName
+        : `${stripExtension(activeDesign.fileName)}-本机草稿`
+    };
+    const withoutCurrent = localDraftsRef.current.filter((draft) => draft.id !== draftId);
+    localDraftsRef.current = [snapshot, ...withoutCurrent].slice(0, MAX_LOCAL_DRAFTS);
+    localDraftIdsRef.current = new Set(localDraftsRef.current.map((draft) => draft.id));
+    savedCopyIdsRef.current.set(activeDesign.id, draftId);
+    persistDesignDrafts(localDraftsRef.current);
+    setDesigns((current) => current.filter((design) =>
+      !design.id.startsWith("draft-") || localDraftIdsRef.current.has(design.id)));
+  };
 
   const handleFiles = async (files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -246,7 +411,19 @@ export default function App() {
     }
   };
 
-  const removeImage = (id: string) => {
+  const removeDesign = (id: string) => {
+    generatedDesignsRef.current.delete(id);
+    if (localDraftIdsRef.current.has(id)) {
+      localDraftsRef.current = localDraftsRef.current.filter((draft) => draft.id !== id);
+      localDraftIdsRef.current.delete(id);
+      persistDesignDrafts(localDraftsRef.current);
+    }
+    setEditHistories((current) => {
+      if (!current[id]) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
     setImages((current) => {
       const target = current.find((image) => image.id === id);
       if (target) {
@@ -254,6 +431,7 @@ export default function App() {
       }
       return current.filter((image) => image.id !== id);
     });
+    setDesigns((current) => current.filter((design) => design.id !== id));
     setActiveId((current) => (current === id ? null : current));
   };
 
@@ -398,7 +576,7 @@ export default function App() {
                     type="button"
                     className="design-tab-remove"
                     aria-label={`移除 ${design.fileName}`}
-                    onClick={() => removeImage(design.id)}
+                    onClick={() => removeDesign(design.id)}
                   >
                     ×
                   </button>
@@ -427,6 +605,15 @@ export default function App() {
             originalUrl={activeOriginalUrl}
             onDownload={activeDesign ? () => { void exportActivePng(); } : undefined}
             isDownloading={isExportingPng}
+            onCellChange={activeDesign ? editActiveCell : undefined}
+            onMirror={activeDesign ? mirrorActiveDesign : undefined}
+            onUndo={activeDesign ? undoActiveEdit : undefined}
+            onRedo={activeDesign ? redoActiveEdit : undefined}
+            onReset={activeDesign ? resetActiveDesign : undefined}
+            onSaveDraft={activeDesign ? saveActiveDraft : undefined}
+            canUndo={Boolean(activeHistory?.past.length)}
+            canRedo={Boolean(activeHistory?.future.length)}
+            canReset={Boolean(activeGeneratedDesign && activeGeneratedDesign !== activeDesign)}
           />
 
           <div className="stats-grid">

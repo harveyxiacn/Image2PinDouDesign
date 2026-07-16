@@ -31,6 +31,9 @@ Everything runs **client-side** — images never leave the device, and the built
 - Upload one or many images; crop / scale / center.
 - Smart logical size (up to 52 pins), fixed 52/104-pin boards, or custom width × height (with multi-board tiling).
 - Automatic subject framing, pixel-art/photo sampling selection, and perceptual color matching to the bead palette.
+- Post-generation pattern workbench: recolor/erase individual cells, pick colors, undo/redo up to 30 steps, reset, and mirror horizontally.
+- Mobile build assistant: focus one color, tap cells complete, see remaining bead counts, and resume progress from local storage.
+- Save up to six private local pattern drafts and continue editing/exporting after a refresh, with no account or upload.
 - Per-image and whole-**project** color/count aggregation (buy-once shopping list).
 - Adjustments: brightness/contrast, color simplification, dithering, and non-destructive outer H7 black outlining.
 - Palette panel, stats table, grid/color-code preview with zoom.
