@@ -31,6 +31,22 @@ function checkerSource(size: number): PixelSource {
   return { width: size, height: size, data };
 }
 
+/** 高对比黑白竖线：模拟轮廓密集的线稿。 */
+function highContrastLineArtSource(size: number): PixelSource {
+  const data = new Uint8ClampedArray(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const offset = (y * size + x) * 4;
+      const value = x % 2 === 0 ? 0 : 255;
+      data[offset] = value;
+      data[offset + 1] = value;
+      data[offset + 2] = value;
+      data[offset + 3] = 255;
+    }
+  }
+  return { width: size, height: size, data };
+}
+
 /** 水平黑白渐变：每列灰度递增，相邻像素变化很小，模拟照片的连续渐变。 */
 function gradientSource(width: number, height: number): PixelSource {
   const data = new Uint8ClampedArray(width * height * 4);
@@ -55,7 +71,8 @@ const pixelArtAnalysis: ImageAnalysis = {
   colorfulness: 0.3,
   uniqueColorEstimate: 10,
   transparencyRatio: 0,
-  edgeSharpness: 0.95
+  edgeSharpness: 0.95,
+  strongOutlineRatio: 0
 };
 
 const photoAnalysis: ImageAnalysis = {
@@ -66,7 +83,8 @@ const photoAnalysis: ImageAnalysis = {
   colorfulness: 0.5,
   uniqueColorEstimate: 200,
   transparencyRatio: 0,
-  edgeSharpness: 0.05
+  edgeSharpness: 0.05,
+  strongOutlineRatio: 0
 };
 
 describe("analyzeSource", () => {
@@ -193,6 +211,20 @@ describe("recommendSettings", () => {
   it("shrinks the color budget for very simple pixel art", () => {
     expect(recommendSettings({ ...pixelArtAnalysis, uniqueColorEstimate: 5 }).maxColors).toBe(8);
     expect(recommendSettings({ ...pixelArtAnalysis, uniqueColorEstimate: 20 }).maxColors).toBe(24);
+  });
+
+  it("recommends outline for high-contrast line art", () => {
+    const analysis = analyzeSource(highContrastLineArtSource(8));
+    expect(analysis.kind).toBe("pixel-art");
+    expect(analysis.strongOutlineRatio).toBeGreaterThan(0.4);
+    expect(recommendSettings(analysis).outline).toBe(true);
+  });
+
+  it("does not recommend outline for a smooth photo gradient", () => {
+    const analysis = analyzeSource(gradientSource(32, 32));
+    expect(analysis.kind).toBe("photo");
+    expect(analysis.strongOutlineRatio).toBe(0);
+    expect(recommendSettings(analysis).outline).toBe(false);
   });
 });
 

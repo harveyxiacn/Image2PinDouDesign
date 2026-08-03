@@ -65,7 +65,7 @@ const maxColorOptions: Array<{ label: string; value: MaxColors }> = [
 
 const fitOptions: Array<{ label: string; value: FitMode; hint: string }> = [
   { label: "完整显示", value: "contain", hint: "保持原图比例，空白区当作空格" },
-  { label: "填满裁剪", value: "cover", hint: "保持原图比例，超出板的部分被裁掉" },
+  { label: "填满裁剪", value: "cover", hint: "保持原图比例，围绕自动或手动焦点裁掉超出部分" },
   { label: "拉伸", value: "stretch", hint: "强制铺满整块板，可能变形" }
 ];
 

@@ -23,7 +23,7 @@
 **常用命令：**
 
 ```bash
-npm test                 # Vitest 全量回归（当前 8 个文件 / 142 用例）
+npm test                 # Vitest 全量回归（当前 11 个文件 / 156 用例）
 npm run build            # tsc -b + vite build → dist/（PWA 预缓存）
 npm run dev              # 本地开发 http://localhost:5173
 npm run preview          # 本地预览构建产物（默认 4173 端口）
@@ -99,9 +99,21 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 - **部署 #2**：备份 `/var/www/image2pindou.backup-20260803-025904`，nginx -t + reload 通过，线上新 hash 资源全部 200。
 - **文档**：`deepseek-version-optimize.md` 已标记 2.1/2.3/2.4/5.1(partial)/5.6 完成并补部署记录。
 
+## 5. 2026-08-02（深夜）· 第三轮优化（Round 3，本地完成待发布）
+
+- **范围**：完成 `docs/ITERATIONS.md` 的下一轮 A（1.4 焦点控制、1.9 统计口径、2.5 自动描边建议），并在真实移动端视口回归中修复统计面板横向溢出。
+- **内容**：
+  - 焦点裁剪：新增 `src/domain/focus.ts`，以边缘/饱和度/透明边界/中心先验估计自动焦点；`computeCropRect` 按黄金分割附近锚定 cover 窗口并做边界钳制。裁剪对话框支持点击设置焦点、方向键微调、恢复自动焦点、手动框选优先，并预览最终裁剪窗口；转换器的 cover 采样同步改为焦点驱动。
+  - 统计口径：新增 `src/domain/projectStats.ts`，项目总用豆支持“全部 / 项目 / 草稿”筛选；首页计数、库存差缺、采购 CSV 均跟随当前口径，界面明确显示来源与图纸数。
+  - 智能描边：`src/domain/recommend.ts` 增加强对比轮廓占比分析，高轮廓且非照片的素材会在智能推荐中建议开启描边，照片保持关闭。
+  - 移动端：统计筛选沿用 8px 间距与 44px 触控高度；为主列和统计面板补齐 `minmax(0, 1fr)` / `min-width: 0`，消除窄屏表格撑宽页面的问题。
+- **质量门**：`npm test` **156/156 通过**（11 文件）；`npm run build` 成功（PWA 预缓存 13 项 / 405.60 KiB）。
+- **浏览器冒烟**（Codex in-app Browser，本地 production preview）：上传真实 JPG、切换 cover、打开焦点裁剪、鼠标/键盘调整与恢复自动焦点、项目/草稿统计联动均通过；375px 视口无横向溢出，统计筛选按钮高度 44px，**零 console error**。
+- **发布状态**：本轮尚未 commit / push / 部署；生产站仍为 Round 2，避免把本地验证结果误记为线上版本。
+
 ---
 
-## 5. 发布记录汇总
+## 6. 发布记录汇总
 
 | # | 时间（本地） | 对应 commit | 服务器备份目录 | 结果 |
 |---|---|---|---|---|
@@ -110,9 +122,10 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 
 > 时间说明：本地为 America/Vancouver；服务器备份目录名使用服务器时钟（UTC+ 时区），二者相差数小时属正常。
 
-## 6. 测试基线演进
+## 7. 测试基线演进
 
 | 日期 | 测试文件数 | 用例数 | 说明 |
 |---|---|---|---|
 | 2026-08-02（Round 1 后） | 3 | 71 | domain / app / design-preview |
 | 2026-08-02 晚（Round 2 后） | 8 | 142 | + recommend(18) / shortfall(20) / drafts(10) / conversion-coordinator(14) / exporters(9) |
+| 2026-08-02 深夜（Round 3，本地） | 11 | 156 | + focus(7) / project-stats(4) / crop-dialog(1) / recommend 自动描边回归(2) |

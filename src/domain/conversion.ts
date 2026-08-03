@@ -2,6 +2,7 @@ import { applyAdjustmentsToGrid } from "./adjustments";
 import { dropBorderWhite } from "./background";
 import { clamp, findNearestCodeByLab, findNearestPaletteColor, rgbToLab } from "./color";
 import { autoFramePixelSource } from "./crop";
+import { computeCropRect, estimateFocus } from "./focus";
 import { preparePalette } from "./palette";
 import { medianSmoothGrid } from "./simplify";
 import type {
@@ -246,6 +247,8 @@ export function resampleToGrid(source: PixelSource, settings: ConversionSettings
   let offsetY: number;
   let scaledW: number;
   let scaledH: number;
+  let sourceOffsetX = 0;
+  let sourceOffsetY = 0;
 
   if (fit === "stretch") {
     scaleX = sw / tw;
@@ -254,10 +257,18 @@ export function resampleToGrid(source: PixelSource, settings: ConversionSettings
     offsetY = 0;
     scaledW = tw;
     scaledH = th;
+  } else if (fit === "cover") {
+    const crop = computeCropRect(source, estimateFocus(source), "cover", tw / th);
+    scaleX = crop.width / tw;
+    scaleY = crop.height / th;
+    offsetX = 0;
+    offsetY = 0;
+    scaledW = tw;
+    scaledH = th;
+    sourceOffsetX = crop.x;
+    sourceOffsetY = crop.y;
   } else {
-    const factor = fit === "cover"
-      ? Math.max(tw / sw, th / sh)
-      : Math.min(tw / sw, th / sh);
+    const factor = Math.min(tw / sw, th / sh);
     scaleX = 1 / factor;
     scaleY = 1 / factor;
     scaledW = sw * factor;
@@ -275,10 +286,10 @@ export function resampleToGrid(source: PixelSource, settings: ConversionSettings
         cells[ty * tw + tx] = null;
         continue;
       }
-      const srcLeft = dx * scaleX;
-      const srcTop = dy * scaleY;
-      const srcRight = (dx + 1) * scaleX;
-      const srcBottom = (dy + 1) * scaleY;
+      const srcLeft = sourceOffsetX + dx * scaleX;
+      const srcTop = sourceOffsetY + dy * scaleY;
+      const srcRight = sourceOffsetX + (dx + 1) * scaleX;
+      const srcBottom = sourceOffsetY + (dy + 1) * scaleY;
       cells[ty * tw + tx] = useNearest
         ? sampleNearest(source, (srcLeft + srcRight) / 2, (srcTop + srcBottom) / 2)
         : sampleArea(source, srcLeft, srcTop, srcRight, srcBottom);
