@@ -1,19 +1,20 @@
 import { useMemo, useState } from "react";
+import { addOwnedForCodes, setOwnedCount } from "../domain/shortfall";
 import type { PaletteColor } from "../domain/types";
 import { IconChevronDown, IconSearch } from "./icons";
 
 type PalettePanelProps = {
   palette: PaletteColor[];
   restrictEnabled: boolean;
-  allowedCodes: Set<string>;
+  ownedCounts: Record<string, number>;
   currentDesignCodes?: Set<string>;
-  onChange: (next: { restrictEnabled: boolean; allowedCodes: Set<string> }) => void;
+  onChange: (next: { restrictEnabled: boolean; ownedCounts: Record<string, number> }) => void;
 };
 
 export function PalettePanel({
   palette,
   restrictEnabled,
-  allowedCodes,
+  ownedCounts,
   currentDesignCodes,
   onChange
 }: PalettePanelProps) {
@@ -32,41 +33,71 @@ export function PalettePanel({
     );
   }, [palette, query]);
 
+  const isOwned = (code: string): boolean => (ownedCounts[code] ?? 0) > 0;
+  const registeredCount = Object.values(ownedCounts).filter((count) => count > 0).length;
+
+  /** 每个色号至少登记为 1 颗（全选）。 */
+  const allOwnedOne = (): Record<string, number> => {
+    const next: Record<string, number> = {};
+    for (const color of palette) {
+      next[color.code] = 1;
+    }
+    return next;
+  };
+
   const toggleColor = (code: string) => {
     if (!restrictEnabled) {
       return;
     }
-    const next = new Set(allowedCodes);
-    if (next.has(code)) {
-      next.delete(code);
-    } else {
-      next.add(code);
-    }
-    onChange({ restrictEnabled, allowedCodes: next });
+    onChange({
+      restrictEnabled,
+      ownedCounts: setOwnedCount(ownedCounts, code, isOwned(code) ? 0 : 1)
+    });
   };
 
-  const setAll = (codes: Iterable<string>) => {
-    onChange({ restrictEnabled: true, allowedCodes: new Set(codes) });
+  const selectAll = () => {
+    onChange({ restrictEnabled: true, ownedCounts: allOwnedOne() });
+  };
+
+  const clearAll = () => {
+    onChange({ restrictEnabled: true, ownedCounts: {} });
   };
 
   const invert = () => {
-    const next = new Set<string>();
+    const next = { ...ownedCounts };
     for (const color of palette) {
-      if (!allowedCodes.has(color.code)) {
-        next.add(color.code);
+      if ((next[color.code] ?? 0) > 0) {
+        delete next[color.code];
+      } else {
+        next[color.code] = 1;
       }
     }
-    onChange({ restrictEnabled: true, allowedCodes: next });
+    onChange({ restrictEnabled: true, ownedCounts: next });
   };
 
   const keepCurrentDesign = () => {
     if (!currentDesignCodes || currentDesignCodes.size === 0) {
       return;
     }
-    onChange({ restrictEnabled: true, allowedCodes: new Set(currentDesignCodes) });
+    const next: Record<string, number> = {};
+    for (const code of currentDesignCodes) {
+      next[code] = 1;
+    }
+    onChange({ restrictEnabled: true, ownedCounts: next });
   };
 
-  const selectedCount = restrictEnabled ? allowedCodes.size : palette.length;
+  /** 把当前图纸用到的色号并入库存：保留已有更大值、不删其它色。 */
+  const registerCurrentDesign = () => {
+    if (!currentDesignCodes || currentDesignCodes.size === 0) {
+      return;
+    }
+    onChange({
+      restrictEnabled,
+      ownedCounts: addOwnedForCodes(ownedCounts, currentDesignCodes, 1)
+    });
+  };
+
+  const selectedCount = restrictEnabled ? registeredCount : palette.length;
   const hasCurrent = Boolean(currentDesignCodes && currentDesignCodes.size > 0);
   const usedCount = currentDesignCodes?.size ?? 0;
   const usedPercent = palette.length > 0 ? Math.round((usedCount / palette.length) * 100) : 0;
@@ -116,10 +147,8 @@ export function PalettePanel({
               checked={restrictEnabled}
               onChange={(event) => {
                 const enabled = event.target.checked;
-                const nextCodes = enabled && allowedCodes.size === 0
-                  ? new Set(palette.map((color) => color.code))
-                  : allowedCodes;
-                onChange({ restrictEnabled: enabled, allowedCodes: nextCodes });
+                const nextCounts = enabled && registeredCount === 0 ? allOwnedOne() : ownedCounts;
+                onChange({ restrictEnabled: enabled, ownedCounts: nextCounts });
               }}
             />
             <span>只用我手头有的色生成图纸（库存模式）</span>
@@ -131,7 +160,7 @@ export function PalettePanel({
                 type="button"
                 className="button small"
                 disabled={!restrictEnabled}
-                onClick={() => setAll(palette.map((color) => color.code))}
+                onClick={selectAll}
               >
                 全选
               </button>
@@ -139,7 +168,7 @@ export function PalettePanel({
                 type="button"
                 className="button small"
                 disabled={!restrictEnabled}
-                onClick={() => onChange({ restrictEnabled: true, allowedCodes: new Set() })}
+                onClick={clearAll}
               >
                 清空
               </button>
@@ -160,6 +189,15 @@ export function PalettePanel({
               >
                 仅保留当前用色
               </button>
+              <button
+                type="button"
+                className="button small"
+                disabled={!hasCurrent}
+                onClick={registerCurrentDesign}
+                title="把当前图纸用到的色号记入手头库存（保留已有更大数量、不删其它色）"
+              >
+                项目用色记为库存
+              </button>
             </div>
             <div className="palette-search-wrap">
               <IconSearch className="palette-search-icon" />
@@ -175,18 +213,18 @@ export function PalettePanel({
           </div>
 
           <p className="muted">
-            勾选你手上已有的豆色，图纸只会从这些色里挑。色名基于 MARD 拼豆色号表，仅作参考，下单前请以官方为准。
+            填入手头已有的豆色与颗数，图纸只会从这些色里挑。
           </p>
 
           {restrictEnabled && (
             <p className="palette-inventory-count">
-              库存模式已勾选 <strong>{selectedCount}</strong> 色。
+              库存模式已登记 <strong>{selectedCount}</strong> 色。
             </p>
           )}
 
           <div className="palette-grid" role="listbox" aria-label="MARD 色卡颜色" aria-multiselectable={restrictEnabled}>
             {visible.map((color) => {
-              const selected = !restrictEnabled || allowedCodes.has(color.code);
+              const selected = !restrictEnabled || isOwned(color.code);
               const usedInCurrent = currentDesignCodes?.has(color.code) ?? false;
               return (
                 <button

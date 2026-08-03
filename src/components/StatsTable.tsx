@@ -5,10 +5,22 @@ type StatsTableProps = {
   counts: Record<string, number>;
   palette: PaletteColor[];
   action?: React.ReactNode;
+  ownedCounts?: Record<string, number>;
+  shortfall?: Record<string, number>;
+  onOwnedChange?: (code: string, count: number) => void;
 };
 
-export function StatsTable({ title, counts, palette, action }: StatsTableProps) {
+export function StatsTable({
+  title,
+  counts,
+  palette,
+  action,
+  ownedCounts,
+  shortfall,
+  onOwnedChange
+}: StatsTableProps) {
   const byCode = new Map(palette.map((color) => [color.code, color]));
+  const showInventory = ownedCounts !== undefined && onOwnedChange !== undefined;
   const rows = Object.entries(counts)
     .sort(([leftCode, leftCount], [rightCode, rightCount]) => {
       if (rightCount !== leftCount) {
@@ -38,11 +50,21 @@ export function StatsTable({ title, counts, palette, action }: StatsTableProps) 
                 <th>色号</th>
                 <th>HEX</th>
                 <th>数量</th>
+                {showInventory && (
+                  <>
+                    <th>已有</th>
+                    <th>差缺</th>
+                  </>
+                )}
               </tr>
             </thead>
             <tbody>
               {rows.map(([code, count]) => {
                 const color = byCode.get(code);
+                const owned = ownedCounts?.[code] ?? 0;
+                const missing = shortfall
+                  ? (shortfall[code] ?? 0)
+                  : Math.max(0, count - owned);
                 return (
                   <tr key={code}>
                     <td>
@@ -52,6 +74,24 @@ export function StatsTable({ title, counts, palette, action }: StatsTableProps) 
                     <td>{code}</td>
                     <td className="mono">{color?.hex ?? "-"}</td>
                     <td>{count}</td>
+                    {showInventory && (
+                      <>
+                        <td>
+                          <input
+                            className="owned-input"
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={owned}
+                            aria-label={`已有 ${color?.nameZh ?? code}`}
+                            onChange={(event) => onOwnedChange(code, Number(event.target.value))}
+                          />
+                        </td>
+                        <td className={missing > 0 ? "shortfall-positive" : "shortfall-zero"}>
+                          {missing > 0 ? missing : "—"}
+                        </td>
+                      </>
+                    )}
                   </tr>
                 );
               })}

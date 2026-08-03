@@ -4,7 +4,7 @@
 > 适用范围：本文件为**独立自包含**的优化方案，可直接提供给任意模型（如 DeepSeek）或开发者参考实施。
 > 项目位置：`E:\Project\Image2PinDouDesign`
 > 技术栈：React 18 + TypeScript + Vite 7 + Web Worker + PWA，纯客户端应用（图片不上传、无后端）。
-> 当前基线（2026-08-03 更新）：`npm test` **71/71 通过**（`src/test/domain.test.ts`、`src/test/app.test.tsx`、`src/test/design-preview.test.tsx`），`npm run build` 成功（PWA 预缓存 13 项）。 本方案 P0/P1 大部分已由三个并行 sub-agent 实施完成并部署上线，见下方「0.5 实施状态总览」。
+> 当前基线（2026-08-03 更新）：`npm test` **142/142 通过**（8 个测试文件：domain/app/design-preview + 新增 recommend/shortfall/drafts/conversion-coordinator/exporters），`npm run build` 成功（PWA 预缓存 13 项）。 本方案 P0/P1 大部分已由两轮共六个并行 sub-agent 实施完成并部署上线，见下方「0.5 实施状态总览」。
 > 建议来源：代码审查 + [ui-ux-pro-max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) skill 检索（触控、加载反馈、表单、Pixel Art 风格等条目已标注出处）。
 
 ---
@@ -30,6 +30,9 @@
 > 三个并行 sub-agent（转换正确度 / UI 视觉 / 交互工程化）已于 2026-08-03 实施完成：测试 71/71 通过、构建成功，
 > 部署至 `https://pindou.fanni-panda.com`（VPS `136.175.83.102`，nginx 原子切换 `promote-release.sh`，旧版已备份）。
 > Git：commit `29cd7bb`（`feat: conversion accuracy, UI/UX polish, and a11y improvements`），已推送 `origin/main`。
+>
+> **第二轮（2026-08-03 晚，Round 2）**：又三个并行 sub-agent（智能化 / 工程化 / UI 集成）实施完成：测试 **142/142** 通过、构建成功，
+> 同样部署至 `https://pindou.fanni-panda.com` 并推送 `origin/main`（见 §8 发布记录）。
 
 ### ✅ 已实施
 
@@ -53,15 +56,21 @@
 | 4.5 撤销/重做 | Ctrl+Z / Ctrl+Y 快捷键 | `DesignPreview.tsx` |
 | 4.7/5.4 错误反馈 | ErrorBoundary 运行时兜底 | `components/ErrorBoundary.tsx`、`main.tsx` |
 | 4.8/5.5 分享与品牌 | OG/twitter 绝对 URL、PNG 192/512 + maskable 图标 | `index.html`、`public/`、`vite.config.ts` |
+| 2.1 一键参数推荐 | `analyzeSource` 图像分析（边缘锐度/色彩丰富度/唯一色/透明度/宽高比）+ `recommendSettings` 全参数推荐；设置面板「✨ 智能推荐」展示差异并一键应用 | `src/domain/recommend.ts`、`SettingsPanel.tsx`、`App.tsx` |
+| 2.3 风格预设 | 默认（智能）/ 像素画 / 照片渐变 / 简约低多边 4 预设一键切换，preset 可覆盖手动设置 | `src/domain/recommend.ts`、`SettingsPanel.tsx` |
+| 2.4 库存差缺清单 | 库存升级 v2（按色号计数、localStorage 持久化、v1 自动迁移）；统计表新增「已有/差缺」列（差缺>0 红色标注）；色板「项目用色记为库存」；一键导出 CSV 含库存 | `src/domain/shortfall.ts`、`StatsTable.tsx`、`PalettePanel.tsx`、`exporters.ts` |
+| 3.2（新增部分） | 预设/推荐/库存等新控件沿用现有 SVG 图标体系与 design token | `SettingsPanel.tsx`、`StatsTable.tsx`、`styles.css` |
+| 5.1（partial） | `App.tsx` 净删 81 行：草稿序列化、转换竞态/取消状态机抽为纯模块并单测（React hooks 未拆） | `src/domain/drafts.ts`、`src/domain/conversionCoordinator.ts`、`App.tsx` |
+| 5.6 补充测试 | worker 竞态（`conversion-coordinator.test.ts` 14 例）、草稿往返（`drafts.test.ts` 10 例）、CSV 转义（`exporters.test.ts` 9 例）、推荐/库存领域测试（38 例） | `src/test/*` |
 
 ### ⏳ 未实施（建议后续迭代）
 
 - **1.4 焦点控制**：CropDialog 仅做了 UI 层优化，cover/contain 焦点算法未深改
 - **1.9 草稿与项目计数**、**4.6 草稿管理 UI**、**5.3 IndexedDB 草稿持久化**（刷新不丢）
-- **2.1 一键参数推荐**、**2.2 自动抠图增强**、**2.3 风格预设**、**2.4 库存差缺清单**、**2.5 自动描边**、**2.6 语义颜色保护**
+- **2.2 自动抠图增强**、**2.5 自动描边**、**2.6 语义颜色保护**
 - **3.4 设计标签画廊化**、**3.5 表单控件统一**（部分随 3.1 一并改善）
-- **5.1 拆分 App.tsx（hooks）**、**5.2 Canvas 分层渲染**
-- **5.6 补充测试**：worker 竞态、草稿持久化往返、CSV 导出转义（键盘操作已有 `design-preview.test.tsx` 覆盖）
+- **5.1 拆分 App.tsx（hooks）**（domain 层已拆 `drafts.ts`/`conversionCoordinator.ts`，React hooks 化未做）、**5.2 Canvas 分层渲染**
+（5.6 测试补充已在第二轮全部完成，见上表）
 
 ## 1. 转换正确度（P0，最影响成品质量）
 
@@ -264,5 +273,6 @@
 - 使用 skill 的注意点：检索脚本为 `python scripts/search.py "<query>" --domain <style|ux|color|typography|charts> -n N`；UI 改动前先检索对应主题，输出设计 token/组件级建议并匹配本项目现有架构（不要引入框架迁移）。
 
 - **发布记录（2026-08-03）**：`npm run build` 产物经 `/usr/local/bin/promote-release.sh` 原子发布至 `/var/www/image2pindou`（备份 `image2pindou.backup-20260803-022716`）；`nginx -t` 通过、`systemctl reload nginx` 成功；线上验证 HTTP/2 200、新版 manifest（192/512 PNG + maskable）、OG 绝对 URL、全部 hash 资源 200。
+- **发布记录（2026-08-03 晚，Round 2）**：第二轮产物（`assets/index-c14KWk2-.js` + `index-CwGCiFS-.css`，懒加载抠图 chunk `index-LLYB6zQB.js`）经同一 `promote-release.sh` 原子发布，备份 `image2pindou.backup-20260803-<HHMMSS>`；`nginx -t` 通过、`systemctl reload nginx` 成功；线上验证首页 200、新 hash 资源全部 200、manifest/图标正常。
 - **冗余克隆确认**：`ui-ux-pro-max-skill\` 克隆目录已删除（2026-08-02 记录），全盘复查（E:\、C:\Users、D:\ 根）无残留；全局唯一有效安装为 `C:\Users\Administrator\.codex\skills\ui-ux-pro-max\`。
 
