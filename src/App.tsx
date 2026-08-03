@@ -8,10 +8,14 @@ import { UploadPanel } from "./components/UploadPanel";
 import { IconClose, IconCrop, IconDownload, IconEdit, IconPlus, IconSettings } from "./components/icons";
 import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
 import { getBoardSize, getBoardTilePins } from "./domain/boards";
-import { countMatrixColors, summarizeProject } from "./domain/conversion";
+import { summarizeProject } from "./domain/conversion";
 import { autoCropToContent, cropPixelSource, rectFromFractions } from "./domain/crop";
 import { countsToCsv, downloadBlob, downloadTextFile, openPrintableSheet } from "./domain/exporters";
+import { applyConversionMessage, cancelConversionTask, createConversionCoordinator, type ConversionCoordinatorState, type ConversionTaskProgress } from "./domain/conversionCoordinator";
+import { loadDesignDrafts, persistDesignDrafts, DRAFTS_STORAGE_KEY, MAX_LOCAL_DRAFTS } from "./domain/drafts";
 import { imageFileToPixelSource, pixelSourceToDataUrl } from "./domain/image";
+import { analyzeSource, applyStylePreset, recommendSettings, type RecommendedSettings, type StylePresetId } from "./domain/recommend";
+import { computeShortfall, loadOwnedInventory, ownedToAllowedCodes, persistOwnedInventory, setOwnedCount, type OwnedInventory } from "./domain/shortfall";
 import { MARD_PALETTE } from "./domain/palette";
 import { getHighResolutionCellSize, renderDesignToBlob } from "./domain/rendering";
 import type { BeadDesign, PixelSource } from "./domain/types";
@@ -25,9 +29,6 @@ type UploadedImage = {
   previewUrl: string;
 };
 
-const STORAGE_KEY = "image2pindou:inventory:v1";
-const DRAFTS_STORAGE_KEY = "image2pindou:design-drafts:v1";
-const MAX_LOCAL_DRAFTS = 6;
 const VALID_COLOR_CODES = new Set(MARD_PALETTE.map((color) => color.code));
 
 const initialSettings: UiSettings = {
@@ -48,88 +49,12 @@ const initialSettings: UiSettings = {
   ignoreWhiteBg: true
 };
 
-type InventoryState = {
-  restrictEnabled: boolean;
-  allowedCodes: Set<string>;
-};
-
 type EditHistory = {
   past: BeadDesign[];
   future: BeadDesign[];
 };
 
-// 每个转换任务在 UI 上的进度（App 主列的“正在生成图纸…”区域）。
-type ConversionTaskProgress = {
-  fileName: string;
-  percent: number;
-  phase: string;
-};
-
 const MAX_EDIT_HISTORY = 30;
-
-function loadInventory(): InventoryState {
-  if (typeof window === "undefined") {
-    return { restrictEnabled: false, allowedCodes: new Set() };
-  }
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return { restrictEnabled: false, allowedCodes: new Set() };
-    }
-    const parsed = JSON.parse(raw) as { restrictEnabled?: boolean; allowedCodes?: string[] };
-    return {
-      restrictEnabled: Boolean(parsed.restrictEnabled),
-      allowedCodes: new Set(Array.isArray(parsed.allowedCodes) ? parsed.allowedCodes : [])
-    };
-  } catch {
-    return { restrictEnabled: false, allowedCodes: new Set() };
-  }
-}
-
-function loadDesignDrafts(): BeadDesign[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(DRAFTS_STORAGE_KEY) ?? "[]") as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.slice(0, MAX_LOCAL_DRAFTS).map((candidate, index): BeadDesign | null => {
-      if (!candidate || typeof candidate !== "object") return null;
-      const value = candidate as Partial<BeadDesign>;
-      const width = Number(value.boardWidth);
-      const height = Number(value.boardHeight);
-      if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 208 || height > 208) {
-        return null;
-      }
-      const rawMatrix = Array.isArray(value.matrix) ? value.matrix : [];
-      const matrix = Array.from({ length: height }, (_, y) => {
-        const rawRow = Array.isArray(rawMatrix[y]) ? rawMatrix[y] : [];
-        return Array.from({ length: width }, (_, x) => {
-          const code = rawRow[x];
-          return typeof code === "string" && VALID_COLOR_CODES.has(code) ? code : null;
-        });
-      });
-      return {
-        id: typeof value.id === "string" && value.id.startsWith("draft-") ? value.id : `draft-restored-${index}-${Date.now()}`,
-        fileName: typeof value.fileName === "string" ? value.fileName : `本机草稿 ${index + 1}`,
-        boardWidth: width,
-        boardHeight: height,
-        matrix,
-        colorCounts: countMatrixColors(matrix),
-        settings: value.settings
-      };
-    }).filter((draft): draft is BeadDesign => Boolean(draft));
-  } catch {
-    return [];
-  }
-}
-
-function persistDesignDrafts(drafts: BeadDesign[]): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(drafts.slice(0, MAX_LOCAL_DRAFTS)));
-  } catch {
-    // 隐私模式或存储空间不足时不阻断编辑。
-  }
-}
 
 export default function App() {
   const [settings, setSettings] = useState<UiSettings>(initialSettings);
@@ -137,9 +62,9 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isConverting, setIsConverting] = useState(false);
-  const [designs, setDesigns] = useState<BeadDesign[]>(loadDesignDrafts);
+  const [designs, setDesigns] = useState<BeadDesign[]>(() => loadDesignDrafts(VALID_COLOR_CODES));
   const [error, setError] = useState<string | null>(null);
-  const [inventory, setInventory] = useState<InventoryState>(() => loadInventory());
+  const [inventory, setInventory] = useState<OwnedInventory>(() => loadOwnedInventory());
   const [cropImageId, setCropImageId] = useState<string | null>(null);
   const [cropBusy, setCropBusy] = useState(false);
   const [cropProgress, setCropProgress] = useState<RemovalProgress | null>(null);
@@ -149,31 +74,28 @@ export default function App() {
 
   const workerRef = useRef<Worker | null>(null);
   const generationRef = useRef(0);
-  // 用户点击“取消”后已放弃的任务 id；结果即使到达也会被丢弃。
-  const cancelledConversionIdsRef = useRef(new Set<string>());
+  // 当前转换代次的协调器状态；取消按钮经由它登记已放弃的任务 id。
+  const conversionCoordinatorRef = useRef<ConversionCoordinatorState | null>(null);
   const generatedDesignsRef = useRef(new Map<string, BeadDesign>());
   const localDraftsRef = useRef<BeadDesign[]>(designs);
   const localDraftIdsRef = useRef(new Set(designs.map((design) => design.id)));
   const savedCopyIdsRef = useRef(new Map<string, string>());
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        restrictEnabled: inventory.restrictEnabled,
-        allowedCodes: Array.from(inventory.allowedCodes)
-      }));
-    } catch {
-      // 忽略写入失败，例如隐私模式或配额超限
-    }
+    persistOwnedInventory(inventory);
   }, [inventory]);
 
   const boardSize = getBoardSize(settings.boardPreset, settings.customWidth, settings.customHeight);
-  const allowedCodesArray = useMemo(
-    () => (inventory.restrictEnabled ? Array.from(inventory.allowedCodes) : null),
-    [inventory.restrictEnabled, inventory.allowedCodes]
+  // v2 库存：限制模式开启时取 owned>0 的色号集合；引用随 inventory 变化，保持转换 effect 依赖稳定。
+  const allowedCodesArray = useMemo(() => {
+    const allowed = ownedToAllowedCodes(inventory);
+    return allowed ? Array.from(allowed) : null;
+  }, [inventory]);
+
+  // 一键推荐：对首张图做降采样分析，产出整组推荐参数（App 负责计算，面板只展示差异与一键应用）。
+  const recommendation = useMemo(
+    () => (images[0] ? recommendSettings(analyzeSource(images[0].source)) : null),
+    [images]
   );
 
   // 单个常驻 Worker，把整张图的转换搬离主线程；组件卸载时回收。
@@ -198,7 +120,7 @@ export default function App() {
     }
     if (images.length === 0) {
       generationRef.current += 1;
-      cancelledConversionIdsRef.current.clear();
+      conversionCoordinatorRef.current = null;
       setConversionProgress({});
       setDesigns((current) => current.filter((design) => localDraftIdsRef.current.has(design.id)));
       setEditHistories({});
@@ -208,81 +130,48 @@ export default function App() {
     }
 
     const generation = (generationRef.current += 1);
-    cancelledConversionIdsRef.current.clear();
-    setConversionProgress(Object.fromEntries(images.map((image) => [
-      image.id,
-      { fileName: image.fileName, percent: 0, phase: "prepare" }
-    ])));
-    const results = new Map<string, BeadDesign>();
-    let pending = images.length;
+    conversionCoordinatorRef.current = null;
+    let coordinator = createConversionCoordinator(
+      generation,
+      images.map((image) => ({ id: image.id, fileName: image.fileName }))
+    );
+    conversionCoordinatorRef.current = coordinator;
+    setConversionProgress(coordinator.progress);
+    let lastError: string | null = coordinator.error;
     setIsConverting(true);
 
     const handleMessage = (event: MessageEvent<ConversionResponse>) => {
-      const data = event.data;
-      if (data.generation !== generationRef.current) {
-        return;
+      const previousResults = coordinator.results;
+      coordinator = applyConversionMessage(coordinator, event.data);
+      conversionCoordinatorRef.current = coordinator;
+      // 过期代次消息会被 applyConversionMessage 原样丢弃，无需单独判断。
+      setConversionProgress(coordinator.progress);
+      if (coordinator.error !== lastError) {
+        lastError = coordinator.error;
+        setError(coordinator.error);
       }
-      // 带 type 字段的是进度/取消消息；design/error 保持旧协议不变。
-      if ("type" in data) {
-        // 进度消息：只更新对应任务的百分比，不参与完成计数。
-        if (data.type === "progress") {
-          if (cancelledConversionIdsRef.current.has(data.id)) {
-            return;
-          }
-          setConversionProgress((current) => ({
-            ...current,
-            [data.id]: {
-              fileName: current[data.id]?.fileName ?? images.find((image) => image.id === data.id)?.fileName ?? "",
-              percent: data.percent,
-              phase: data.phase
-            }
-          }));
-          return;
-        }
-        // 任务在 worker 侧被取消并跳过：与 design/error 一样是终结消息。
-        setConversionProgress((current) => removeProgressEntry(current, data.id));
-        pending -= 1;
-        if (pending <= 0) {
-          setIsConverting(false);
-        }
-        return;
-      }
-      if ("design" in data) {
-        if (cancelledConversionIdsRef.current.has(data.id)) {
-          // 用户已取消该任务：结果即使到达也直接丢弃，只收尾计数。
-          cancelledConversionIdsRef.current.delete(data.id);
-          setConversionProgress((current) => removeProgressEntry(current, data.id));
-          pending -= 1;
-          if (pending <= 0) {
-            setIsConverting(false);
-          }
-          return;
-        }
-        results.set(data.id, data.design);
-        generatedDesignsRef.current.set(data.id, data.design);
-        setEditHistories((current) => {
-          if (!current[data.id]) return current;
-          const next = { ...current };
-          delete next[data.id];
-          return next;
-        });
-      } else {
-        pending -= 1;
-        setError(data.error);
-        setConversionProgress((current) => removeProgressEntry(current, data.id));
-        if (pending <= 0) {
-          setIsConverting(false);
-        }
-        return;
-      }
-      setDesigns((current) => [
-        ...current.filter((design) => localDraftIdsRef.current.has(design.id)),
-        ...images.map((image) => results.get(image.id)).filter((design): design is BeadDesign => Boolean(design))
-      ]);
-      setConversionProgress((current) => removeProgressEntry(current, data.id));
-      pending -= 1;
-      if (pending <= 0) {
+      if (coordinator.pending === 0) {
         setIsConverting(false);
+      }
+      // 新到达的 design：记录 generatedDesignsRef、清理编辑历史，并按 images 顺序映射到 designs。
+      if (coordinator.results !== previousResults) {
+        for (const id of Object.keys(coordinator.results)) {
+          if (Object.prototype.hasOwnProperty.call(previousResults, id)) {
+            continue;
+          }
+          const design = coordinator.results[id];
+          generatedDesignsRef.current.set(id, design);
+          setEditHistories((current) => {
+            if (!current[id]) return current;
+            const next = { ...current };
+            delete next[id];
+            return next;
+          });
+        }
+        setDesigns((current) => [
+          ...current.filter((design) => localDraftIdsRef.current.has(design.id)),
+          ...images.map((image) => coordinator.results[image.id]).filter((design): design is BeadDesign => Boolean(design))
+        ]);
       }
     };
 
@@ -321,6 +210,7 @@ export default function App() {
     return () => {
       window.clearTimeout(timer);
       worker.removeEventListener("message", handleMessage);
+      conversionCoordinatorRef.current = null;
     };
   }, [
     allowedCodesArray,
@@ -417,7 +307,10 @@ export default function App() {
   const cancelConversion = (id: string) => {
     // 先在本端登记，保证即使 worker 还在执行同步转换，
     // 结果到达后也会被丢弃；同时通知 worker 跳过尚未开始的同代任务。
-    cancelledConversionIdsRef.current.add(id);
+    const coordinator = conversionCoordinatorRef.current;
+    if (coordinator) {
+      conversionCoordinatorRef.current = cancelConversionTask(coordinator, id);
+    }
     workerRef.current?.postMessage({ type: "cancel", generation: generationRef.current, id });
     setConversionProgress((current) => removeProgressEntry(current, id));
   };
@@ -665,7 +558,17 @@ export default function App() {
       <main className="workspace">
         <aside className="sidebar">
           <UploadPanel onFiles={handleFiles} isProcessing={isProcessing} />
-          <SettingsPanel settings={settings} onChange={setSettings} />
+          <SettingsPanel
+            settings={settings}
+            onChange={setSettings}
+            onApplyPreset={(id) => setSettings((s) => ({ ...s, ...applyStylePreset(id as StylePresetId, s as RecommendedSettings) }))}
+            recommendation={recommendation}
+            onApplyRecommendation={() => {
+              if (recommendation) {
+                setSettings((s) => ({ ...s, ...recommendation }));
+              }
+            }}
+          />
           {error && <div className="error-box" role="alert">{error}</div>}
         </aside>
 
@@ -783,6 +686,11 @@ export default function App() {
               title="项目总用豆"
               counts={projectTotals}
               palette={MARD_PALETTE}
+              ownedCounts={inventory.owned}
+              shortfall={computeShortfall(projectTotals, inventory.owned)}
+              onOwnedChange={(code, count) =>
+                setInventory((inv) => ({ ...inv, owned: setOwnedCount(inv.owned, code, count) }))
+              }
               action={designs.length > 0 && (
                 <button type="button" className="button small" onClick={exportProjectCsv}>导出采购 CSV</button>
               )}
@@ -793,9 +701,9 @@ export default function App() {
         <PalettePanel
           palette={MARD_PALETTE}
           restrictEnabled={inventory.restrictEnabled}
-          allowedCodes={inventory.allowedCodes}
+          ownedCounts={inventory.owned}
           currentDesignCodes={currentDesignCodes}
-          onChange={setInventory}
+          onChange={(next) => setInventory({ restrictEnabled: next.restrictEnabled, owned: next.ownedCounts })}
         />
       </main>
 

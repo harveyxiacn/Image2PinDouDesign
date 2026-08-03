@@ -51,7 +51,7 @@ function triggerDownload(fileName: string, url: string): void {
   link.remove();
 }
 
-function csvCell(value: string): string {
+export function csvCell(value: string): string {
   if (/[",\n]/.test(value)) {
     return `"${value.replaceAll("\"", "\"\"")}"`;
   }

@@ -1,4 +1,5 @@
 import { BOARD_PRESETS } from "../domain/boards";
+import { STYLE_PRESETS, type RecommendedSettings } from "../domain/recommend";
 import type { FitMode, ImageAdjustments, MaxColors, SamplingMode } from "../domain/types";
 import { IconChevronDown, IconRotateCcw } from "./icons";
 
@@ -48,6 +49,9 @@ const smoothOptions: Array<{ label: string; value: number }> = [
 type SettingsPanelProps = {
   settings: UiSettings;
   onChange: (settings: UiSettings) => void;
+  onApplyPreset?: (presetId: string) => void;
+  recommendation?: RecommendedSettings | null;
+  onApplyRecommendation?: () => void;
 };
 
 const maxColorOptions: Array<{ label: string; value: MaxColors }> = [
@@ -77,11 +81,42 @@ const adjustmentControls: Array<{ key: keyof ImageAdjustments; label: string }> 
   { key: "saturation", label: "饱和度" }
 ];
 
-export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
+type RecommendDiff = { label: string; detail: string };
+
+const formatBoard = (id: string): string =>
+  BOARD_PRESETS.find((preset) => preset.id === id)?.name ?? id;
+
+const formatColors = (value: string | number): string =>
+  value === "all" ? "全部" : `${value} 色`;
+
+const formatSampling = (value: string): string =>
+  samplingOptions.find((option) => option.value === value)?.label ?? value;
+
+const formatOnOff = (value: boolean): string => (value ? "开" : "关");
+
+/** 推荐值 vs 当前值：只列有差异的要点，标签用中文短词。 */
+function buildRecommendDiffs(settings: UiSettings, recommendation: RecommendedSettings): RecommendDiff[] {
+  const diffs: RecommendDiff[] = [];
+  const push = (label: string, current: string, recommended: string) => {
+    if (current !== recommended) {
+      diffs.push({ label, detail: `${current} → ${recommended}` });
+    }
+  };
+  push("板型", formatBoard(settings.boardPreset), formatBoard(recommendation.boardPreset));
+  push("色数", formatColors(settings.maxColors), formatColors(recommendation.maxColors));
+  push("采样", formatSampling(settings.sampling), formatSampling(recommendation.sampling));
+  push("抖动", formatOnOff(settings.dither), formatOnOff(recommendation.dither));
+  push("描边", formatOnOff(settings.outline), formatOnOff(recommendation.outline));
+  push("去背景", formatOnOff(settings.ignoreWhiteBg), formatOnOff(recommendation.ignoreWhiteBg));
+  return diffs;
+}
+
+export function SettingsPanel({ settings, onChange, onApplyPreset, recommendation, onApplyRecommendation }: SettingsPanelProps) {
   const activeBoard = BOARD_PRESETS.find((preset) => preset.id === settings.boardPreset) ?? BOARD_PRESETS[0];
   const activeFit = fitOptions.find((option) => option.value === settings.fit) ?? fitOptions[0];
   const activeSampling = samplingOptions.find((option) => option.value === settings.sampling) ?? samplingOptions[0];
   const hasAdjustment = adjustmentControls.some(({ key }) => settings.adjustments[key] !== 0);
+  const recommendDiffs = recommendation ? buildRecommendDiffs(settings, recommendation) : [];
 
   return (
     <section className="panel settings-panel" aria-labelledby="settings-title">
@@ -100,6 +135,52 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
           恢复默认
         </button>
       </div>
+
+      {onApplyPreset && (
+        <div className="preset-section">
+          <div className="preset-head">
+            <span className="preset-title">风格预设</span>
+            <small className="muted">一键套用常用参数组合</small>
+          </div>
+          <div className="preset-chips">
+            {STYLE_PRESETS.map((preset) => (
+              <button
+                type="button"
+                key={preset.id}
+                className="button small preset-chip"
+                title={preset.description}
+                aria-label={`应用风格预设：${preset.name}`}
+                onClick={() => onApplyPreset(preset.id)}
+              >
+                {preset.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {recommendation && onApplyRecommendation && (
+        <div className="recommend-box" role="group" aria-labelledby="recommend-title">
+          <div className="recommend-head">
+            <span id="recommend-title">✨ 智能推荐</span>
+            <button type="button" className="button small recommend-apply" onClick={onApplyRecommendation}>
+              一键应用
+            </button>
+          </div>
+          {recommendDiffs.length === 0 ? (
+            <p className="muted recommend-ok">当前设置已符合推荐。</p>
+          ) : (
+            <ul className="recommend-diffs">
+              {recommendDiffs.map((diff) => (
+                <li key={diff.label}>
+                  <span>{diff.label}</span>
+                  <b>{diff.detail}</b>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* 基础区：高频项 */}
       <label className="field">

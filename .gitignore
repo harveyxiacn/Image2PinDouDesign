@@ -20,3 +20,5 @@ testimage/
 
 # Local dev server logs
 vite-dev*.log
+
+vite-*.log
