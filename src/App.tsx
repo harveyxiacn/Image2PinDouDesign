@@ -99,10 +99,12 @@ export default function App() {
     return allowed ? Array.from(allowed) : null;
   }, [inventory]);
 
-  // 一键推荐：对首张图做降采样分析，产出整组推荐参数（App 负责计算，面板只展示差异与一键应用）。
+  const recommendationImage = images.find((image) => image.id === activeId) ?? images[0];
+
+  // 一键推荐：分析当前正在编辑的图片，避免裁剪/去背后仍沿用首张原图的判断。
   const recommendation = useMemo(
-    () => (images[0] ? recommendSettings(analyzeSource(images[0].source)) : null),
-    [images]
+    () => (recommendationImage ? recommendSettings(analyzeSource(recommendationImage.source)) : null),
+    [recommendationImage]
   );
 
   // 单个常驻 Worker，把整张图的转换搬离主线程；组件卸载时回收。

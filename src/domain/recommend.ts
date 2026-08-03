@@ -258,7 +258,7 @@ const PHOTO_BASE: RecommendedSettings = {
   outline: false,
   ignoreWhiteBg: true,
   autoFrame: true,
-  keepTransparent: false
+  keepTransparent: true
 };
 
 /**
@@ -269,8 +269,7 @@ const PHOTO_BASE: RecommendedSettings = {
  *   keepTransparent/autoFrame 恒开；颜色 ≤8 桶时把 maxColors 压到 8，避免废豆。
  * - 照片：area + Floyd-Steinberg 抖动 + smooth 1 + 48 色，板型按构图细分：
  *   竖构图（aspectRatio<0.85）→ 52x104，横构图（>1.4）→ 104，其余 52。
- * - 透明区域 >5% 时强制 keepTransparent + autoFrame（照片基座默认不保留透明，
- *   有透明 PNG 时绝不能填色或留大边）。
+ * - 推荐始终保留透明空格；透明区域 >5% 时同时强制 autoFrame，避免留下大边。
  */
 export function recommendSettings(analysis: ImageAnalysis): RecommendedSettings {
   const isPixelArt = analysis.kind === "pixel-art";
@@ -361,7 +360,7 @@ export const STYLE_PRESETS: StylePreset[] = [
       outline: false,
       ignoreWhiteBg: true,
       autoFrame: true,
-      keepTransparent: false
+      keepTransparent: true
     }
   }
 ];

@@ -261,7 +261,7 @@ describe("uniform border background removal", () => {
     await expect(removeBackgroundFromSource(source)).resolves.toBe(source);
   });
 
-  it("removes border-connected solid color while preserving an enclosed matching detail", () => {
+  it("removes border-connected solid color while preserving a tiny enclosed matching detail", () => {
     const width = 7;
     const height = 7;
     const data = new Uint8ClampedArray(width * height * 4);
@@ -280,6 +280,50 @@ describe("uniform border background removal", () => {
     expect(output!.data[3]).toBe(0);
     expect(output!.data[(3 * width + 3) * 4 + 3]).toBe(255);
     expect(output!.data[(2 * width + 2) * 4 + 3]).toBe(255);
+  });
+
+  it("removes a meaningful enclosed hole that matches a saturated solid background", () => {
+    const width = 11;
+    const height = 11;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < width * height; index += 1) {
+      data.set([10, 190, 225, 255], index * 4);
+    }
+    for (let y = 1; y <= 9; y += 1) {
+      for (let x = 1; x <= 9; x += 1) {
+        data.set([250, 180, 20, 255], (y * width + x) * 4);
+      }
+    }
+    for (let y = 4; y <= 6; y += 1) {
+      for (let x = 4; x <= 6; x += 1) {
+        data.set([10, 190, 225, 255], (y * width + x) * 4);
+      }
+    }
+
+    const output = removeUniformBorderBackground({ width, height, data });
+    expect(output).not.toBeNull();
+    expect(output!.data[(5 * width + 5) * 4 + 3]).toBe(0);
+    expect(output!.data[(2 * width + 2) * 4 + 3]).toBe(255);
+  });
+
+  it("preserves enclosed white subject details on a neutral background", () => {
+    const width = 7;
+    const height = 7;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < width * height; index += 1) {
+      data.set([250, 250, 250, 255], index * 4);
+    }
+    for (let y = 1; y <= 5; y += 1) {
+      for (let x = 1; x <= 5; x += 1) {
+        data.set([250, 180, 20, 255], (y * width + x) * 4);
+      }
+    }
+    data.set([250, 250, 250, 255], (3 * width + 3) * 4);
+
+    const output = removeUniformBorderBackground({ width, height, data });
+    expect(output).not.toBeNull();
+    expect(output!.data[3]).toBe(0);
+    expect(output!.data[(3 * width + 3) * 4 + 3]).toBe(255);
   });
 
   it("defers to AI when border colors are not uniform", () => {
@@ -586,6 +630,33 @@ describe("image to bead design conversion", () => {
       ["K1", null]
     ]);
     expect(design.colorCounts).toEqual({ R1: 1, W1: 1, K1: 1 });
+  });
+
+  it.each([
+    ["without dithering", false, undefined],
+    ["with Floyd-Steinberg dithering", true, "floyd-steinberg"],
+    ["with Bayer dithering", true, "bayer"]
+  ] as const)("composites transparent pixels on white %s", (_label, dither, ditherMode) => {
+    const design = convertPixelSourceToDesign({
+      width: 1,
+      height: 1,
+      data: new Uint8ClampedArray([0, 0, 0, 0])
+    }, "transparent.png", {
+      boardWidth: 1,
+      boardHeight: 1,
+      maxColors: "all",
+      keepTransparent: false,
+      transparentThreshold: 10,
+      dither,
+      ditherMode,
+      fit: "stretch",
+      sampling: "nearest",
+      autoFrame: false,
+      ignoreWhiteBg: false
+    }, palette);
+
+    expect(design.matrix).toEqual([["W1"]]);
+    expect(design.colorCounts).toEqual({ W1: 1 });
   });
 
   it("limits the active palette to the most-used colors before final remapping", () => {

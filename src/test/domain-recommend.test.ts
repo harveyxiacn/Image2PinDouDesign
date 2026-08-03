@@ -184,7 +184,7 @@ describe("recommendSettings", () => {
       smooth: 1,
       outline: false,
       ignoreWhiteBg: true,
-      keepTransparent: false,
+      keepTransparent: true,
       autoFrame: true
     });
   });
@@ -204,8 +204,8 @@ describe("recommendSettings", () => {
     const rec = recommendSettings({ ...photoAnalysis, transparencyRatio: 0.2 });
     expect(rec.keepTransparent).toBe(true);
     expect(rec.autoFrame).toBe(true);
-    // 低透明度的照片仍按照片基座：不保留透明
-    expect(recommendSettings({ ...photoAnalysis, transparencyRatio: 0.01 }).keepTransparent).toBe(false);
+    // 推荐永远不静默关闭透明空格；不透明照片开启此项也不会改变结果。
+    expect(recommendSettings({ ...photoAnalysis, transparencyRatio: 0.01 }).keepTransparent).toBe(true);
   });
 
   it("shrinks the color budget for very simple pixel art", () => {

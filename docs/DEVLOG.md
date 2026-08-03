@@ -23,7 +23,7 @@
 **常用命令：**
 
 ```bash
-npm test                 # Vitest 全量回归（当前 11 个文件 / 156 用例）
+npm test                 # Vitest 全量回归（当前 11 个文件 / 162 用例）
 npm run build            # tsc -b + vite build → dist/（PWA 预缓存）
 npm run dev              # 本地开发 http://localhost:5173
 npm run preview          # 本地预览构建产物（默认 4173 端口）
@@ -112,6 +112,17 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 - **提交与发布**：commit `f10ffe6`（`feat: improve focal cropping, stats scope, and smart outlines`）已推送 `origin/main`；产物经 `promote-release.sh` 原子发布，回滚备份为 `/var/www/image2pindou.backup-20260803-041852`，`nginx -t` 与 reload 通过。
 - **线上验证**：首页、`manifest.webmanifest`、Service Worker、192/512 图标及新入口 `index-BVBuuA4J.js` / `index-CCJAWTfH.css` 均为 HTTP 200；生产站真实图片上传、52×52 转换、cover 焦点裁剪、键盘微调和项目/草稿统计联动通过，**零 console error**。
 
+## 5.1 2026-08-03 · 亚古兽去背 / 智能推荐缺陷修复（本地待发布）
+
+- **问题**：高饱和纯色底被黑色主体轮廓封闭时，边缘 flood-fill 无法到达手脚之间的蓝底；去背像素的隐藏 RGB 为 `0,0,0`，智能推荐又会把照片的 `keepTransparent` 关闭，最终把透明区量化为整片黑色。
+- **修复**：
+  - `backgroundRemoval.ts` 在保留边缘连通泛洪的基础上，仅对高饱和纯色背景补清达到面积阈值的封闭同色块；中性白底和微小同色主体细节保持不动，补清后再次处理 JPEG 混色边。
+  - `conversion.ts` 在用户手动关闭透明保留时先把半透明像素合成到白底，再参与限色与三种量化路径，彻底避免无意义的隐藏黑色 RGB 污染结果。
+  - 智能推荐改为分析当前编辑图，所有推荐/预设默认保留透明空格；推荐卡补齐抖动算法、降噪、紧贴主体和透明空格等关键差异，避免静默改参。
+- **质量门**：`npm test` **162/162 通过**（11 文件）；`npm run build` 成功（PWA 预缓存 13 项 / 406.87 KiB；入口 `index-CpwcNpUw.js`）。
+- **真实回归**：本地 production preview 上传 `testimage/亚古兽.jpg` → 智能去背景 → 添加新图纸 → 一键应用智能推荐；手脚/身体间蓝底均变为透明棋盘格，推荐后无黑底，“保留 PNG 透明区域为空格”仍勾选，**零 console error**。
+- **发布状态**：代码与文档尚未提交、推送或部署，待本轮确认后进入发布流程。
+
 ---
 
 ## 6. 发布记录汇总
@@ -131,3 +142,4 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 | 2026-08-02（Round 1 后） | 3 | 71 | domain / app / design-preview |
 | 2026-08-02 晚（Round 2 后） | 8 | 142 | + recommend(18) / shortfall(20) / drafts(10) / conversion-coordinator(14) / exporters(9) |
 | 2026-08-02 深夜（Round 3，本地） | 11 | 156 | + focus(7) / project-stats(4) / crop-dialog(1) / recommend 自动描边回归(2) |
+| 2026-08-03（亚古兽缺陷修复） | 11 | 162 | + 封闭色键孔洞 / 中性底保护 / 三种量化透明填色兜底 / 推荐透明差异提示 |

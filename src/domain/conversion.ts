@@ -586,9 +586,10 @@ function selectActivePalette(
 
   const counts: Record<string, number> = {};
   const nearestCodes: Array<string | null> = new Array(grid.cells.length).fill(null);
+  const matchingCells = grid.cells.map((cell) => prepareCellForMatching(cell, settings));
   for (let index = 0; index < grid.cells.length; index += 1) {
-    const cell = grid.cells[index];
-    if (!isOpaqueEnough(cell, settings)) {
+    const cell = matchingCells[index];
+    if (!cell) {
       continue;
     }
     const nearestCode = findNearestCodeByLab(rgbToLab(cell), pool);
@@ -627,8 +628,8 @@ function selectActivePalette(
   const scorePair = (leftIndex: number, rightIndex: number) => {
     const leftCode = nearestCodes[leftIndex];
     const rightCode = nearestCodes[rightIndex];
-    const left = grid.cells[leftIndex];
-    const right = grid.cells[rightIndex];
+    const left = matchingCells[leftIndex];
+    const right = matchingCells[rightIndex];
     if (!leftCode || !rightCode || leftCode === rightCode || !left || !right) {
       return;
     }
@@ -683,8 +684,8 @@ function quantize(
   for (let y = 0; y < grid.height; y += 1) {
     const row: Array<string | null> = [];
     for (let x = 0; x < grid.width; x += 1) {
-      const cell = grid.cells[y * grid.width + x];
-      if (!isOpaqueEnough(cell, settings)) {
+      const cell = prepareCellForMatching(grid.cells[y * grid.width + x], settings);
+      if (!cell) {
         row.push(null);
         continue;
       }
@@ -702,7 +703,7 @@ function quantizeWithFloydSteinberg(
 ): BeadMatrix {
   const width = grid.width;
   const height = grid.height;
-  const buffer: SampledCell[] = grid.cells.map((cell) => (cell ? { ...cell } : null));
+  const buffer: SampledCell[] = grid.cells.map((cell) => prepareCellForMatching(cell, settings));
   const matrix: BeadMatrix = [];
 
   const distribute = (x: number, y: number, factor: number, dr: number, dg: number, db: number) => {
@@ -723,7 +724,7 @@ function quantizeWithFloydSteinberg(
     const row: Array<string | null> = [];
     for (let x = 0; x < width; x += 1) {
       const cell = buffer[y * width + x];
-      if (!isOpaqueEnough(cell, settings)) {
+      if (!cell) {
         row.push(null);
         continue;
       }
@@ -765,8 +766,8 @@ function quantizeWithBayer(
   for (let y = 0; y < grid.height; y += 1) {
     const row: Array<string | null> = [];
     for (let x = 0; x < grid.width; x += 1) {
-      const cell = grid.cells[y * grid.width + x];
-      if (!isOpaqueEnough(cell, settings)) {
+      const cell = prepareCellForMatching(grid.cells[y * grid.width + x], settings);
+      if (!cell) {
         row.push(null);
         continue;
       }
@@ -782,14 +783,27 @@ function quantizeWithBayer(
   }
   return matrix;
 }
-function isOpaqueEnough(cell: SampledCell, settings: ConversionSettings): cell is Rgba {
+function prepareCellForMatching(cell: SampledCell, settings: ConversionSettings): Rgba | null {
   if (!cell) {
-    return false;
+    return null;
   }
   if (settings.keepTransparent && cell.a <= settings.transparentThreshold) {
-    return false;
+    return null;
   }
-  return true;
+  if (settings.keepTransparent || cell.a >= 255) {
+    return cell;
+  }
+
+  // 完全透明像素的隐藏 RGB 没有视觉含义，去背流程通常会把它清成 0,0,0。
+  // 用户手动关闭“保留透明”时先按白底合成，避免透明区域被误量化成整片黑色。
+  const alpha = clamp(cell.a / 255, 0, 1);
+  const inverseAlpha = 1 - alpha;
+  return {
+    r: cell.r * alpha + 255 * inverseAlpha,
+    g: cell.g * alpha + 255 * inverseAlpha,
+    b: cell.b * alpha + 255 * inverseAlpha,
+    a: 255
+  };
 }
 
 function createDesignId(fileName: string): string {

@@ -93,6 +93,9 @@ const formatSampling = (value: string): string =>
   samplingOptions.find((option) => option.value === value)?.label ?? value;
 
 const formatOnOff = (value: boolean): string => (value ? "开" : "关");
+const formatDitherMode = (value: "floyd-steinberg" | "bayer"): string =>
+  value === "bayer" ? "有序抖动" : "误差扩散";
+const formatSmooth = (value: number): string => (value === 0 ? "关" : `${value} 级`);
 
 /** 推荐值 vs 当前值：只列有差异的要点，标签用中文短词。 */
 function buildRecommendDiffs(settings: UiSettings, recommendation: RecommendedSettings): RecommendDiff[] {
@@ -106,8 +109,12 @@ function buildRecommendDiffs(settings: UiSettings, recommendation: RecommendedSe
   push("色数", formatColors(settings.maxColors), formatColors(recommendation.maxColors));
   push("采样", formatSampling(settings.sampling), formatSampling(recommendation.sampling));
   push("抖动", formatOnOff(settings.dither), formatOnOff(recommendation.dither));
+  push("抖动算法", formatDitherMode(settings.ditherMode), formatDitherMode(recommendation.ditherMode));
+  push("降噪", formatSmooth(settings.smooth), formatSmooth(recommendation.smooth));
   push("描边", formatOnOff(settings.outline), formatOnOff(recommendation.outline));
   push("去背景", formatOnOff(settings.ignoreWhiteBg), formatOnOff(recommendation.ignoreWhiteBg));
+  push("紧贴主体", formatOnOff(settings.autoFrame), formatOnOff(recommendation.autoFrame));
+  push("透明空格", formatOnOff(settings.keepTransparent), formatOnOff(recommendation.keepTransparent));
   return diffs;
 }
 
