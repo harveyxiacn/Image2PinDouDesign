@@ -4,7 +4,7 @@
 > 适用范围：本文件为**独立自包含**的优化方案，可直接提供给任意模型（如 DeepSeek）或开发者参考实施。
 > 项目位置：`E:\Project\Image2PinDouDesign`
 > 技术栈：React 18 + TypeScript + Vite 7 + Web Worker + PWA，纯客户端应用（图片不上传、无后端）。
-> 当前基线：`npm test` 53/53 通过（`src/test/domain.test.ts`、`src/test/app.test.tsx`），`npm run build` 成功。
+> 当前基线（2026-08-03 更新）：`npm test` **71/71 通过**（`src/test/domain.test.ts`、`src/test/app.test.tsx`、`src/test/design-preview.test.tsx`），`npm run build` 成功（PWA 预缓存 13 项）。 本方案 P0/P1 大部分已由三个并行 sub-agent 实施完成并部署上线，见下方「0.5 实施状态总览」。
 > 建议来源：代码审查 + [ui-ux-pro-max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) skill 检索（触控、加载反馈、表单、Pixel Art 风格等条目已标注出处）。
 
 ---
@@ -22,6 +22,46 @@
 建议实施顺序：**P0 转换正确度 → P1 智能化/UI/UX → P2 工程化**。每完成一批跑 `npm test` 与 `npm run build` 回归。
 
 ---
+
+---
+
+## 0.5 实施状态总览（2026-08-03，已上线）
+
+> 三个并行 sub-agent（转换正确度 / UI 视觉 / 交互工程化）已于 2026-08-03 实施完成：测试 71/71 通过、构建成功，
+> 部署至 `https://pindou.fanni-panda.com`（VPS `136.175.83.102`，nginx 原子切换 `promote-release.sh`，旧版已备份）。
+> Git：commit `29cd7bb`（`feat: conversion accuracy, UI/UX polish, and a11y improvements`），已推送 `origin/main`。
+
+### ✅ 已实施
+
+| 章节 | 实施内容 | 主要文件 |
+| --- | --- | --- |
+| 1.1 半透明边缘去污染 | 颜色匹配前反推前景色，去除半透明边缘的背景污染 | `src/domain/conversion.ts` |
+| 1.2 自适应背景去除 | ΔE00 泛洪填充 + 边缘容差，背景色自适应（白底/花底） | `src/domain/background.ts` |
+| 1.3 色差算法 | 实际实现本就是全色板暴力 CIEDE2000；README 原“ΔE*76 预筛”描述不实，已更正并用 D15/C9 回归测试固化选色行为 | `README.md`、`src/test/domain.test.ts` |
+| 1.5 抖动算法 | 新增 Bayer 抖动选项，可与 Floyd–Steinberg 切换 | `conversion.ts`、`types.ts`、`SettingsPanel.tsx` |
+| 1.6 中值滤波 | 色板域中值滤波，减小色块噪声 | `src/domain/simplify.ts`、`src/domain/color.ts` |
+| 1.7 板型预设 | 新增 29×29 / 50×50 板预设（`getBoardTilePins`） | `src/domain/boards.ts` |
+| 1.8 打印/PDF 按板分页 | 打印分页线按实际针数（`boardLineEvery`） | `src/domain/exporters.ts`、`App.tsx` |
+| 1.10 小图约束 | 小图不再强制放大到 8×8 | `src/domain/conversion.ts` |
+| 3.1 渐进式披露 | 设置面板分级展示，避免平铺 | `SettingsPanel.tsx` |
+| 3.2 SVG 图标 | 18 个 SVG 图标替换全部 emoji 图标（＋✎⚙↓×✂️ 等） | `src/components/icons.tsx` 及全部组件 |
+| 3.3 291 色面板整合 | 色板可折叠 + ARIA 语义 | `PalettePanel.tsx` |
+| 3.6 转换进度与取消 | worker 进度上报 + 可取消转换 | `conversion.worker.ts`、`App.tsx` |
+| 4.1 画布键盘操作 | 方向键逐格移动/放置/取色，测试覆盖 | `DesignPreview.tsx`、`design-preview.test.tsx` |
+| 4.2 触控目标 | 触控目标 ≥44px、间距 ≥8px | `styles.css`、各面板 |
+| 4.4 prefers-reduced-motion | 动画尊重系统“减弱动态效果” | `styles.css` |
+| 4.5 撤销/重做 | Ctrl+Z / Ctrl+Y 快捷键 | `DesignPreview.tsx` |
+| 4.7/5.4 错误反馈 | ErrorBoundary 运行时兜底 | `components/ErrorBoundary.tsx`、`main.tsx` |
+| 4.8/5.5 分享与品牌 | OG/twitter 绝对 URL、PNG 192/512 + maskable 图标 | `index.html`、`public/`、`vite.config.ts` |
+
+### ⏳ 未实施（建议后续迭代）
+
+- **1.4 焦点控制**：CropDialog 仅做了 UI 层优化，cover/contain 焦点算法未深改
+- **1.9 草稿与项目计数**、**4.6 草稿管理 UI**、**5.3 IndexedDB 草稿持久化**（刷新不丢）
+- **2.1 一键参数推荐**、**2.2 自动抠图增强**、**2.3 风格预设**、**2.4 库存差缺清单**、**2.5 自动描边**、**2.6 语义颜色保护**
+- **3.4 设计标签画廊化**、**3.5 表单控件统一**（部分随 3.1 一并改善）
+- **5.1 拆分 App.tsx（hooks）**、**5.2 Canvas 分层渲染**
+- **5.6 补充测试**：worker 竞态、草稿持久化往返、CSV 导出转义（键盘操作已有 `design-preview.test.tsx` 覆盖）
 
 ## 1. 转换正确度（P0，最影响成品质量）
 
@@ -222,3 +262,7 @@
 - **冗余克隆已删除**：原 `C:\Users\Administrator\.codex\skills\ui-ux-pro-max-skill\`（git 克隆、无顶层 SKILL.md，Codex 不会加载）已于今日删除，原因：占用约 5MB 空间、冗余残留。删除前已校验路径在 `skills` 目录内；删除时遇到 git 包文件只读属性，已先清除 `ReadOnly` 再删。
 - 当前 `C:\Users\Administrator\.codex\skills\` 下有效条目：`.system`、`chatgpt-apps`、`ui-ux-pro-max`、`unity-mcp-skill`。
 - 使用 skill 的注意点：检索脚本为 `python scripts/search.py "<query>" --domain <style|ux|color|typography|charts> -n N`；UI 改动前先检索对应主题，输出设计 token/组件级建议并匹配本项目现有架构（不要引入框架迁移）。
+
+- **发布记录（2026-08-03）**：`npm run build` 产物经 `/usr/local/bin/promote-release.sh` 原子发布至 `/var/www/image2pindou`（备份 `image2pindou.backup-20260803-022716`）；`nginx -t` 通过、`systemctl reload nginx` 成功；线上验证 HTTP/2 200、新版 manifest（192/512 PNG + maskable）、OG 绝对 URL、全部 hash 资源 200。
+- **冗余克隆确认**：`ui-ux-pro-max-skill\` 克隆目录已删除（2026-08-02 记录），全盘复查（E:\、C:\Users、D:\ 根）无残留；全局唯一有效安装为 `C:\Users\Administrator\.codex\skills\ui-ux-pro-max\`。
+
