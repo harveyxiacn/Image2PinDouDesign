@@ -36,6 +36,9 @@ if [[ -d "$site_dir" ]]; then
 fi
 mv "$release_dir" "$site_dir"
 chown -R root:root "$site_dir"
+# scp/临时目录可能把发布目录带成 0700；统一静态站点权限，确保 nginx worker 可遍历读取。
+find "$site_dir" -type d -exec chmod 755 {} +
+find "$site_dir" -type f -exec chmod 644 {} +
 nginx -t
 systemctl reload nginx
 

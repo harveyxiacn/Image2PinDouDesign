@@ -3,7 +3,7 @@
 > 本文档是 `deepseek-version-optimize.md` 中「未实施」项的**可落地规格**：每项给出现状、目标、实现方案（文件触点）、
 > 验收标准与风险，供任意后续 session / 开发者直接按章节实施。状态以实施后更新为准。
 >
-> 当前基线：`npm test` **162/162**（11 文件）、`npm run build` 成功；Round 3 commit `f10ffe6` 已发布至 `https://pindou.fanni-panda.com`。2026-08-03 亚古兽去背/推荐修复已通过本地真实浏览器回归，尚待提交与发布（见 `docs/DEVLOG.md`）。
+> 当前基线：`npm test` **162/162**（11 文件）、`npm run build` 成功；Round 3 commit `f10ffe6` 与亚古兽去背/推荐修复 commit `4933d72` 均已发布至 `https://pindou.fanni-panda.com`，本地及线上真实浏览器回归通过（见 `docs/DEVLOG.md`）。
 
 ---
 

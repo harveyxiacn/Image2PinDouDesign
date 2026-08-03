@@ -112,16 +112,17 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 - **提交与发布**：commit `f10ffe6`（`feat: improve focal cropping, stats scope, and smart outlines`）已推送 `origin/main`；产物经 `promote-release.sh` 原子发布，回滚备份为 `/var/www/image2pindou.backup-20260803-041852`，`nginx -t` 与 reload 通过。
 - **线上验证**：首页、`manifest.webmanifest`、Service Worker、192/512 图标及新入口 `index-BVBuuA4J.js` / `index-CCJAWTfH.css` 均为 HTTP 200；生产站真实图片上传、52×52 转换、cover 焦点裁剪、键盘微调和项目/草稿统计联动通过，**零 console error**。
 
-## 5.1 2026-08-03 · 亚古兽去背 / 智能推荐缺陷修复（本地待发布）
+## 5.1 2026-08-03 · 亚古兽去背 / 智能推荐缺陷修复（已发布）
 
 - **问题**：高饱和纯色底被黑色主体轮廓封闭时，边缘 flood-fill 无法到达手脚之间的蓝底；去背像素的隐藏 RGB 为 `0,0,0`，智能推荐又会把照片的 `keepTransparent` 关闭，最终把透明区量化为整片黑色。
 - **修复**：
   - `backgroundRemoval.ts` 在保留边缘连通泛洪的基础上，仅对高饱和纯色背景补清达到面积阈值的封闭同色块；中性白底和微小同色主体细节保持不动，补清后再次处理 JPEG 混色边。
   - `conversion.ts` 在用户手动关闭透明保留时先把半透明像素合成到白底，再参与限色与三种量化路径，彻底避免无意义的隐藏黑色 RGB 污染结果。
   - 智能推荐改为分析当前编辑图，所有推荐/预设默认保留透明空格；推荐卡补齐抖动算法、降噪、紧贴主体和透明空格等关键差异，避免静默改参。
-- **质量门**：`npm test` **162/162 通过**（11 文件）；`npm run build` 成功（PWA 预缓存 13 项 / 406.87 KiB；入口 `index-CpwcNpUw.js`）。
+- **质量门**：`npm test` **162/162 通过**（11 文件）；`npm run build` 成功（PWA 预缓存 13 项 / 406.87 KiB；主入口 `index-DSBQJR-B.js`、去背懒加载 chunk `index-CpwcNpUw.js`）。
 - **真实回归**：本地 production preview 上传 `testimage/亚古兽.jpg` → 智能去背景 → 添加新图纸 → 一键应用智能推荐；手脚/身体间蓝底均变为透明棋盘格，推荐后无黑底，“保留 PNG 透明区域为空格”仍勾选，**零 console error**。
-- **发布状态**：代码与文档尚未提交、推送或部署，待本轮确认后进入发布流程。
+- **提交与发布**：commit `4933d72`（`fix: improve cutout transparency and recommendations`）已推送 `origin/main`；产物经 `promote-release.sh` 原子发布，回滚备份 `/var/www/image2pindou.backup-20260803-044634`。首次上传包目录权限为 `0700`，源站回归及时发现后已统一为目录 `0755` / 文件 `0644`，并将权限规范固化到发布脚本。
+- **线上验证**：源站首页、主入口、去背 chunk、CSS、manifest、Service Worker 与 192/512 图标全部 HTTP 200；公网 PWA 自动更新到 `index-DSBQJR-B.js`。真实亚古兽线上去背与推荐流程通过，封闭蓝底消失、推荐后无黑底、透明开关保持勾选，**零 console error**。
 
 ---
 
@@ -132,6 +133,7 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 | 1 | 2026-08-02 | `29cd7bb` | `/var/www/image2pindou.backup-20260803-022716` | ✅ 线上验证通过 |
 | 2 | 2026-08-02 晚 | `ab6eb10` | `/var/www/image2pindou.backup-20260803-025904` | ✅ 线上 E2E 通过 |
 | 3 | 2026-08-03 | `f10ffe6` | `/var/www/image2pindou.backup-20260803-041852` | ✅ 线上焦点裁剪 / 统计筛选 E2E 通过 |
+| 4 | 2026-08-03 | `4933d72` | `/var/www/image2pindou.backup-20260803-044634` | ✅ 亚古兽去背 / 推荐 / PWA 线上 E2E 通过 |
 
 > 时间说明：本地为 America/Vancouver；服务器备份目录名使用服务器时钟（UTC+ 时区），二者相差数小时属正常。
 
