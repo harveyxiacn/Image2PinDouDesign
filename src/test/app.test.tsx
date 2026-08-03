@@ -4,7 +4,9 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { DesignPreview } from "../components/DesignPreview";
+import { SettingsPanel, type UiSettings } from "../components/SettingsPanel";
 import { MARD_PALETTE } from "../domain/palette";
+import type { RecommendedSettings } from "../domain/recommend";
 
 describe("App", () => {
   it("renders the core upload, board, and export sections", () => {
@@ -16,6 +18,52 @@ describe("App", () => {
     expect(screen.getByLabelText(/细节算法/)).toHaveDisplayValue("智能细节（推荐）");
     expect(screen.getByText(/项目总用豆/)).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "手机端快捷导航" })).toBeInTheDocument();
+  });
+});
+
+describe("smart recommendation feedback", () => {
+  it("discloses when a recommendation restores transparent cells", () => {
+    const settings: UiSettings = {
+      boardPreset: "52",
+      customWidth: 64,
+      customHeight: 64,
+      maxColors: 48,
+      keepTransparent: false,
+      showLabels: true,
+      fit: "contain",
+      sampling: "area",
+      autoFrame: true,
+      dither: true,
+      ditherMode: "floyd-steinberg",
+      smooth: 1,
+      outline: false,
+      ignoreWhiteBg: true,
+      adjustments: { brightness: 0, contrast: 0, saturation: 0 }
+    };
+    const recommendation: RecommendedSettings = {
+      boardPreset: "52",
+      maxColors: 48,
+      sampling: "area",
+      dither: true,
+      ditherMode: "floyd-steinberg",
+      smooth: 1,
+      outline: false,
+      ignoreWhiteBg: true,
+      autoFrame: true,
+      keepTransparent: true
+    };
+
+    render(
+      <SettingsPanel
+        settings={settings}
+        onChange={vi.fn()}
+        recommendation={recommendation}
+        onApplyRecommendation={vi.fn()}
+      />
+    );
+
+    const transparencyDiff = screen.getByText("透明空格").closest("li");
+    expect(transparencyDiff).toHaveTextContent("关 → 开");
   });
 });
 

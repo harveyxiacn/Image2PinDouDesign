@@ -144,23 +144,13 @@ export function removeUniformBorderBackground(source: PixelSource): PixelSource 
   // JPEG 抗锯齿会在主体外缘留下 1~3px 的背景混色。限制为三轮向内剥离，
   // 可以清掉色边，又不会像无限 flood-fill 那样吞掉与背景相近的主体区域。
   const fringeTolerance = Math.min(180, Math.max(150, estimate.tolerance + 72));
-  for (let pass = 0; pass < 3; pass += 1) {
-    const fringe: number[] = [];
-    for (let index = 0; index < pixelCount; index += 1) {
-      if (background[index]) continue;
-      const x = index % width;
-      const y = (index - x) / width;
-      const touchesBackground =
-        (x > 0 && background[index - 1]) ||
-        (x < width - 1 && background[index + 1]) ||
-        (y > 0 && background[index - width]) ||
-        (y < height - 1 && background[index + width]);
-      if (touchesBackground && colorDistance(source.data, index * 4, estimate.color) <= fringeTolerance) {
-        fringe.push(index);
-      }
-    }
-    if (fringe.length === 0) break;
-    for (const index of fringe) background[index] = 1;
+  expandBackgroundFringe(source, background, estimate.color, fringeTolerance, 3);
+
+  // 纯色抠图背景常被主体轮廓围成“洞”（例如手臂与身体之间）。边缘 flood-fill
+  // 到不了这些区域，因此只对高饱和背景补充识别有一定面积的封闭同色块。
+  // 中性白底不启用，并保留不足阈值的小色块，避免误删眼睛、高光等主体细节。
+  if (markEnclosedChromaHoles(source, background, estimate) > 0) {
+    expandBackgroundFringe(source, background, estimate.color, fringeTolerance, 3);
   }
 
   const data = new Uint8ClampedArray(source.data);
@@ -176,6 +166,100 @@ export function removeUniformBorderBackground(source: PixelSource): PixelSource 
 
   removeSmallForegroundComponents(data, width, height);
   return { width, height, data };
+}
+
+function expandBackgroundFringe(
+  source: PixelSource,
+  background: Uint8Array,
+  target: Rgb,
+  tolerance: number,
+  passes: number
+): void {
+  const { width, height } = source;
+  const pixelCount = width * height;
+  for (let pass = 0; pass < passes; pass += 1) {
+    const fringe: number[] = [];
+    for (let index = 0; index < pixelCount; index += 1) {
+      if (background[index]) continue;
+      const x = index % width;
+      const y = (index - x) / width;
+      const touchesBackground =
+        (x > 0 && background[index - 1]) ||
+        (x < width - 1 && background[index + 1]) ||
+        (y > 0 && background[index - width]) ||
+        (y < height - 1 && background[index + width]);
+      if (touchesBackground && colorDistance(source.data, index * 4, target) <= tolerance) {
+        fringe.push(index);
+      }
+    }
+    if (fringe.length === 0) break;
+    for (const index of fringe) background[index] = 1;
+  }
+}
+
+function markEnclosedChromaHoles(
+  source: PixelSource,
+  background: Uint8Array,
+  estimate: BorderEstimate
+): number {
+  const channels = [estimate.color.r, estimate.color.g, estimate.color.b];
+  if (Math.max(...channels) - Math.min(...channels) < 72) {
+    return 0;
+  }
+
+  const { width, height } = source;
+  const pixelCount = width * height;
+  const visited = new Uint8Array(pixelCount);
+  const strictTolerance = Math.min(48, Math.max(24, estimate.tolerance * 0.5));
+  const minimumSize = Math.max(3, Math.floor(pixelCount * 0.00005));
+  let marked = 0;
+
+  for (let start = 0; start < pixelCount; start += 1) {
+    if (background[start] || visited[start]) continue;
+    const startDataIndex = start * 4;
+    if (
+      source.data[startDataIndex + 3] < 16 ||
+      colorDistance(source.data, startDataIndex, estimate.color) > strictTolerance
+    ) {
+      visited[start] = 1;
+      continue;
+    }
+
+    const component: number[] = [];
+    const stack = [start];
+    visited[start] = 1;
+    while (stack.length > 0) {
+      const index = stack.pop()!;
+      component.push(index);
+      const x = index % width;
+      const y = (index - x) / width;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          const neighbor = ny * width + nx;
+          if (background[neighbor] || visited[neighbor]) continue;
+          const dataIndex = neighbor * 4;
+          if (
+            source.data[dataIndex + 3] >= 16 &&
+            colorDistance(source.data, dataIndex, estimate.color) <= strictTolerance
+          ) {
+            visited[neighbor] = 1;
+            stack.push(neighbor);
+          }
+        }
+      }
+    }
+
+    if (component.length >= minimumSize) {
+      for (const index of component) background[index] = 1;
+      marked += component.length;
+    }
+  }
+
+  return marked;
 }
 
 function estimateUniformBorder(source: PixelSource): BorderEstimate | null {
