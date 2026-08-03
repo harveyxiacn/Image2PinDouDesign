@@ -85,6 +85,8 @@ src/
   test/          vitest: domain.test.ts (color math), app.test.tsx
 deploy/          example nginx configs (static + TLS)
 design.md        original design doc (Chinese)
+docs/DEVLOG.md   dev log: iteration history, deploy records, env & commands (Chinese)
+docs/ITERATIONS.md  next-iteration specs with acceptance criteria (Chinese)
 ```
 
 ## License
