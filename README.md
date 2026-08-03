@@ -28,13 +28,13 @@ Everything runs **client-side** — images never leave the device, and the built
 
 ## Features
 
-- Upload one or many images; crop / scale / center, with per-task conversion progress and cancel.
+- Upload one or many images; crop / scale with automatic saliency focus or manual focal-point control, with per-task conversion progress and cancel.
 - Smart logical size (up to 52 pins), fixed 29/50/52/104-pin boards (plus 52×104 and 156 tiling), or custom width × height — prints/PDF paginate per physical board.
-- Automatic subject framing, pixel-art/photo sampling selection, and perceptual color matching to the bead palette.
+- Automatic subject framing, pixel-art/photo sampling selection, high-contrast outline recommendations, and perceptual color matching to the bead palette.
 - Post-generation pattern workbench: recolor/erase individual cells, pick colors, undo/redo up to 30 steps (Ctrl+Z / Ctrl+Shift+Z), reset, mirror horizontally — plus full keyboard grid navigation (arrows + Enter/Space/Delete).
 - Mobile build assistant: focus one color, tap cells complete, see remaining bead counts, and resume progress from local storage.
 - Save up to six private local pattern drafts and continue editing/exporting after a refresh, with no account or upload.
-- Per-image and whole-**project** color/count aggregation (buy-once shopping list).
+- Per-image and whole-**project** color/count aggregation, filterable by project or local draft, with inventory shortfall and purchase-list CSV export.
 - Adjustments: brightness/contrast, color simplification, dithering (Floyd-Steinberg or Bayer ordered), and non-destructive outer H7 black outlining.
 - Palette panel, stats table, grid/color-code preview with zoom.
 - Exports of the chart and counts.
@@ -78,8 +78,8 @@ For atomic VPS releases, run `deploy/promote-release.sh <uploaded-release-dir> [
 
 ```
 src/
-  domain/        pure logic: color (CIEDE2000), conversion, palette, boards,
-                 dithering (simplify), background removal, exporters
+  domain/        pure logic: color (CIEDE2000), conversion, focus, recommendations,
+                 project stats, palette, boards, dithering, background removal, exporters
   worker/        conversion.worker.ts — runs the pipeline off the main thread
   components/    Upload / Crop / Settings / Palette / Preview / Stats panels
   test/          vitest: domain.test.ts (color math), app.test.tsx

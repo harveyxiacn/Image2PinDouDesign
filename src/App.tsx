@@ -8,12 +8,13 @@ import { UploadPanel } from "./components/UploadPanel";
 import { IconClose, IconCrop, IconDownload, IconEdit, IconPlus, IconSettings } from "./components/icons";
 import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
 import { getBoardSize, getBoardTilePins } from "./domain/boards";
-import { summarizeProject } from "./domain/conversion";
 import { autoCropToContent, cropPixelSource, rectFromFractions } from "./domain/crop";
 import { countsToCsv, downloadBlob, downloadTextFile, openPrintableSheet } from "./domain/exporters";
 import { applyConversionMessage, cancelConversionTask, createConversionCoordinator, type ConversionCoordinatorState, type ConversionTaskProgress } from "./domain/conversionCoordinator";
 import { loadDesignDrafts, persistDesignDrafts, DRAFTS_STORAGE_KEY, MAX_LOCAL_DRAFTS } from "./domain/drafts";
 import { imageFileToPixelSource, pixelSourceToDataUrl } from "./domain/image";
+import { computeCropRect, type FocusPoint } from "./domain/focus";
+import { aggregateCounts, countDesignsBySource, type StatsSourceFilter } from "./domain/projectStats";
 import { analyzeSource, applyStylePreset, recommendSettings, type RecommendedSettings, type StylePresetId } from "./domain/recommend";
 import { computeShortfall, loadOwnedInventory, ownedToAllowedCodes, persistOwnedInventory, setOwnedCount, type OwnedInventory } from "./domain/shortfall";
 import { MARD_PALETTE } from "./domain/palette";
@@ -30,6 +31,11 @@ type UploadedImage = {
 };
 
 const VALID_COLOR_CODES = new Set(MARD_PALETTE.map((color) => color.code));
+const STATS_SOURCE_LABELS: Record<StatsSourceFilter, string> = {
+  all: "全部图纸",
+  projects: "正式项目",
+  drafts: "本机草稿"
+};
 
 const initialSettings: UiSettings = {
   boardPreset: "smart",
@@ -71,6 +77,7 @@ export default function App() {
   const [isExportingPng, setIsExportingPng] = useState(false);
   const [editHistories, setEditHistories] = useState<Record<string, EditHistory>>({});
   const [conversionProgress, setConversionProgress] = useState<Record<string, ConversionTaskProgress>>({});
+  const [sourceFilter, setSourceFilter] = useState<StatsSourceFilter>("all");
 
   const workerRef = useRef<Worker | null>(null);
   const generationRef = useRef(0);
@@ -234,7 +241,14 @@ export default function App() {
   const activeOriginalUrl = activeDesign
     ? images.find((image) => image.id === activeDesign.id)?.previewUrl
     : undefined;
-  const projectTotals = summarizeProject(designs);
+  const projectTotals = useMemo(
+    () => aggregateCounts(designs, localDraftIdsRef.current, sourceFilter),
+    [designs, sourceFilter]
+  );
+  const filteredDesignCount = useMemo(
+    () => countDesignsBySource(designs, localDraftIdsRef.current, sourceFilter),
+    [designs, sourceFilter]
+  );
   const totalBeads = Object.values(projectTotals).reduce((sum, count) => sum + count, 0);
   const currentDesignCodes = useMemo(() => {
     return activeDesign ? new Set(Object.keys(activeDesign.colorCounts)) : new Set<string>();
@@ -430,7 +444,7 @@ export default function App() {
   };
 
   // 从一张图框选/抠图，生成一张独立的新图纸（支持把一张总图拆成多个主体）。
-  const addCroppedDesign = async (rect: CropFractions | null, removeBg: boolean) => {
+  const addCroppedDesign = async (rect: CropFractions | null, removeBg: boolean, focus: FocusPoint) => {
     const sourceImage = images.find((image) => image.id === cropImageId);
     if (!sourceImage) {
       return;
@@ -439,9 +453,19 @@ export default function App() {
     setCropProgress(null);
     setError(null);
     try {
-      let derived: PixelSource = rect
-        ? cropPixelSource(sourceImage.source, rectFromFractions(sourceImage.source, rect.fx, rect.fy, rect.fw, rect.fh))
-        : sourceImage.source;
+      let derived: PixelSource;
+      if (rect) {
+        derived = cropPixelSource(sourceImage.source, rectFromFractions(sourceImage.source, rect.fx, rect.fy, rect.fw, rect.fh));
+      } else if (settings.fit === "cover") {
+        derived = cropPixelSource(sourceImage.source, computeCropRect(
+          sourceImage.source,
+          focus,
+          "cover",
+          boardSize.width / boardSize.height
+        ));
+      } else {
+        derived = sourceImage.source;
+      }
 
       if (removeBg) {
         derived = await removeBackgroundFromSource(derived, setCropProgress);
@@ -476,7 +500,8 @@ export default function App() {
   };
 
   const exportProjectCsv = () => {
-    downloadTextFile("project-bead-shopping-list.csv", countsToCsv(projectTotals, MARD_PALETTE));
+    const prefix = sourceFilter === "drafts" ? "draft" : sourceFilter === "projects" ? "project" : "all-designs";
+    downloadTextFile(`${prefix}-bead-shopping-list.csv`, countsToCsv(projectTotals, MARD_PALETTE));
   };
 
   const exportActivePng = async () => {
@@ -537,8 +562,8 @@ export default function App() {
             </div>
           </div>
           <div className="hero-card">
-            <span>当前项目</span>
-            <strong>{designs.length}</strong>
+            <span>{STATS_SOURCE_LABELS[sourceFilter]}统计</span>
+            <strong>{filteredDesignCount}</strong>
             <small>张图纸</small>
             <strong>{totalBeads}</strong>
             <small>颗豆子</small>
@@ -688,10 +713,13 @@ export default function App() {
               palette={MARD_PALETTE}
               ownedCounts={inventory.owned}
               shortfall={computeShortfall(projectTotals, inventory.owned)}
+              sourceFilter={sourceFilter}
+              sourceCount={filteredDesignCount}
+              onSourceFilterChange={setSourceFilter}
               onOwnedChange={(code, count) =>
                 setInventory((inv) => ({ ...inv, owned: setOwnedCount(inv.owned, code, count) }))
               }
-              action={designs.length > 0 && (
+              action={filteredDesignCount > 0 && (
                 <button type="button" className="button small" onClick={exportProjectCsv}>导出采购 CSV</button>
               )}
             />
@@ -715,11 +743,14 @@ export default function App() {
         return (
           <CropDialog
             previewUrl={cropImage.previewUrl}
+            source={cropImage.source}
             title={`裁剪 / 抠图 · ${cropImage.fileName}`}
+            fitMode={settings.fit}
+            targetAspect={boardSize.width / boardSize.height}
             busy={cropBusy}
             progress={cropProgress}
             onCancel={() => { if (!cropBusy) setCropImageId(null); }}
-            onSubmit={(rect, removeBg) => { void addCroppedDesign(rect, removeBg); }}
+            onSubmit={(rect, removeBg, focus) => { void addCroppedDesign(rect, removeBg, focus); }}
           />
         );
       })()}

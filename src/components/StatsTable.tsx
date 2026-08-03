@@ -1,4 +1,5 @@
 import type { PaletteColor } from "../domain/types";
+import type { StatsSourceFilter } from "../domain/projectStats";
 
 type StatsTableProps = {
   title: string;
@@ -8,7 +9,16 @@ type StatsTableProps = {
   ownedCounts?: Record<string, number>;
   shortfall?: Record<string, number>;
   onOwnedChange?: (code: string, count: number) => void;
+  sourceFilter?: StatsSourceFilter;
+  sourceCount?: number;
+  onSourceFilterChange?: (filter: StatsSourceFilter) => void;
 };
+
+const sourceFilterOptions: Array<{ value: StatsSourceFilter; label: string; description: string }> = [
+  { value: "all", label: "全部", description: "正式项目和本机草稿" },
+  { value: "projects", label: "项目", description: "仅本次上传生成的正式项目" },
+  { value: "drafts", label: "草稿", description: "仅保存在本机的草稿" }
+];
 
 export function StatsTable({
   title,
@@ -17,7 +27,10 @@ export function StatsTable({
   action,
   ownedCounts,
   shortfall,
-  onOwnedChange
+  onOwnedChange,
+  sourceFilter,
+  sourceCount,
+  onSourceFilterChange
 }: StatsTableProps) {
   const byCode = new Map(palette.map((color) => [color.code, color]));
   const showInventory = ownedCounts !== undefined && onOwnedChange !== undefined;
@@ -36,8 +49,35 @@ export function StatsTable({
           <p className="eyebrow">Stats</p>
           <h2 id={`${title}-title`}>{title}</h2>
         </div>
-        {action}
+        <div className="stats-header-actions">
+          {sourceFilter && onSourceFilterChange && (
+            <div
+              className="stats-source-filter"
+              role="group"
+              aria-label={`统计口径，当前为${sourceFilterOptions.find((option) => option.value === sourceFilter)?.description ?? "全部"}`}
+            >
+              {sourceFilterOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  aria-pressed={sourceFilter === option.value}
+                  title={option.description}
+                  onClick={() => onSourceFilterChange(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {action}
+        </div>
       </div>
+
+      {sourceFilter && (
+        <p className="stats-scope-note" aria-live="polite">
+          当前口径：{sourceFilterOptions.find((option) => option.value === sourceFilter)?.description}，共 {sourceCount ?? 0} 张图纸；差缺与导出按此口径计算。
+        </p>
+      )}
 
       {rows.length === 0 ? (
         <p className="muted">暂无统计数据。</p>

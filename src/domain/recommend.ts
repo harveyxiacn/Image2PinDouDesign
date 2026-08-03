@@ -29,12 +29,17 @@ export type ImageAnalysis = {
   uniqueColorEstimate: number;
   transparencyRatio: number;
   edgeSharpness: number;
+  strongOutlineRatio: number;
 };
 
 // 分析前先把图片面积平均降采样到 ≤64×64，把主线程成本控制在几千像素量级。
 const ANALYSIS_MAX_DIMENSION = 64;
 // 相邻像素 RGBA 距离 ≥ 该值视为一次“硬边跳变”（像素画特征）。
 const EDGE_DISTANCE_THRESHOLD = 48;
+// 相邻不透明像素的亮度差 ≥ 该值视为强对比轮廓。
+const STRONG_LUMINANCE_GRADIENT_THRESHOLD = 96;
+// 强对比轮廓占比达到该值时，建议为非照片来源开启描边。
+const STRONG_OUTLINE_RATIO_THRESHOLD = 0.2;
 // 硬边跳变占比 ≥ 该值判为像素画。
 const PIXEL_ART_EDGE_RATIO = 0.3;
 // 低硬边且颜色极简（≤ 2 桶）也按像素画处理：纯色/极简 Logo 保持锐利、不抖动。
@@ -63,7 +68,8 @@ export function analyzeSource(source: PixelSource): ImageAnalysis {
     colorfulness: metrics.colorfulness,
     uniqueColorEstimate: metrics.uniqueColorEstimate,
     transparencyRatio: metrics.transparencyRatio,
-    edgeSharpness: metrics.edgeSharpness
+    edgeSharpness: metrics.edgeSharpness,
+    strongOutlineRatio: metrics.strongOutlineRatio
   };
 }
 
@@ -72,6 +78,7 @@ type AnalysisMetrics = {
   uniqueColorEstimate: number;
   transparencyRatio: number;
   edgeSharpness: number;
+  strongOutlineRatio: number;
 };
 
 /**
@@ -80,6 +87,7 @@ type AnalysisMetrics = {
  * - uniqueColorEstimate：RGB 每通道按 32 步进分桶（最多 512 桶）后去重计数。
  * - transparencyRatio：alpha<128 的像素占比。
  * - edgeSharpness：相邻像素（右/下邻居）RGBA 距离 ≥ 阈值的跳变比例（0..1）。
+ * - strongOutlineRatio：相邻不透明像素的亮度梯度 ≥ 阈值的比例（0..1）。
  */
 function computeMetrics(sampled: PixelSource): AnalysisMetrics {
   const { width, height, data } = sampled;
@@ -90,6 +98,8 @@ function computeMetrics(sampled: PixelSource): AnalysisMetrics {
   const buckets = new Set<number>();
   let edgeCount = 0;
   let comparisonCount = 0;
+  let strongOutlineCount = 0;
+  let luminanceComparisonCount = 0;
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
@@ -116,12 +126,24 @@ function computeMetrics(sampled: PixelSource): AnalysisMetrics {
         if (isHardEdge(r, g, b, a, data[index + 4], data[index + 5], data[index + 6], data[index + 7])) {
           edgeCount += 1;
         }
+        if (a >= TRANSPARENT_ALPHA && data[index + 7] >= TRANSPARENT_ALPHA) {
+          luminanceComparisonCount += 1;
+          if (isStrongLuminanceGradient(r, g, b, data[index + 4], data[index + 5], data[index + 6])) {
+            strongOutlineCount += 1;
+          }
+        }
       }
       if (y + 1 < height) {
         const next = index + width * 4;
         comparisonCount += 1;
         if (isHardEdge(r, g, b, a, data[next], data[next + 1], data[next + 2], data[next + 3])) {
           edgeCount += 1;
+        }
+        if (a >= TRANSPARENT_ALPHA && data[next + 3] >= TRANSPARENT_ALPHA) {
+          luminanceComparisonCount += 1;
+          if (isStrongLuminanceGradient(r, g, b, data[next], data[next + 1], data[next + 2])) {
+            strongOutlineCount += 1;
+          }
         }
       }
     }
@@ -131,8 +153,18 @@ function computeMetrics(sampled: PixelSource): AnalysisMetrics {
     colorfulness: opaqueCount > 0 ? saturationSum / opaqueCount : 0,
     uniqueColorEstimate: buckets.size,
     transparencyRatio: pixelCount > 0 ? transparentCount / pixelCount : 0,
-    edgeSharpness: comparisonCount > 0 ? edgeCount / comparisonCount : 0
+    edgeSharpness: comparisonCount > 0 ? edgeCount / comparisonCount : 0,
+    strongOutlineRatio: luminanceComparisonCount > 0 ? strongOutlineCount / luminanceComparisonCount : 0
   };
+}
+
+function isStrongLuminanceGradient(
+  r1: number, g1: number, b1: number,
+  r2: number, g2: number, b2: number
+): boolean {
+  const luminance1 = 0.2126 * r1 + 0.7152 * g1 + 0.0722 * b1;
+  const luminance2 = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
+  return Math.abs(luminance1 - luminance2) >= STRONG_LUMINANCE_GRADIENT_THRESHOLD;
 }
 
 function isHardEdge(
@@ -247,6 +279,9 @@ export function recommendSettings(analysis: ImageAnalysis): RecommendedSettings 
   if (isPixelArt) {
     if (analysis.uniqueColorEstimate <= 8) {
       settings.maxColors = 8;
+    }
+    if (analysis.strongOutlineRatio >= STRONG_OUTLINE_RATIO_THRESHOLD) {
+      settings.outline = true;
     }
   } else {
     settings.boardPreset = boardPresetForAspectRatio(analysis.aspectRatio);
