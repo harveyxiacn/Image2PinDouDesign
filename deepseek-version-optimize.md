@@ -4,7 +4,7 @@
 > 适用范围：本文件为**独立自包含**的优化方案，可直接提供给任意模型（如 DeepSeek）或开发者参考实施。
 > 项目位置：`E:\Project\Image2PinDouDesign`
 > 技术栈：React 18 + TypeScript + Vite 7 + Web Worker + PWA，纯客户端应用（图片不上传、无后端）。
-> 当前基线（2026-08-03 更新）：`npm test` **162/162 通过**（11 个测试文件），`npm run build` 成功（PWA 预缓存 13 项）。Round 3 已完成 1.4/1.9/2.5，commit `f10ffe6` 已推送并发布；亚古兽去背/推荐缺陷修复已完成本地回归、待发布，见下方「0.5 实施状态总览」。
+> 当前基线（2026-08-03 更新）：`npm test` **162/162 通过**（11 个测试文件），`npm run build` 成功（PWA 预缓存 13 项）。Round 3 commit `f10ffe6` 与亚古兽去背/推荐缺陷修复 commit `4933d72` 均已推送并发布，见下方「0.5 实施状态总览」。
 > 建议来源：代码审查 + [ui-ux-pro-max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) skill 检索（触控、加载反馈、表单、Pixel Art 风格等条目已标注出处）。
 
 ---
@@ -36,7 +36,7 @@
 >
 > **第三轮（2026-08-03，Round 3）**：完成焦点裁剪、项目/草稿统计口径与自动描边建议；测试 **156/156**、构建及本地/线上浏览器冒烟通过。commit `f10ffe6` 已推送 `origin/main` 并原子发布，回滚备份 `/var/www/image2pindou.backup-20260803-041852`。
 >
-> **缺陷修复（2026-08-03，本地待发布）**：修复高饱和纯色底的封闭孔洞残留、透明像素被量化为黑底、推荐分析错图及静默关闭透明的问题；测试 **162/162**、生产构建与真实亚古兽浏览器回归通过。
+> **缺陷修复（2026-08-03，已发布）**：修复高饱和纯色底的封闭孔洞残留、透明像素被量化为黑底、推荐分析错图及静默关闭透明的问题；测试 **162/162**、生产构建与本地/线上真实亚古兽浏览器回归通过。commit `4933d72` 已推送并原子发布，回滚备份 `/var/www/image2pindou.backup-20260803-044634`。
 
 ### ✅ 已实施
 
@@ -285,3 +285,4 @@
 - **发布记录（2026-08-03 晚，Round 2）**：第二轮产物（`assets/index-c14KWk2-.js` + `index-CwGCiFS-.css`，懒加载抠图 chunk `index-LLYB6zQB.js`）经同一 `promote-release.sh` 原子发布，备份 `image2pindou.backup-20260803-<HHMMSS>`；`nginx -t` 通过、`systemctl reload nginx` 成功；线上验证首页 200、新 hash 资源全部 200、manifest/图标正常。
 - **冗余克隆确认**：`ui-ux-pro-max-skill\` 克隆目录已删除（2026-08-02 记录），全盘复查（E:\、C:\Users、D:\ 根）无残留；全局唯一有效安装为 `C:\Users\Administrator\.codex\skills\ui-ux-pro-max\`。
 - **Round 3 发布记录（2026-08-03）**：1.4 焦点裁剪、1.9 统计口径、2.5 自动描边建议已完成；`npm test` 156/156、production build、本地真实浏览器和 375px 移动端冒烟通过。commit `f10ffe6` 已推送并部署；线上新 hash、PWA 文件和真实交互均通过，console error 为 0，回滚备份 `/var/www/image2pindou.backup-20260803-041852`。
+- **亚古兽缺陷修复发布记录（2026-08-03）**：commit `4933d72` 已推送并部署；主入口 `index-DSBQJR-B.js`、去背 chunk `index-CpwcNpUw.js`、PWA 文件全部 200，线上真实去背/推荐回归通过。部署时发现临时目录权限会导致 nginx 403，已将目录 `0755` / 文件 `0644` 固化到 `deploy/promote-release.sh`。
