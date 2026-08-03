@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { renderDesignToCanvas } from "../domain/rendering";
 import type { BeadDesign, PaletteColor } from "../domain/types";
 import { designFingerprint, getColorBuildProgress } from "../domain/workbench";
+import { IconCheck, IconEdit, IconPlus } from "./icons";
 
 type DesignPreviewProps = {
   design?: BeadDesign;
@@ -56,6 +57,10 @@ export function DesignPreview({
   const [focusCode, setFocusCode] = useState("H7");
   const [completedCells, setCompletedCells] = useState<Set<number>>(() => new Set());
   const [draftSaved, setDraftSaved] = useState(false);
+  // 键盘网格光标：cursorCell 是逻辑格子坐标，cursorBox 是屏幕像素框（由 effect 计算）。
+  const [cursorCell, setCursorCell] = useState<{ x: number; y: number } | null>(null);
+  const [cursorBox, setCursorBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const cursorRef = useRef<HTMLDivElement | null>(null);
 
   const byCode = useMemo(() => new Map(palette.map((color) => [color.code, color])), [palette]);
   const designCodes = useMemo(() => Object.entries(design?.colorCounts ?? {})
@@ -73,6 +78,7 @@ export function DesignPreview({
     setZoom("fit");
     setMode("view");
     setDraftSaved(false);
+    setCursorCell(null);
     const defaultCode = designCodes[0]?.[0] ?? "H7";
     setPaintCode(defaultCode);
     setFocusCode(defaultCode);
@@ -149,6 +155,34 @@ export function DesignPreview({
     return () => window.cancelAnimationFrame(frame);
   }, [zoom]);
 
+  // 根据画布实际显示尺寸换算光标高亮框的像素位置。
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !design || !cursorCell) {
+      setCursorBox(null);
+      return;
+    }
+    const cellSize = renderCellSizeRef.current;
+    const gutterX = canvas.width - design.boardWidth * cellSize;
+    const gutterY = canvas.height - design.boardHeight * cellSize;
+    const rect = canvas.getBoundingClientRect();
+    const scale = rect.width > 0 ? rect.width / canvas.width : 1;
+    setCursorBox({
+      left: (gutterX + cursorCell.x * cellSize) * scale,
+      top: (gutterY + cursorCell.y * cellSize) * scale,
+      width: cellSize * scale,
+      height: cellSize * scale
+    });
+  }, [cursorCell, design, mode, zoom]);
+
+  // 光标高亮框渲染完成后，把它滚动进可视区（方向键移动、聚焦、Tab 切回时都会触发）。
+  useEffect(() => {
+    if (!cursorBox) {
+      return;
+    }
+    cursorRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [cursorBox]);
+
   const persistCompleted = (next: Set<number>) => {
     setCompletedCells(next);
     if (!progressStorageKey || typeof window === "undefined") {
@@ -186,24 +220,11 @@ export function DesignPreview({
 
   const clearBuildProgress = () => persistCompleted(new Set());
 
-  const handleCanvasClick = (event: ReactMouseEvent<HTMLCanvasElement>) => {
+  // 鼠标点击与键盘 Enter/空格共用同一套格子动作，保证两种输入方式行为一致。
+  const applyCellAction = (x: number, y: number) => {
     if (!design || mode === "view") {
       return;
     }
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const bounds = canvas.getBoundingClientRect();
-    if (bounds.width <= 0 || bounds.height <= 0) return;
-
-    const cellSize = renderCellSizeRef.current;
-    const gutterX = canvas.width - design.boardWidth * cellSize;
-    const gutterY = canvas.height - design.boardHeight * cellSize;
-    const intrinsicX = (event.clientX - bounds.left) * canvas.width / bounds.width;
-    const intrinsicY = (event.clientY - bounds.top) * canvas.height / bounds.height;
-    const x = Math.floor((intrinsicX - gutterX) / cellSize);
-    const y = Math.floor((intrinsicY - gutterY) / cellSize);
-    if (x < 0 || y < 0 || x >= design.boardWidth || y >= design.boardHeight) return;
-
     const currentCode = design.matrix[y]?.[x] ?? null;
     if (mode === "pick") {
       if (currentCode) {
@@ -222,6 +243,72 @@ export function DesignPreview({
       onCellChange?.(x, y, paintCode);
     } else if (mode === "erase") {
       onCellChange?.(x, y, null);
+    }
+  };
+
+  const handleCanvasClick = (event: ReactMouseEvent<HTMLCanvasElement>) => {
+    if (!design || mode === "view") {
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+
+    const cellSize = renderCellSizeRef.current;
+    const gutterX = canvas.width - design.boardWidth * cellSize;
+    const gutterY = canvas.height - design.boardHeight * cellSize;
+    const intrinsicX = (event.clientX - bounds.left) * canvas.width / bounds.width;
+    const intrinsicY = (event.clientY - bounds.top) * canvas.height / bounds.height;
+    const x = Math.floor((intrinsicX - gutterX) / cellSize);
+    const y = Math.floor((intrinsicY - gutterY) / cellSize);
+    if (x < 0 || y < 0 || x >= design.boardWidth || y >= design.boardHeight) return;
+
+    // 点击时同步光标位置，键盘用户与鼠标用户看到同一格。
+    setCursorCell({ x, y });
+    applyCellAction(x, y);
+  };
+
+  // 键盘网格操作：方向键移动光标，Enter/空格按当前模式动作，Delete/Backspace 擦除。
+  const handleGridKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!design) {
+      return;
+    }
+    const width = design.boardWidth;
+    const height = design.boardHeight;
+    const current = cursorCell ?? { x: 0, y: 0 };
+
+    let target: { x: number; y: number } | null = null;
+    if (event.key === "ArrowUp") {
+      target = { x: current.x, y: Math.max(0, current.y - 1) };
+    } else if (event.key === "ArrowDown") {
+      target = { x: current.x, y: Math.min(height - 1, current.y + 1) };
+    } else if (event.key === "ArrowLeft") {
+      target = { x: Math.max(0, current.x - 1), y: current.y };
+    } else if (event.key === "ArrowRight") {
+      target = { x: Math.min(width - 1, current.x + 1), y: current.y };
+    }
+    if (target) {
+      event.preventDefault();
+      setCursorCell(target);
+      return;
+    }
+
+    if (event.key === "Enter" || event.key === " ") {
+      if (mode === "view") {
+        return;
+      }
+      event.preventDefault();
+      applyCellAction(current.x, current.y);
+      return;
+    }
+
+    if (event.key === "Delete" || event.key === "Backspace") {
+      if (mode !== "paint" && mode !== "erase") {
+        return;
+      }
+      event.preventDefault();
+      onCellChange?.(current.x, current.y, null);
     }
   };
 
@@ -247,7 +334,7 @@ export function DesignPreview({
   };
 
   const zoomLabel = zoom === "fit" ? "适应屏幕" : `${Math.round(zoom * 100)}%`;
-  const canvasStyle = zoom === "fit" || canvasWidth === 0
+  const stageStyle = zoom === "fit" || canvasWidth === 0
     ? undefined
     : { width: `${Math.round(canvasWidth * zoom)}px` };
   const paintColor = byCode.get(paintCode);
@@ -279,9 +366,9 @@ export function DesignPreview({
                     <small>选择工具后直接点击图纸格子，修改会立即反映到下载文件。</small>
                   </div>
                   {mode === "view" ? (
-                    <button type="button" className="button primary" onClick={() => selectMode("paint")}><span aria-hidden="true">✎ </span>开始编辑图纸</button>
+                    <button type="button" className="button primary" aria-pressed={false} onClick={() => selectMode("paint")}><IconEdit />开始编辑图纸</button>
                   ) : (
-                    <button type="button" className="button secondary" onClick={() => selectMode("view")}><span aria-hidden="true">✓ </span>完成编辑</button>
+                    <button type="button" className="button secondary" aria-pressed={true} onClick={() => selectMode("view")}><IconCheck />完成编辑</button>
                   )}
                 </div>
                 <div className="workbench-modes" role="group" aria-label="图纸操作模式">
@@ -361,26 +448,44 @@ export function DesignPreview({
             )}
 
             <div className="canvas-toolbar">
-              <span>{mode === "view" ? "放大后可滑动查看每格色号与坐标" : "当前可直接点格子操作"}</span>
+              <span>{mode === "view"
+                ? "放大后可滑动查看每格色号与坐标；聚焦图纸后可用方向键逐格查看"
+                : "点格子或按方向键移动光标，Enter/空格上色，Delete 擦除"}</span>
               <div className="zoom-controls" role="group" aria-label="图纸缩放">
                 <button type="button" onClick={zoomOut} disabled={zoom === "fit"} aria-label="缩小图纸">−</button>
                 <button type="button" className="zoom-value" onClick={() => setZoom("fit")}>{zoomLabel}</button>
-                <button type="button" onClick={zoomIn} disabled={zoom === 2} aria-label="放大图纸">＋</button>
+                <button type="button" onClick={zoomIn} disabled={zoom === 2} aria-label="放大图纸"><IconPlus /></button>
               </div>
             </div>
             <div
               ref={viewportRef}
               className={`canvas-viewport ${zoom === "fit" ? "is-fit" : "is-zoomed"} ${mode !== "view" ? "is-interactive" : ""}`}
               tabIndex={0}
-              aria-label="可缩放、编辑和标记进度的拼豆图纸"
+              role="grid"
+              aria-rowcount={design.boardHeight}
+              aria-colcount={design.boardWidth}
+              aria-label="拼豆图纸网格：可用方向键移动光标，Enter 或空格上色，Delete 擦除"
+              onFocus={() => {
+                if (!cursorCell) {
+                  setCursorCell({ x: 0, y: 0 });
+                } else {
+                  // Tab 切走再切回时已有关键格：确保光标框仍然可见。
+                  cursorRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+                }
+              }}
+              onKeyDown={handleGridKeyDown}
               onDoubleClick={() => { if (mode === "view") setZoom((current) => current === "fit" ? 1 : "fit"); }}
             >
-              <canvas
-                ref={canvasRef}
-                style={canvasStyle}
-                aria-label={`${design.fileName} 拼豆图纸`}
-                onClick={handleCanvasClick}
-              />
+              <div className={`canvas-stage ${zoom === "fit" ? "is-fit" : "is-zoomed"}`} style={stageStyle}>
+                <canvas
+                  ref={canvasRef}
+                  aria-label={`${design.fileName} 拼豆图纸`}
+                  onClick={handleCanvasClick}
+                />
+                {cursorBox && (
+                  <div ref={cursorRef} className="grid-cursor" style={cursorBox} aria-hidden="true" />
+                )}
+              </div>
             </div>
             <div className="canvas-footer">
               <figcaption>拼豆图纸 · 粗线为 52 针分板边界</figcaption>
@@ -407,3 +512,6 @@ export function DesignPreview({
     </section>
   );
 }
+
+
+

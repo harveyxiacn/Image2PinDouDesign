@@ -17,3 +17,6 @@ docs/samples/
 
 # Local regression fixtures may contain third-party reference artwork.
 testimage/
+
+# Local dev server logs
+vite-dev*.log

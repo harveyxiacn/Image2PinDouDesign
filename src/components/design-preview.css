@@ -1,0 +1,201 @@
+/* ============================================================
+   DesignPreview 专属样式：键盘网格光标 / 转换进度与取消 / 错误边界
+   仅允许追加在此文件，不要改动 styles.css。
+   ============================================================ */
+
+/* ---- 画布网格：stage 包裹层 + 键盘光标高亮框 ---- */
+.canvas-stage {
+  position: relative;
+  display: block;
+}
+
+.canvas-stage.is-fit {
+  width: 100%;
+}
+
+.canvas-stage.is-zoomed {
+  width: max-content;
+}
+
+.canvas-stage.is-zoomed canvas {
+  width: 100%;
+  height: auto;
+}
+
+.grid-cursor {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  border: 2px solid #2563eb;
+  outline: 1px solid rgba(255, 255, 255, 0.9);
+  background: rgba(37, 99, 235, 0.16);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.28);
+}
+
+/* 网格容器获得键盘焦点时保持可见焦点环（含程序化聚焦的场景） */
+.canvas-viewport[role="grid"]:focus {
+  outline: 3px solid rgba(61, 90, 128, 0.4);
+  outline-offset: 2px;
+}
+
+/* ---- 转换进度与取消（App 主列“正在生成图纸…”区域） ---- */
+.converting-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  width: 100%;
+  max-width: 540px;
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+
+.converting-banner > strong {
+  font-size: 0.82rem;
+}
+
+.conversion-task-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.conversion-task {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px auto;
+  grid-template-areas:
+    "name name cancel"
+    "bar percent cancel";
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 4px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: #1e293b;
+}
+
+.conversion-task-name {
+  grid-area: name;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversion-task-bar {
+  grid-area: bar;
+  width: 100%;
+  min-width: 72px;
+  height: 8px;
+  accent-color: #2563eb;
+}
+
+.conversion-task-percent {
+  grid-area: percent;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 42px;
+}
+
+.conversion-cancel {
+  grid-area: cancel;
+  justify-self: end;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.conversion-cancel:hover {
+  border-color: #94a3b8;
+  background: #f1f5f9;
+}
+
+.conversion-cancel:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.55);
+  outline-offset: 1px;
+}
+
+/* ---- 错误边界恢复界面 ---- */
+.error-boundary {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 32px 20px;
+  box-sizing: border-box;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.error-boundary-card {
+  width: 100%;
+  max-width: 460px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 28px 24px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+  text-align: center;
+}
+
+.error-boundary-card h1 {
+  margin: 0 0 10px;
+  font-size: 1.35rem;
+}
+
+.error-boundary-card p {
+  margin: 0 0 12px;
+  color: #475569;
+  line-height: 1.6;
+}
+
+.error-boundary-message {
+  font-family: ui-monospace, monospace;
+  font-size: 0.82rem;
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 8px 10px;
+  word-break: break-word;
+}
+
+.error-boundary-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.error-boundary-actions button,
+.error-boundary-actions a {
+  min-height: 44px;
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.error-boundary-actions button {
+  border: none;
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.error-boundary-actions a {
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #334155;
+}

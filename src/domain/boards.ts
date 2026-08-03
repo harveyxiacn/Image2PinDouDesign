@@ -9,6 +9,20 @@ export const BOARD_PRESETS: BoardPreset[] = [
     description: "像素画自动恢复原始逻辑格数，照片则使用 52 针。"
   },
   {
+    id: "29",
+    name: "29 针",
+    width: 29,
+    height: 29,
+    description: "真实方形板（29x29 针），适合小图、头像。"
+  },
+  {
+    id: "50",
+    name: "50 针",
+    width: 50,
+    height: 50,
+    description: "真实方形板（50x50 针），常见主力板型。"
+  },
+  {
     id: "52",
     name: "52 针",
     width: 52,
@@ -66,4 +80,19 @@ export function sanitizeBoardDimension(value: number): number {
   }
 
   return Math.max(8, Math.min(208, Math.round(value)));
+}
+
+/**
+ * 该板型预设对应的单块物理拼豆板针数（打印分页与辅助线用）。
+ * 104 / 156 / 52x104 等拼接预设的物理单板仍是 52 针。
+ */
+export function getBoardTilePins(presetId: string): number {
+  switch (presetId) {
+    case "29":
+      return 29;
+    case "50":
+      return 50;
+    default:
+      return 52;
+  }
 }

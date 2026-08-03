@@ -7,7 +7,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["pindou.svg"],
+      includeAssets: ["pindou.svg", "pindou-192.png", "pindou-512.png"],
       manifest: {
         name: "拼豆图纸工坊",
         short_name: "拼豆图纸",
@@ -23,11 +23,29 @@ export default defineConfig({
             sizes: "any",
             type: "image/svg+xml",
             purpose: "any maskable"
+          },
+          {
+            src: "pindou-192.png",
+            sizes: "192x192",
+            type: "image/png",
+            purpose: "any"
+          },
+          {
+            src: "pindou-512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "any"
+          },
+          {
+            src: "pindou-512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "maskable"
           }
         ]
       },
       workbox: {
-        globPatterns: ["**/*.{js,css,html,svg,woff2}"],
+        globPatterns: ["**/*.{js,css,html,svg,png,woff2}"],
         // 抠图用的 onnxruntime + 24MB WASM 是按需懒加载，别塞进首屏预缓存；
         // 用到时再下载，并交给浏览器/Cloudflare 缓存。
         globIgnores: ["**/ort*", "**/*.wasm"],

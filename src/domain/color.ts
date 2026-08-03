@@ -1,4 +1,4 @@
-import type { Lab, Rgb } from "./types";
+import type { Lab, PaletteColor, Rgb } from "./types";
 
 const WHITE_POINT = {
   x: 95.047,
@@ -56,6 +56,52 @@ export function rgbToLab(rgb: Rgb): Lab {
   };
 }
 
+// 粗筛：用便宜的 ΔE*76 平方距离在全色卡上找最近色，仅用于"哪些色更常用"、
+// 中值滤波量化等不要求感知精度、却要跑很多次的场景，避免重复计算 CIEDE2000。
+export function findNearestCodeByLab(lab: Lab, palette: PaletteColor[]): string {
+  return palette[findNearestPaletteIndexByLab(lab, palette)].code;
+}
+
+export function findNearestPaletteIndexByLab(lab: Lab, palette: PaletteColor[]): number {
+  if (palette.length === 0) {
+    throw new Error("Palette cannot be empty");
+  }
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < palette.length; index += 1) {
+    const distance = labDistanceSquared(lab, palette[index].lab);
+    if (distance < bestDistance) {
+      bestIndex = index;
+      bestDistance = distance;
+    }
+  }
+
+  return bestIndex;
+}
+
+// 最终落色：用 CIEDE2000 取感知最接近的拼豆色号。
+// ΔE*76 在蓝色与高饱和区域偏差明显（蓝/紫系会被低估距离），
+// 因此最终映射必须用 CIEDE2000，不能为了性能换成欧氏距离。
+export function findNearestPaletteColor(rgb: Rgb, palette: PaletteColor[]): PaletteColor {
+  if (palette.length === 0) {
+    throw new Error("Palette cannot be empty");
+  }
+
+  const lab = rgbToLab(rgb);
+  let best = palette[0];
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const color of palette) {
+    const distance = ciede2000(lab, color.lab);
+    if (distance < bestDistance) {
+      best = color;
+      bestDistance = distance;
+    }
+  }
+
+  return best;
+}
 // 快速但粗糙的 ΔE*76（Lab 欧氏距离平方）。仅用于"哪些色更常用"这类
 // 不要求感知精度、却要在全色卡上跑很多次的粗筛场景。
 export function labDistanceSquared(left: Lab, right: Lab): number {
@@ -163,3 +209,5 @@ function pivotXyz(value: number): number {
     ? Math.cbrt(value)
     : (7.787 * value) + (16 / 116);
 }
+
+

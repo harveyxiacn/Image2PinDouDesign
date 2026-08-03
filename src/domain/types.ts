@@ -63,6 +63,8 @@ export type ConversionSettings = {
   keepTransparent: boolean;
   transparentThreshold: number;
   dither: boolean;
+  // 抖动算法：floyd-steinberg（默认，误差扩散）或 bayer（4x4 有序抖动）。
+  ditherMode?: "floyd-steinberg" | "bayer";
   fit?: FitMode;
   // 自动识别像素画并保持硬边；nearest 强制锐利采样，area 适合照片的面积平均。
   sampling?: SamplingMode;

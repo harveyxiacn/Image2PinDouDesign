@@ -1,4 +1,5 @@
 import type { ChangeEvent, DragEvent } from "react";
+import { IconPlus } from "./icons";
 
 type UploadPanelProps = {
   onFiles: (files: File[]) => void;
@@ -35,7 +36,9 @@ export function UploadPanel({ onFiles, isProcessing }: UploadPanelProps) {
           multiple
           onChange={handleChange}
         />
-        <span className="dropzone-icon">+</span>
+        <span className="dropzone-icon">
+          <IconPlus aria-hidden="true" />
+        </span>
         <strong>{isProcessing ? "正在读取图片..." : "拖拽图片到这里，或点击选择"}</strong>
         <small>一次可处理多张图，系统会自动汇总用豆数量。</small>
       </label>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { RemovalProgress } from "../domain/backgroundRemoval";
+import { IconClose, IconTrash } from "./icons";
 
 export type CropFractions = { fx: number; fy: number; fw: number; fh: number };
 
@@ -100,7 +101,10 @@ export function CropDialog({ previewUrl, title, busy, progress, onCancel, onSubm
       <div className="crop-modal">
         <div className="crop-head">
           <h3>{title}</h3>
-          <button type="button" className="link-button" onClick={onCancel} disabled={busy}>关闭</button>
+          <button type="button" className="link-button" onClick={onCancel} disabled={busy}>
+            <IconClose className="link-button-icon" />
+            关闭
+          </button>
         </div>
 
         <p className="muted">在图上拖一个框圈住一个主体（不框则用整张图）。智能去背景会优先精准清除纯色底，复杂背景再使用 AI，并自动裁到主体边界。</p>
@@ -144,7 +148,10 @@ export function CropDialog({ previewUrl, title, busy, progress, onCancel, onSubm
             <span>智能去背景（复杂背景首次会下载 AI 模型）</span>
           </label>
           <div className="button-row">
-            <button type="button" className="button secondary" onClick={() => setRect(null)} disabled={busy || !rect}>清除选框</button>
+            <button type="button" className="button secondary" onClick={() => setRect(null)} disabled={busy || !rect}>
+              <IconTrash className="button-icon" />
+              清除选框
+            </button>
             <button type="button" className="button primary" onClick={submit} disabled={busy}>添加为新图纸</button>
           </div>
         </div>

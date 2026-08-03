@@ -5,8 +5,9 @@ import { PalettePanel } from "./components/PalettePanel";
 import { SettingsPanel, type UiSettings } from "./components/SettingsPanel";
 import { StatsTable } from "./components/StatsTable";
 import { UploadPanel } from "./components/UploadPanel";
+import { IconClose, IconCrop, IconDownload, IconEdit, IconPlus, IconSettings } from "./components/icons";
 import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
-import { getBoardSize } from "./domain/boards";
+import { getBoardSize, getBoardTilePins } from "./domain/boards";
 import { countMatrixColors, summarizeProject } from "./domain/conversion";
 import { autoCropToContent, cropPixelSource, rectFromFractions } from "./domain/crop";
 import { countsToCsv, downloadBlob, downloadTextFile, openPrintableSheet } from "./domain/exporters";
@@ -40,6 +41,7 @@ const initialSettings: UiSettings = {
   sampling: "auto",
   autoFrame: true,
   dither: false,
+  ditherMode: "floyd-steinberg",
   adjustments: { brightness: 0, contrast: 0, saturation: 0 },
   smooth: 0,
   outline: false,
@@ -54,6 +56,13 @@ type InventoryState = {
 type EditHistory = {
   past: BeadDesign[];
   future: BeadDesign[];
+};
+
+// 每个转换任务在 UI 上的进度（App 主列的“正在生成图纸…”区域）。
+type ConversionTaskProgress = {
+  fileName: string;
+  percent: number;
+  phase: string;
 };
 
 const MAX_EDIT_HISTORY = 30;
@@ -136,9 +145,12 @@ export default function App() {
   const [cropProgress, setCropProgress] = useState<RemovalProgress | null>(null);
   const [isExportingPng, setIsExportingPng] = useState(false);
   const [editHistories, setEditHistories] = useState<Record<string, EditHistory>>({});
+  const [conversionProgress, setConversionProgress] = useState<Record<string, ConversionTaskProgress>>({});
 
   const workerRef = useRef<Worker | null>(null);
   const generationRef = useRef(0);
+  // 用户点击“取消”后已放弃的任务 id；结果即使到达也会被丢弃。
+  const cancelledConversionIdsRef = useRef(new Set<string>());
   const generatedDesignsRef = useRef(new Map<string, BeadDesign>());
   const localDraftsRef = useRef<BeadDesign[]>(designs);
   const localDraftIdsRef = useRef(new Set(designs.map((design) => design.id)));
@@ -186,6 +198,8 @@ export default function App() {
     }
     if (images.length === 0) {
       generationRef.current += 1;
+      cancelledConversionIdsRef.current.clear();
+      setConversionProgress({});
       setDesigns((current) => current.filter((design) => localDraftIdsRef.current.has(design.id)));
       setEditHistories({});
       generatedDesignsRef.current.clear();
@@ -194,6 +208,11 @@ export default function App() {
     }
 
     const generation = (generationRef.current += 1);
+    cancelledConversionIdsRef.current.clear();
+    setConversionProgress(Object.fromEntries(images.map((image) => [
+      image.id,
+      { fileName: image.fileName, percent: 0, phase: "prepare" }
+    ])));
     const results = new Map<string, BeadDesign>();
     let pending = images.length;
     setIsConverting(true);
@@ -203,7 +222,42 @@ export default function App() {
       if (data.generation !== generationRef.current) {
         return;
       }
+      // 带 type 字段的是进度/取消消息；design/error 保持旧协议不变。
+      if ("type" in data) {
+        // 进度消息：只更新对应任务的百分比，不参与完成计数。
+        if (data.type === "progress") {
+          if (cancelledConversionIdsRef.current.has(data.id)) {
+            return;
+          }
+          setConversionProgress((current) => ({
+            ...current,
+            [data.id]: {
+              fileName: current[data.id]?.fileName ?? images.find((image) => image.id === data.id)?.fileName ?? "",
+              percent: data.percent,
+              phase: data.phase
+            }
+          }));
+          return;
+        }
+        // 任务在 worker 侧被取消并跳过：与 design/error 一样是终结消息。
+        setConversionProgress((current) => removeProgressEntry(current, data.id));
+        pending -= 1;
+        if (pending <= 0) {
+          setIsConverting(false);
+        }
+        return;
+      }
       if ("design" in data) {
+        if (cancelledConversionIdsRef.current.has(data.id)) {
+          // 用户已取消该任务：结果即使到达也直接丢弃，只收尾计数。
+          cancelledConversionIdsRef.current.delete(data.id);
+          setConversionProgress((current) => removeProgressEntry(current, data.id));
+          pending -= 1;
+          if (pending <= 0) {
+            setIsConverting(false);
+          }
+          return;
+        }
         results.set(data.id, data.design);
         generatedDesignsRef.current.set(data.id, data.design);
         setEditHistories((current) => {
@@ -215,6 +269,7 @@ export default function App() {
       } else {
         pending -= 1;
         setError(data.error);
+        setConversionProgress((current) => removeProgressEntry(current, data.id));
         if (pending <= 0) {
           setIsConverting(false);
         }
@@ -224,6 +279,7 @@ export default function App() {
         ...current.filter((design) => localDraftIdsRef.current.has(design.id)),
         ...images.map((image) => results.get(image.id)).filter((design): design is BeadDesign => Boolean(design))
       ]);
+      setConversionProgress((current) => removeProgressEntry(current, data.id));
       pending -= 1;
       if (pending <= 0) {
         setIsConverting(false);
@@ -246,6 +302,7 @@ export default function App() {
             keepTransparent: settings.keepTransparent,
             transparentThreshold: 10,
             dither: settings.dither,
+            ditherMode: settings.ditherMode,
             fit: settings.fit,
             sampling: settings.sampling,
             autoFrame: settings.autoFrame,
@@ -356,6 +413,50 @@ export default function App() {
     persistDraftMutation(nextDesign);
     setDesigns((current) => current.map((design) => design.id === activeDesign.id ? nextDesign : design));
   };
+
+  const cancelConversion = (id: string) => {
+    // 先在本端登记，保证即使 worker 还在执行同步转换，
+    // 结果到达后也会被丢弃；同时通知 worker 跳过尚未开始的同代任务。
+    cancelledConversionIdsRef.current.add(id);
+    workerRef.current?.postMessage({ type: "cancel", generation: generationRef.current, id });
+    setConversionProgress((current) => removeProgressEntry(current, id));
+  };
+
+  // Ctrl+Z / Ctrl+Shift+Z（或 Ctrl+Y）撤销/重做；聚焦输入框、下拉框或可编辑区时不触发。
+  const undoRedoRef = useRef({ undo: undoActiveEdit, redo: redoActiveEdit });
+  undoRedoRef.current = { undo: undoActiveEdit, redo: redoActiveEdit };
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isEditable = target instanceof HTMLElement && (
+        target.isContentEditable ||
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT"
+      );
+      if (isEditable || !(event.ctrlKey || event.metaKey)) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          undoRedoRef.current.redo();
+        } else {
+          undoRedoRef.current.undo();
+        }
+      } else if (key === "y") {
+        event.preventDefault();
+        undoRedoRef.current.redo();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const resetActiveDesign = () => {
     if (activeGeneratedDesign) {
@@ -497,7 +598,7 @@ export default function App() {
       const blob = await renderDesignToBlob(activeDesign, MARD_PALETTE, {
         cellSize: getHighResolutionCellSize(activeDesign),
         showLabels: true,
-        boardLineEvery: 52,
+        boardLineEvery: getBoardTilePins(settings.boardPreset),
         showCoordinates: true
       });
       downloadBlob(`${stripExtension(activeDesign.fileName)}-高清色号图.png`, blob);
@@ -512,7 +613,12 @@ export default function App() {
     if (!activeDesign) {
       return;
     }
-    const opened = openPrintableSheet(activeDesign, MARD_PALETTE);
+    const pins = getBoardTilePins(settings.boardPreset);
+    const opened = openPrintableSheet(activeDesign, MARD_PALETTE, {
+      boardWidth: pins,
+      boardHeight: pins,
+      boardLineEvery: pins
+    });
     if (!opened) {
       setError("浏览器拦截了打印窗口，请允许弹出窗口后重试。");
     }
@@ -548,12 +654,12 @@ export default function App() {
       </header>
 
       <nav className="mobile-nav" aria-label="手机端快捷导航">
-        <a href="#upload-title"><span aria-hidden="true">＋</span>上传</a>
+        <a href="#upload-title"><IconPlus />上传</a>
         <a href={activeDesign ? "#pattern-editor" : "#preview-title"}>
-          <span aria-hidden="true">✎</span>{activeDesign ? "编辑" : "图纸"}
+          <IconEdit />{activeDesign ? "编辑" : "图纸"}
         </a>
-        <a href="#settings-title"><span aria-hidden="true">⚙</span>设置</a>
-        <a href="#download-pattern"><span aria-hidden="true">↓</span>保存</a>
+        <a href="#settings-title"><IconSettings />设置</a>
+        <a href="#download-pattern"><IconDownload />保存</a>
       </nav>
 
       <main className="workspace">
@@ -565,7 +671,32 @@ export default function App() {
 
         <section className="main-column">
           {isConverting && (
-            <div className="converting-banner" role="status">正在生成图纸…</div>
+            <div className="converting-banner" role="status">
+              <strong>正在生成图纸…</strong>
+              {Object.keys(conversionProgress).length > 0 && (
+                <ul className="conversion-task-list">
+                  {Object.entries(conversionProgress).map(([id, task]) => (
+                    <li key={id} className="conversion-task">
+                      <span className="conversion-task-name" title={task.fileName}>{task.fileName}</span>
+                      <progress
+                        className="conversion-task-bar"
+                        value={task.percent}
+                        max={100}
+                        aria-label={`${task.fileName} 转换进度 ${task.percent}%`}
+                      />
+                      <span className="conversion-task-percent">{task.percent}%</span>
+                      <button
+                        type="button"
+                        className="conversion-cancel"
+                        onClick={() => cancelConversion(id)}
+                      >
+                        取消
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
           {designs.length > 0 && (
             <div className="design-tabs" aria-label="图纸列表">
@@ -580,7 +711,7 @@ export default function App() {
                     aria-label={`移除 ${design.fileName}`}
                     onClick={() => removeDesign(design.id)}
                   >
-                    ×
+                    <IconClose />
                   </button>
                 </span>
               ))}
@@ -594,7 +725,7 @@ export default function App() {
                 className="button small"
                 onClick={() => setCropImageId(activeDesign.id)}
               >
-                ✂️ 裁剪 / 智能去背景
+                <IconCrop /> 裁剪 / 智能去背景
               </button>
               <small className="muted">框选一个主体 → 智能去背景 → 生成独立图纸；可对同一张总图重复操作拆出多个。</small>
             </div>
@@ -606,7 +737,7 @@ export default function App() {
                 <strong>图纸已经可以编辑</strong>
                 <small>逐格改色、取色、擦除，支持撤销和恢复。</small>
               </div>
-              <a className="button primary" href="#pattern-editor"><span aria-hidden="true">✎ </span>编辑图纸</a>
+              <a className="button primary" href="#pattern-editor"><IconEdit />编辑图纸</a>
             </div>
           )}
 
@@ -690,4 +821,16 @@ export default function App() {
 
 function stripExtension(fileName: string): string {
   return fileName.replace(/\.[^.]+$/, "");
+}
+
+function removeProgressEntry(
+  current: Record<string, ConversionTaskProgress>,
+  id: string
+): Record<string, ConversionTaskProgress> {
+  if (!(id in current)) {
+    return current;
+  }
+  const next = { ...current };
+  delete next[id];
+  return next;
 }
