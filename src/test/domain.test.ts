@@ -4,11 +4,12 @@ import { dropBorderWhite } from "../domain/background";
 import { isDynamicImportFailure, removeBackgroundFromSource, removeUniformBorderBackground } from "../domain/backgroundRemoval";
 import { BOARD_PRESETS, getBoardSize } from "../domain/boards";
 import { autoCropToContent, autoFramePixelSource, cropPixelSource, findOpaqueBounds, rectFromFractions } from "../domain/crop";
-import { ciede2000, hexToRgb } from "../domain/color";
-import type { Lab, SampledGrid } from "../domain/types";
+import { ciede2000, findNearestCodeByLab, hexToRgb, labDistanceSquared, rgbToLab } from "../domain/color";
+import type { BeadDesign, Lab, SampledGrid } from "../domain/types";
 import {
   convertPixelSourceToDesign,
   countMatrixColors,
+  decontaminateGridEdges,
   estimatePixelArtScale,
   findNearestPaletteColor,
   isLikelyPixelArt,
@@ -18,7 +19,8 @@ import {
   resolveSmartGridSize,
   summarizeProject
 } from "../domain/conversion";
-import { countsToCsv } from "../domain/exporters";
+import type { ConversionSettingsWithDither } from "../domain/conversion";
+import { countsToCsv, tileDesignForBoards } from "../domain/exporters";
 import { getHighResolutionCellSize } from "../domain/rendering";
 import { medianSmoothGrid } from "../domain/simplify";
 import type { PixelSource } from "../domain/types";
@@ -41,6 +43,12 @@ describe("board presets", () => {
     expect(BOARD_PRESETS.map((preset) => preset.id)).toContain("52");
     expect(getBoardSize("104", 1, 1)).toEqual({ width: 104, height: 104 });
     expect(getBoardSize("custom", 34, 55)).toEqual({ width: 34, height: 55 });
+  });
+
+  it("includes real 29x29 and 50x50 physical board presets", () => {
+    expect(BOARD_PRESETS.map((preset) => preset.id)).toEqual(expect.arrayContaining(["29", "50"]));
+    expect(getBoardSize("29", 1, 1)).toEqual({ width: 29, height: 29 });
+    expect(getBoardSize("50", 1, 1)).toEqual({ width: 50, height: 50 });
   });
 });
 
@@ -139,6 +147,76 @@ describe("ignore white background (border flood-fill)", () => {
     const cells = [C, C, C, C].map((c) => ({ ...c }));
     const grid = { width: 2, height: 2, cells };
     expect(dropBorderWhite(grid, 240)).toBe(grid);
+  });
+
+  it("adaptively removes a light-gray border that the fixed 240 threshold would miss", () => {
+    const gray = { r: 232, g: 232, b: 232, a: 255 };
+    const red = { r: 255, g: 0, b: 0, a: 255 };
+    const cells = [
+      gray, gray, gray,
+      gray, red, gray,
+      gray, gray, gray
+    ].map((c) => ({ ...c }));
+    const grid = { width: 3, height: 3, cells };
+
+    // 自适应：先估计浅灰背景，再以 ΔE 容差清掉全部与边缘连通的背景格，主体保留
+    const adaptive = dropBorderWhite(grid);
+    expect(adaptive.cells.filter((cell) => cell === null)).toHaveLength(8);
+    expect(adaptive.cells[4]).not.toBeNull();
+
+    // 旧固定阈值 240 不认为 232 是"白"，一个都不清；adaptive:false 保持该历史行为
+    const legacy = dropBorderWhite(grid, 240, { adaptive: false });
+    expect(legacy.cells.every((cell) => cell !== null)).toBe(true);
+  });
+
+  it("keeps enclosed background-colored details that are not connected to the border", () => {
+    const gray = { r: 232, g: 232, b: 232, a: 255 };
+    const red = { r: 255, g: 0, b: 0, a: 255 };
+    const cells = [
+      gray, gray, gray, gray, gray,
+      gray, red, red, red, gray,
+      gray, red, gray, red, gray,
+      gray, red, red, red, gray,
+      gray, gray, gray, gray, gray
+    ].map((c) => ({ ...c }));
+    const out = dropBorderWhite({ width: 5, height: 5, cells });
+
+    // 与边缘相连的背景被清掉，被主体包住的同色格保留（不被误删）
+    expect(out.cells[0]).toBeNull();
+    expect(out.cells[12]).not.toBeNull();
+    expect(out.cells[12]!.r).toBe(232);
+  });
+});
+
+describe("semi-transparent edge decontamination", () => {
+  it("unmixes a semi-transparent edge pixel against its opaque neighbor", () => {
+    // 红(255,0,0) 与白底以 alpha=128 混合得到 (255,127,127)：反推应回到纯红前景
+    const grid: SampledGrid = {
+      width: 2,
+      height: 1,
+      cells: [
+        { r: 255, g: 127, b: 127, a: 128 },
+        { r: 255, g: 0, b: 0, a: 255 }
+      ]
+    };
+    const out = decontaminateGridEdges(grid);
+    const cell = out.cells[0]!;
+    expect(cell.r).toBe(255);
+    expect(cell.g).toBeCloseTo(0, 3);
+    expect(cell.b).toBeCloseTo(0, 3);
+    expect(cell.a).toBe(128);
+  });
+
+  it("leaves fully transparent and fully opaque cells untouched", () => {
+    const grid: SampledGrid = {
+      width: 2,
+      height: 1,
+      cells: [
+        { r: 10, g: 20, b: 30, a: 0 },
+        { r: 10, g: 20, b: 30, a: 255 }
+      ]
+    };
+    expect(decontaminateGridEdges(grid)).toBe(grid);
   });
 });
 
@@ -245,6 +323,21 @@ describe("median smoothing (denoise)", () => {
     expect(out.cells[0]).toBeNull();
     expect(out.cells[2]).toBeNull();
     expect(out.cells[1]).not.toBeNull();
+  });
+
+  it("with a palette never produces colors outside the palette", () => {
+    const twoTone = preparePalette([
+      { code: "R", nameZh: "红色", hex: "#ff0000" },
+      { code: "B", nameZh: "蓝色", hex: "#0000ff" }
+    ]);
+    // 3x3 红底、中心一个色板外的洋红噪点：先量化到色板再取中值，输出必来自色板
+    const cells = Array.from({ length: 9 }, () => solid(255, 0, 0));
+    cells[4] = solid(255, 0, 255);
+    const grid: SampledGrid = { width: 3, height: 3, cells };
+    const out = medianSmoothGrid(grid, 1, twoTone);
+    const center = out.cells[4]!;
+    expect(twoTone.map((color) => color.rgb))
+      .toContainEqual({ r: center.r, g: center.g, b: center.b });
   });
 });
 
@@ -393,6 +486,23 @@ describe("pixel-art detail recovery", () => {
       .toEqual({ width: 23, height: 31 });
   });
 
+  it("keeps pixel art smaller than 8x8 at its logical size instead of force-upscaling", () => {
+    const width = 6;
+    const height = 6;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const light = x < 3;
+        data.set(light ? [245, 170, 35, 255] : [10, 15, 22, 255], (y * width + x) * 4);
+      }
+    }
+    const source = { width, height, data };
+    expect(isLikelyPixelArt(source)).toBe(true);
+    // 小于 8x8 的像素画不再被强制放大到 8x8，保持原始逻辑尺寸（修复前会变成 8x8）
+    expect(resolveSmartGridSize(source, { boardWidth: 52, boardHeight: 52, smartSize: true }))
+      .toEqual({ width: 6, height: 6 });
+  });
+
   it("keeps area averaging available for photos while nearest mode preserves hard colors", () => {
     const source: PixelSource = {
       width: 2,
@@ -428,6 +538,24 @@ describe("color conversion", () => {
     const nearest = findNearestPaletteColor({ r: 245, g: 18, b: 20 }, palette);
 
     expect(nearest.code).toBe("R1");
+  });
+
+  it("uses CIEDE2000 even when a cheaper ΔE*76 prescreen would pick a different bead", () => {
+    const bluePalette = preparePalette([
+      { code: "D15", nameZh: "靛紫", hex: "#2f1f90" },
+      { code: "C9", nameZh: "宝蓝", hex: "#324bca" },
+      { code: "D4", nameZh: "深蓝紫", hex: "#182a84" }
+    ]);
+    const input = { r: 0, g: 0, b: 208 };
+    const lab = rgbToLab(input);
+
+    // 感知上（CIEDE2000）最近的是 D15，但 ΔE*76 平方距离会误判成 C9：
+    // 最终匹配必须保留 CIEDE2000，不能用欧氏距离预筛替代。
+    expect(findNearestPaletteColor(input, bluePalette).code).toBe("D15");
+    expect(findNearestCodeByLab(lab, bluePalette)).toBe("C9");
+    const c9 = bluePalette.find((color) => color.code === "C9")!;
+    const d15 = bluePalette.find((color) => color.code === "D15")!;
+    expect(labDistanceSquared(lab, c9.lab)).toBeLessThan(labDistanceSquared(lab, d15.lab));
   });
 });
 
@@ -715,6 +843,41 @@ describe("Floyd-Steinberg dithering", () => {
   });
 });
 
+describe("Bayer ordered dithering", () => {
+  it("optionally uses a deterministic 4x4 Bayer pattern for mid-tones", () => {
+    const bw = preparePalette([
+      { code: "K1", nameZh: "黑色", hex: "#000000" },
+      { code: "W1", nameZh: "白色", hex: "#ffffff" }
+    ]);
+    const source: PixelSource = {
+      width: 4,
+      height: 4,
+      data: new Uint8ClampedArray(4 * 4 * 4)
+    };
+    for (let i = 0; i < 4 * 4; i += 1) {
+      const idx = i * 4;
+      source.data[idx] = 128;
+      source.data[idx + 1] = 128;
+      source.data[idx + 2] = 128;
+      source.data[idx + 3] = 255;
+    }
+    const settings: ConversionSettingsWithDither = {
+      boardWidth: 4,
+      boardHeight: 4,
+      maxColors: "all",
+      keepTransparent: false,
+      transparentThreshold: 10,
+      dither: true,
+      fit: "stretch",
+      ditherMode: "bayer"
+    };
+    const design = convertPixelSourceToDesign(source, "gray.png", settings, bw);
+    // 中灰在黑白两色间按 Bayer 阈值抖动，两类豆都应出现（默认仍为 Floyd-Steinberg）
+    expect(design.colorCounts.K1).toBeGreaterThan(0);
+    expect(design.colorCounts.W1).toBeGreaterThan(0);
+  });
+});
+
 describe("allowed color restriction", () => {
   it("only emits codes from the allowed subset", () => {
     const palette = preparePalette([
@@ -806,5 +969,43 @@ describe("project statistics and exports", () => {
     expect(getHighResolutionCellSize({ boardWidth: 52, boardHeight: 52 })).toBe(32);
     expect(getHighResolutionCellSize({ boardWidth: 156, boardHeight: 156 })).toBe(31);
     expect(getHighResolutionCellSize({ boardWidth: 208, boardHeight: 208 })).toBe(23);
+  });
+
+  it("tiles a design into one printable page per physical board", () => {
+    const design: BeadDesign = {
+      id: "tile",
+      fileName: "tile.png",
+      boardWidth: 4,
+      boardHeight: 2,
+      matrix: [
+        ["A1", "A1", "B1", "B1"],
+        ["A1", "A1", "B1", "B1"]
+      ],
+      colorCounts: { A1: 4, B1: 4 }
+    };
+    const pages = tileDesignForBoards(design, 2, 2);
+    expect(pages).toHaveLength(2);
+    expect(pages[0]).toMatchObject({ pageIndex: 1, totalPages: 2, xStart: 1, xEnd: 2, yStart: 1, yEnd: 2 });
+    expect(pages[1]).toMatchObject({ pageIndex: 2, totalPages: 2, xStart: 3, xEnd: 4, yStart: 1, yEnd: 2 });
+    expect(pages[0].design.matrix).toEqual([["A1", "A1"], ["A1", "A1"]]);
+    expect(pages[1].design.matrix).toEqual([["B1", "B1"], ["B1", "B1"]]);
+    expect(pages[0].design.colorCounts).toEqual({ A1: 4 });
+    expect(pages[1].design.colorCounts).toEqual({ B1: 4 });
+  });
+
+  it("falls back to a single page when no board size is given", () => {
+    const design: BeadDesign = {
+      id: "single",
+      fileName: "single.png",
+      boardWidth: 2,
+      boardHeight: 1,
+      matrix: [["A1", "B1"]],
+      colorCounts: { A1: 1, B1: 1 }
+    };
+    const pages = tileDesignForBoards(design);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].pageIndex).toBe(1);
+    expect(pages[0].totalPages).toBe(1);
+    expect(pages[0].design.matrix).toEqual([["A1", "B1"]]);
   });
 });

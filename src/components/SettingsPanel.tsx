@@ -1,5 +1,6 @@
 import { BOARD_PRESETS } from "../domain/boards";
 import type { FitMode, ImageAdjustments, MaxColors, SamplingMode } from "../domain/types";
+import { IconChevronDown, IconRotateCcw } from "./icons";
 
 export type UiSettings = {
   boardPreset: string;
@@ -12,10 +13,30 @@ export type UiSettings = {
   sampling: SamplingMode;
   autoFrame: boolean;
   dither: boolean;
+  ditherMode: "floyd-steinberg" | "bayer";
   adjustments: ImageAdjustments;
   smooth: number;
   outline: boolean;
   ignoreWhiteBg: boolean;
+};
+
+/** 与 App.tsx initialSettings 保持一致的默认值，用于“恢复默认”。 */
+const DEFAULT_SETTINGS: UiSettings = {
+  boardPreset: "smart",
+  customWidth: 64,
+  customHeight: 64,
+  maxColors: 24,
+  keepTransparent: true,
+  showLabels: true,
+  fit: "contain",
+  sampling: "auto",
+  autoFrame: true,
+  dither: false,
+  ditherMode: "floyd-steinberg",
+  adjustments: { brightness: 0, contrast: 0, saturation: 0 },
+  smooth: 0,
+  outline: false,
+  ignoreWhiteBg: true
 };
 
 const smoothOptions: Array<{ label: string; value: number }> = [
@@ -64,9 +85,23 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
 
   return (
     <section className="panel settings-panel" aria-labelledby="settings-title">
-      <p className="eyebrow">Step 02</p>
-      <h2 id="settings-title">生成设置</h2>
+      <div className="section-header settings-head">
+        <div>
+          <p className="eyebrow">Step 02</p>
+          <h2 id="settings-title">生成设置</h2>
+        </div>
+        <button
+          type="button"
+          className="link-button"
+          onClick={() => onChange(DEFAULT_SETTINGS)}
+          title="恢复全部设置为默认值"
+        >
+          <IconRotateCcw className="link-button-icon" />
+          恢复默认
+        </button>
+      </div>
 
+      {/* 基础区：高频项 */}
       <label className="field">
         <span>板型</span>
         <select
@@ -107,20 +142,6 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
       )}
 
       <label className="field">
-        <span>适配方式</span>
-        <select
-          aria-label="适配方式"
-          value={settings.fit}
-          onChange={(event) => onChange({ ...settings, fit: event.target.value as FitMode })}
-        >
-          {fitOptions.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
-        </select>
-        <small className="muted">{activeFit.hint}</small>
-      </label>
-
-      <label className="field">
         <span>最大颜色数</span>
         <select
           value={String(settings.maxColors)}
@@ -136,121 +157,164 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
       </label>
 
       <label className="field">
-        <span>细节算法</span>
+        <span>适配方式</span>
         <select
-          aria-label="细节算法"
-          value={settings.sampling}
-          onChange={(event) => onChange({ ...settings, sampling: event.target.value as SamplingMode })}
+          aria-label="适配方式"
+          value={settings.fit}
+          onChange={(event) => onChange({ ...settings, fit: event.target.value as FitMode })}
         >
-          {samplingOptions.map((option) => (
+          {fitOptions.map((option) => (
             <option key={option.value} value={option.value}>{option.label}</option>
           ))}
         </select>
-        <small className="muted">{activeSampling.hint}</small>
+        <small className="muted">{activeFit.hint}</small>
       </label>
 
-      <div className="field">
-        <div className="field-head">
-          <span>图像预处理</span>
-          {hasAdjustment && (
-            <button
-              type="button"
-              className="link-button"
-              onClick={() => onChange({
-                ...settings,
-                adjustments: { brightness: 0, contrast: 0, saturation: 0 }
-              })}
+      {/* 高级区：低频项渐进披露 */}
+      <details className="advanced-settings">
+        <summary className="advanced-summary">
+          <span className="advanced-summary-label">
+            <IconChevronDown className="advanced-chevron" />
+            高级选项
+          </span>
+          <small>细节算法、图像预处理、描边与显示</small>
+        </summary>
+
+        <div className="advanced-body">
+          <label className="field">
+            <span>细节算法</span>
+            <select
+              aria-label="细节算法"
+              value={settings.sampling}
+              onChange={(event) => onChange({ ...settings, sampling: event.target.value as SamplingMode })}
             >
-              重置
-            </button>
-          )}
-        </div>
-        {adjustmentControls.map(({ key, label }) => (
-          <label className="slider-row" key={key}>
-            <span>{label}</span>
-            <input
-              type="range"
-              min={-100}
-              max={100}
-              step={1}
-              value={settings.adjustments[key]}
-              onChange={(event) => onChange({
-                ...settings,
-                adjustments: { ...settings.adjustments, [key]: Number(event.target.value) }
-              })}
-            />
-            <small className="slider-value">{settings.adjustments[key]}</small>
+              {samplingOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <small className="muted">{activeSampling.hint}</small>
           </label>
-        ))}
-      </div>
 
-      <label className="field">
-        <span>色块简化 / 降噪</span>
-        <select
-          aria-label="色块简化"
-          value={String(settings.smooth)}
-          onChange={(event) => onChange({ ...settings, smooth: Number(event.target.value) })}
-        >
-          {smoothOptions.map((option) => (
-            <option key={option.value} value={String(option.value)}>{option.label}</option>
-          ))}
-        </select>
-        <small className="muted">把碎噪点合并成干净色块；截图/照片类源建议开「弱」或「强」。</small>
-      </label>
+          <div className="field">
+            <div className="field-head">
+              <span>图像预处理</span>
+              {hasAdjustment && (
+                <button
+                  type="button"
+                  className="link-button"
+                  onClick={() => onChange({
+                    ...settings,
+                    adjustments: { brightness: 0, contrast: 0, saturation: 0 }
+                  })}
+                >
+                  重置
+                </button>
+              )}
+            </div>
+            {adjustmentControls.map(({ key, label }) => (
+              <label className="slider-row" key={key}>
+                <span>{label}</span>
+                <input
+                  type="range"
+                  min={-100}
+                  max={100}
+                  step={1}
+                  value={settings.adjustments[key]}
+                  onChange={(event) => onChange({
+                    ...settings,
+                    adjustments: { ...settings.adjustments, [key]: Number(event.target.value) }
+                  })}
+                />
+                <small className="slider-value">{settings.adjustments[key]}</small>
+              </label>
+            ))}
+          </div>
 
-      <label className="toggle">
-        <input
-          type="checkbox"
-          checked={settings.autoFrame}
-          onChange={(event) => onChange({ ...settings, autoFrame: event.target.checked })}
-        />
-        <span>智能紧贴主体（裁掉透明/白色留白，提高有效细节）</span>
-      </label>
+          <label className="field">
+            <span>色块简化 / 降噪</span>
+            <select
+              aria-label="色块简化"
+              value={String(settings.smooth)}
+              onChange={(event) => onChange({ ...settings, smooth: Number(event.target.value) })}
+            >
+              {smoothOptions.map((option) => (
+                <option key={option.value} value={String(option.value)}>{option.label}</option>
+              ))}
+            </select>
+            <small className="muted">把碎噪点合并成干净色块；截图/照片类源建议开「弱」或「强」。</small>
+          </label>
 
-      <label className="toggle">
-        <input
-          type="checkbox"
-          checked={settings.dither}
-          onChange={(event) => onChange({ ...settings, dither: event.target.checked })}
-        />
-        <span>启用抖动 (Floyd-Steinberg)</span>
-      </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.autoFrame}
+              onChange={(event) => onChange({ ...settings, autoFrame: event.target.checked })}
+            />
+            <span>智能紧贴主体（裁掉透明/白色留白，提高有效细节）</span>
+          </label>
 
-      <label className="toggle">
-        <input
-          type="checkbox"
-          checked={settings.keepTransparent}
-          onChange={(event) => onChange({ ...settings, keepTransparent: event.target.checked })}
-        />
-        <span>保留 PNG 透明区域为空格</span>
-      </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.dither}
+              onChange={(event) => onChange({ ...settings, dither: event.target.checked })}
+            />
+            <span>启用抖动</span>
+          </label>
+          {settings.dither && (
+            <label className="field">
+              <span>抖动算法</span>
+              <select
+                aria-label="抖动算法"
+                value={settings.ditherMode}
+                onChange={(event) =>
+                  onChange({ ...settings, ditherMode: event.target.value as "floyd-steinberg" | "bayer" })
+                }
+              >
+                <option value="floyd-steinberg">Floyd-Steinberg（误差扩散，推荐）</option>
+                <option value="bayer">Bayer 4×4（有序抖动，适合像素画硬边）</option>
+              </select>
+              <small className="muted">误差扩散适合照片渐变；有序抖动保留硬边细节。</small>
+            </label>
+          )}
 
-      <label className="toggle">
-        <input
-          type="checkbox"
-          checked={settings.ignoreWhiteBg}
-          onChange={(event) => onChange({ ...settings, ignoreWhiteBg: event.target.checked })}
-        />
-        <span>忽略白色背景（主体外白色不计入、不标色号）</span>
-      </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.keepTransparent}
+              onChange={(event) => onChange({ ...settings, keepTransparent: event.target.checked })}
+            />
+            <span>保留 PNG 透明区域为空格</span>
+          </label>
 
-      <label className="toggle">
-        <input
-          type="checkbox"
-          checked={settings.showLabels}
-          onChange={(event) => onChange({ ...settings, showLabels: event.target.checked })}
-        />
-        <span>在图纸格子中显示色号</span>
-      </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.ignoreWhiteBg}
+              onChange={(event) => onChange({ ...settings, ignoreWhiteBg: event.target.checked })}
+            />
+            <span>忽略白色背景（主体外白色不计入、不标色号）</span>
+          </label>
 
-      <label className="toggle">
-        <input
-          type="checkbox"
-          checked={settings.outline}
-          onChange={(event) => onChange({ ...settings, outline: event.target.checked })}
-        />
-        <span>黑色描边（H7，包含画布最外圈）</span>
-      </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.showLabels}
+              onChange={(event) => onChange({ ...settings, showLabels: event.target.checked })}
+            />
+            <span>在图纸格子中显示色号</span>
+          </label>
+
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.outline}
+              onChange={(event) => onChange({ ...settings, outline: event.target.checked })}
+            />
+            <span>黑色描边（H7，包含画布最外圈）</span>
+          </label>
+        </div>
+      </details>
     </section>
   );
 }
