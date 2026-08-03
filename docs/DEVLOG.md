@@ -29,7 +29,7 @@ npm run dev              # 本地开发 http://localhost:5173
 npm run preview          # 本地预览构建产物（默认 4173 端口）
 ```
 
-**标准发布流程（已在 Round 1 / Round 2 验证）：**
+**标准发布流程（已在 Round 1 / Round 2 / Round 3 验证）：**
 
 ```powershell
 # 1) 本地构建并校验
@@ -99,7 +99,7 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 - **部署 #2**：备份 `/var/www/image2pindou.backup-20260803-025904`，nginx -t + reload 通过，线上新 hash 资源全部 200。
 - **文档**：`deepseek-version-optimize.md` 已标记 2.1/2.3/2.4/5.1(partial)/5.6 完成并补部署记录。
 
-## 5. 2026-08-02（深夜）· 第三轮优化（Round 3，本地完成待发布）
+## 5. 2026-08-02（深夜）· 第三轮优化（Round 3，已发布）
 
 - **范围**：完成 `docs/ITERATIONS.md` 的下一轮 A（1.4 焦点控制、1.9 统计口径、2.5 自动描边建议），并在真实移动端视口回归中修复统计面板横向溢出。
 - **内容**：
@@ -109,7 +109,8 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
   - 移动端：统计筛选沿用 8px 间距与 44px 触控高度；为主列和统计面板补齐 `minmax(0, 1fr)` / `min-width: 0`，消除窄屏表格撑宽页面的问题。
 - **质量门**：`npm test` **156/156 通过**（11 文件）；`npm run build` 成功（PWA 预缓存 13 项 / 405.60 KiB）。
 - **浏览器冒烟**（Codex in-app Browser，本地 production preview）：上传真实 JPG、切换 cover、打开焦点裁剪、鼠标/键盘调整与恢复自动焦点、项目/草稿统计联动均通过；375px 视口无横向溢出，统计筛选按钮高度 44px，**零 console error**。
-- **发布状态**：本轮尚未 commit / push / 部署；生产站仍为 Round 2，避免把本地验证结果误记为线上版本。
+- **提交与发布**：commit `f10ffe6`（`feat: improve focal cropping, stats scope, and smart outlines`）已推送 `origin/main`；产物经 `promote-release.sh` 原子发布，回滚备份为 `/var/www/image2pindou.backup-20260803-041852`，`nginx -t` 与 reload 通过。
+- **线上验证**：首页、`manifest.webmanifest`、Service Worker、192/512 图标及新入口 `index-BVBuuA4J.js` / `index-CCJAWTfH.css` 均为 HTTP 200；生产站真实图片上传、52×52 转换、cover 焦点裁剪、键盘微调和项目/草稿统计联动通过，**零 console error**。
 
 ---
 
@@ -119,6 +120,7 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 |---|---|---|---|---|
 | 1 | 2026-08-02 | `29cd7bb` | `/var/www/image2pindou.backup-20260803-022716` | ✅ 线上验证通过 |
 | 2 | 2026-08-02 晚 | `ab6eb10` | `/var/www/image2pindou.backup-20260803-025904` | ✅ 线上 E2E 通过 |
+| 3 | 2026-08-03 | `f10ffe6` | `/var/www/image2pindou.backup-20260803-041852` | ✅ 线上焦点裁剪 / 统计筛选 E2E 通过 |
 
 > 时间说明：本地为 America/Vancouver；服务器备份目录名使用服务器时钟（UTC+ 时区），二者相差数小时属正常。
 

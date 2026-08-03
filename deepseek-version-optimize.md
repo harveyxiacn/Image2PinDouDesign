@@ -4,7 +4,7 @@
 > 适用范围：本文件为**独立自包含**的优化方案，可直接提供给任意模型（如 DeepSeek）或开发者参考实施。
 > 项目位置：`E:\Project\Image2PinDouDesign`
 > 技术栈：React 18 + TypeScript + Vite 7 + Web Worker + PWA，纯客户端应用（图片不上传、无后端）。
-> 当前本地基线（2026-08-02 深夜更新）：`npm test` **156/156 通过**（11 个测试文件），`npm run build` 成功（PWA 预缓存 13 项）。Round 3 已完成 1.4/1.9/2.5 并通过本地浏览器冒烟，但尚未 commit / push / 部署；生产站仍为 Round 2，见下方「0.5 实施状态总览」。
+> 当前基线（2026-08-03 更新）：`npm test` **156/156 通过**（11 个测试文件），`npm run build` 成功（PWA 预缓存 13 项）。Round 3 已完成 1.4/1.9/2.5，commit `f10ffe6` 已推送并发布，见下方「0.5 实施状态总览」。
 > 建议来源：代码审查 + [ui-ux-pro-max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) skill 检索（触控、加载反馈、表单、Pixel Art 风格等条目已标注出处）。
 
 ---
@@ -25,7 +25,7 @@
 
 ---
 
-## 0.5 实施状态总览（生产 Round 2；本地 Round 3 待发布）
+## 0.5 实施状态总览（生产 Round 3）
 
 > 三个并行 sub-agent（转换正确度 / UI 视觉 / 交互工程化）已于 2026-08-03 实施完成：测试 71/71 通过、构建成功，
 > 部署至 `https://pindou.fanni-panda.com`（VPS `136.175.83.102`，nginx 原子切换 `promote-release.sh`，旧版已备份）。
@@ -34,7 +34,7 @@
 > **第二轮（2026-08-03 晚，Round 2）**：又三个并行 sub-agent（智能化 / 工程化 / UI 集成）实施完成：测试 **142/142** 通过、构建成功，
 > 同样部署至 `https://pindou.fanni-panda.com` 并推送 `origin/main`（见 §8 发布记录）。
 >
-> **第三轮（2026-08-02 深夜，Round 3，本地）**：完成焦点裁剪、项目/草稿统计口径与自动描边建议；测试 **156/156**、构建及本地浏览器冒烟通过。当前未提交、未推送、未部署，不计入线上发布记录。
+> **第三轮（2026-08-03，Round 3）**：完成焦点裁剪、项目/草稿统计口径与自动描边建议；测试 **156/156**、构建及本地/线上浏览器冒烟通过。commit `f10ffe6` 已推送 `origin/main` 并原子发布，回滚备份 `/var/www/image2pindou.backup-20260803-041852`。
 
 ### ✅ 已实施
 
@@ -43,12 +43,12 @@
 | 1.1 半透明边缘去污染 | 颜色匹配前反推前景色，去除半透明边缘的背景污染 | `src/domain/conversion.ts` |
 | 1.2 自适应背景去除 | ΔE00 泛洪填充 + 边缘容差，背景色自适应（白底/花底） | `src/domain/background.ts` |
 | 1.3 色差算法 | 实际实现本就是全色板暴力 CIEDE2000；README 原“ΔE*76 预筛”描述不实，已更正并用 D15/C9 回归测试固化选色行为 | `README.md`、`src/test/domain.test.ts` |
-| 1.4 焦点控制（Round 3 本地） | 自动显著度焦点 + 手动点击/键盘微调；cover 以焦点锚定黄金分割附近裁剪窗口，CropDialog 预览最终范围 | `src/domain/focus.ts`、`conversion.ts`、`CropDialog.tsx` |
+| 1.4 焦点控制（Round 3） | 自动显著度焦点 + 手动点击/键盘微调；cover 以焦点锚定黄金分割附近裁剪窗口，CropDialog 预览最终范围 | `src/domain/focus.ts`、`conversion.ts`、`CropDialog.tsx` |
 | 1.5 抖动算法 | 新增 Bayer 抖动选项，可与 Floyd–Steinberg 切换 | `conversion.ts`、`types.ts`、`SettingsPanel.tsx` |
 | 1.6 中值滤波 | 色板域中值滤波，减小色块噪声 | `src/domain/simplify.ts`、`src/domain/color.ts` |
 | 1.7 板型预设 | 新增 29×29 / 50×50 板预设（`getBoardTilePins`） | `src/domain/boards.ts` |
 | 1.8 打印/PDF 按板分页 | 打印分页线按实际针数（`boardLineEvery`） | `src/domain/exporters.ts`、`App.tsx` |
-| 1.9 草稿与项目计数（Round 3 本地） | 项目总用豆支持全部/项目/草稿来源筛选，首页计数、差缺和采购 CSV 跟随当前口径 | `src/domain/projectStats.ts`、`StatsTable.tsx`、`App.tsx` |
+| 1.9 草稿与项目计数（Round 3） | 项目总用豆支持全部/项目/草稿来源筛选，首页计数、差缺和采购 CSV 跟随当前口径 | `src/domain/projectStats.ts`、`StatsTable.tsx`、`App.tsx` |
 | 1.10 小图约束 | 小图不再强制放大到 8×8 | `src/domain/conversion.ts` |
 | 3.1 渐进式披露 | 设置面板分级展示，避免平铺 | `SettingsPanel.tsx` |
 | 3.2 SVG 图标 | 18 个 SVG 图标替换全部 emoji 图标（＋✎⚙↓×✂️ 等） | `src/components/icons.tsx` 及全部组件 |
@@ -63,7 +63,7 @@
 | 2.1 一键参数推荐 | `analyzeSource` 图像分析（边缘锐度/色彩丰富度/唯一色/透明度/宽高比）+ `recommendSettings` 全参数推荐；设置面板「✨ 智能推荐」展示差异并一键应用 | `src/domain/recommend.ts`、`SettingsPanel.tsx`、`App.tsx` |
 | 2.3 风格预设 | 默认（智能）/ 像素画 / 照片渐变 / 简约低多边 4 预设一键切换，preset 可覆盖手动设置 | `src/domain/recommend.ts`、`SettingsPanel.tsx` |
 | 2.4 库存差缺清单 | 库存升级 v2（按色号计数、localStorage 持久化、v1 自动迁移）；统计表新增「已有/差缺」列（差缺>0 红色标注）；色板「项目用色记为库存」；一键导出 CSV 含库存 | `src/domain/shortfall.ts`、`StatsTable.tsx`、`PalettePanel.tsx`、`exporters.ts` |
-| 2.5 自动描边建议（Round 3 本地） | 图像分析增加高对比轮廓占比；高轮廓非照片素材建议开启 outline，照片保持关闭 | `src/domain/recommend.ts`、`src/test/domain-recommend.test.ts` |
+| 2.5 自动描边建议（Round 3） | 图像分析增加高对比轮廓占比；高轮廓非照片素材建议开启 outline，照片保持关闭 | `src/domain/recommend.ts`、`src/test/domain-recommend.test.ts` |
 | 3.2（新增部分） | 预设/推荐/库存等新控件沿用现有 SVG 图标体系与 design token | `SettingsPanel.tsx`、`StatsTable.tsx`、`styles.css` |
 | 5.1（partial） | `App.tsx` 净删 81 行：草稿序列化、转换竞态/取消状态机抽为纯模块并单测（React hooks 未拆） | `src/domain/drafts.ts`、`src/domain/conversionCoordinator.ts`、`App.tsx` |
 | 5.6 补充测试 | worker 竞态（`conversion-coordinator.test.ts` 14 例）、草稿往返（`drafts.test.ts` 10 例）、CSV 转义（`exporters.test.ts` 9 例）、推荐/库存领域测试（38 例） | `src/test/*` |
@@ -96,7 +96,7 @@
   - 将色差函数做成可注入，便于单测。
 - **验收**：新增"已知相近色对"单测，断言选色结果符合人工预期。
 
-### 1.4 cover/contain 焦点控制（✅ Round 3 本地完成）—— `src/components/CropDialog.tsx` + `src/domain/focus.ts`
+### 1.4 cover/contain 焦点控制（✅ Round 3 已发布）—— `src/components/CropDialog.tsx` + `src/domain/focus.ts`
 - **问题**：`cover`/`contain` 总是居中裁剪，人物面部、主体被切边。
 - **建议**：裁剪对话框增加**焦点选择**（点击图片设定焦点，或按显著度自动检测），裁切时以焦点为锚点而非几何中心。
 - **验收**：以人脸偏左的测试图验证裁切后主体完整。
@@ -122,7 +122,7 @@
 - **建议**：导出时按所选板型**分页**，每页一板，页眉标注"第 x 板 / 共 y 板 / 坐标范围"；PNG 导出可同时输出"整图 + 分板切片"。
 - **验收**：52 针板导出 208×208 图得到 4×4=16 页。
 
-### 1.9 草稿与项目计数（✅ Round 3 本地完成）—— `src/domain/projectStats.ts` / `App.tsx`
+### 1.9 草稿与项目计数（✅ Round 3 已发布）—— `src/domain/projectStats.ts` / `App.tsx`
 - **问题**："本机草稿"与正式项目被合在一起统计，存在双重计数，统计表（StatsTable）口径混乱。
 - **建议**：统计范围增加来源过滤（全部/仅项目/仅草稿），并在界面明示口径。
 - **验收**：创建 1 个项目 + 1 个草稿后，各口径数字正确。
@@ -150,7 +150,7 @@
 ### 2.4 库存差缺清单
 - 新增"我的库存"输入（按色号计数），转换完成后自动输出 `需要量 − 库存 = 差缺清单`，并允许一键导出采购清单 CSV。
 
-### 2.5 自动描边建议（✅ Round 3 本地完成）
+### 2.5 自动描边建议（✅ Round 3 已发布）
 - 对动漫/像素画自动检测高对比轮廓并建议 `outline` 参数，减少用户试错。
 - 已增加高对比轮廓占比指标与动漫线稿/照片回归测试；仅对高轮廓非照片素材建议开启。
 
@@ -282,4 +282,4 @@
 - **发布记录（2026-08-03）**：`npm run build` 产物经 `/usr/local/bin/promote-release.sh` 原子发布至 `/var/www/image2pindou`（备份 `image2pindou.backup-20260803-022716`）；`nginx -t` 通过、`systemctl reload nginx` 成功；线上验证 HTTP/2 200、新版 manifest（192/512 PNG + maskable）、OG 绝对 URL、全部 hash 资源 200。
 - **发布记录（2026-08-03 晚，Round 2）**：第二轮产物（`assets/index-c14KWk2-.js` + `index-CwGCiFS-.css`，懒加载抠图 chunk `index-LLYB6zQB.js`）经同一 `promote-release.sh` 原子发布，备份 `image2pindou.backup-20260803-<HHMMSS>`；`nginx -t` 通过、`systemctl reload nginx` 成功；线上验证首页 200、新 hash 资源全部 200、manifest/图标正常。
 - **冗余克隆确认**：`ui-ux-pro-max-skill\` 克隆目录已删除（2026-08-02 记录），全盘复查（E:\、C:\Users、D:\ 根）无残留；全局唯一有效安装为 `C:\Users\Administrator\.codex\skills\ui-ux-pro-max\`。
-- **Round 3 本地记录（2026-08-02 深夜）**：1.4 焦点裁剪、1.9 统计口径、2.5 自动描边建议已完成；`npm test` 156/156、production build、本地真实浏览器和 375px 移动端冒烟通过，console error 为 0。尚未 commit / push / 部署，生产站版本保持 Round 2。
+- **Round 3 发布记录（2026-08-03）**：1.4 焦点裁剪、1.9 统计口径、2.5 自动描边建议已完成；`npm test` 156/156、production build、本地真实浏览器和 375px 移动端冒烟通过。commit `f10ffe6` 已推送并部署；线上新 hash、PWA 文件和真实交互均通过，console error 为 0，回滚备份 `/var/www/image2pindou.backup-20260803-041852`。
