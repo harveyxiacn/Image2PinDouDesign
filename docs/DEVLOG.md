@@ -1,0 +1,118 @@
+# 拼豆图纸工坊 · 开发日志（DEVLOG）
+
+> 本文档按时间线记录本项目的功能迭代、测试/构建基线、发布与回滚备份，并附「环境与命令速查」。
+> 配套文档：
+> - `deepseek-version-optimize.md` —— 优化方案全文与实施状态（含 ui-ux-pro-max skill 依据）
+> - `docs/ITERATIONS.md` —— 后续迭代的详细规格与验收标准
+> - `design.md` / `docs/superpowers/` —— 原始设计文档与早期实现计划
+
+---
+
+## 0. 环境与命令速查
+
+| 项目 | 值 |
+|---|---|
+| 仓库 | `https://github.com/harveyxiacn/Image2PinDouDesign.git`（分支 `main`） |
+| 本地工作目录 | `E:\Project\Image2PinDouDesign` |
+| 生产域名 | `https://pindou.fanni-panda.com` |
+| 生产服务器 | VPS `136.175.83.102`（hostname `brightmaple-web`） |
+| SSH 登录 | `ssh -i C:\Users\Administrator\.ssh\rabisu2_ed25519 root@136.175.83.102` |
+| 站点目录 | `/var/www/image2pindou`（nginx 静态托管） |
+| 发布脚本 | 服务器 `/usr/local/bin/promote-release.sh`（镜像见本仓库 `deploy/promote-release.sh`） |
+
+**常用命令：**
+
+```bash
+npm test                 # Vitest 全量回归（当前 8 个文件 / 142 用例）
+npm run build            # tsc -b + vite build → dist/（PWA 预缓存）
+npm run dev              # 本地开发 http://localhost:5173
+npm run preview          # 本地预览构建产物（默认 4173 端口）
+```
+
+**标准发布流程（已在 Round 1 / Round 2 验证）：**
+
+```powershell
+# 1) 本地构建并校验
+npm test; npm run build
+# 2) 打发布包（勿用 Remove-Item；用唯一时间戳目录避免清理）
+$rel = "image2pindou-release-r2-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+Copy-Item -Recurse dist $rel
+scp -i C:\Users\Administrator\.ssh\rabisu2_ed25519 -r $rel root@136.175.83.102:/tmp/
+# 3) 服务器原子切换（自动备份 + nginx -t + reload，失败自动回滚）
+ssh -i C:\Users\Administrator\.ssh\rabisu2_ed25519 root@136.175.83.102 \
+  "/usr/local/bin/promote-release.sh /tmp/$rel /var/www/image2pindou"
+# 4) 线上验证：首页 200、HTML 内 hash 资源全部 200、manifest/图标 200
+```
+
+**线上验证要点**（Round 2 使用的脚本骨架，直接在服务器执行）：
+
+```bash
+base=https://pindou.fanni-panda.com
+curl -sI -o /dev/null -w "%{http_code} %{content_type}\n" $base/
+html=$(curl -s $base/)
+echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
+# 逐个 curl 校验 200；再校验 /manifest.webmanifest /pindou-512.png /registerSW.js /sw.js
+```
+
+**回滚**：`promote-release.sh` 每次发布都会把旧站点改名备份为
+`/var/www/image2pindou.backup-<UTC时间戳>`；如需回滚，把备份 `mv` 回 `image2pindou`
+并 `systemctl reload nginx` 即可（脚本自带 ERR trap 自动回滚失败的发布）。
+
+---
+
+## 1. 2026-05-29 · 项目启动与核心转换器
+
+- **Commits**：`04dbb60`（scaffold Vite+React+TS+PWA）、`ef14ff4`（核心转换器）、`d697f2c`（部署配置）、`662d5b3`（设计文档）
+- **内容**：
+  - 图片 → 拼豆图纸全链路：**CIEDE2000 感知色差**、291 色 MARD 色卡、Web Worker 离主线程转换、裁剪/AI 抠图、降噪、去白底、打印按板分页。
+  - 纯客户端架构（图片不上传），PWA 可离线安装。
+- **产出文档**：`design.md`、`docs/superpowers/plans/2026-05-27-pindou-designer.md`、`docs/superpowers/specs/2026-05-27-pindou-designer-design.md`。
+
+## 2. 2026-07-15 ~ 07-16 · 功能迭代期
+
+- **Commits**：`839ca53`（抠图/描边/部署改进）、`76baee7`（移动端查看与导出）、`ec095af`（智能像素画转换）、`9fb9a46`（交互式图纸工作台）、`5709e49`（编辑入口易发现修复）
+- **内容**：像素画网格恢复（放大图还原逻辑格）、显著度感知调色板、亮度/对比度/饱和度调节、Floyd-Steinberg/Bayer 抖动、工作台重绘/擦除/取色/撤销重做/镜像、键盘逐格导航、移动端「完成一格少一颗」辅助、本地草稿（最多 6 份）、项目级豆量汇总、CSV/PNG/打印导出。
+
+## 3. 2026-08-02 · 第一轮全面优化（Round 1）
+
+- **Commits**：`29cd7bb`（feat）+ `2af02a0`（docs）
+- **方式**：三个并行 sub-agent —— 转换正确度 / UI 视觉 / 交互工程化。
+- **内容**：
+  - 转换正确度：半透明边缘去污染、自适应背景去除（ΔE 泛洪）、CIEDE2000 回归固化、Bayer 抖动选项、色板域中值滤波、29×29/50×50 板型预设、打印按板分页、小图约束。
+  - UI：SVG 图标体系（18 个）、设置面板渐进披露、291 色面板折叠整合、转换进度+取消、触控目标 ≥44px、`prefers-reduced-motion`。
+  - UX/无障碍：画布键盘操作、撤销/重做快捷键、ErrorBoundary、OG/品牌 meta、PNG 192/512 + maskable PWA 图标。
+- **质量门**：`npm test` **71/71 通过**、`npm run build` 成功。
+- **skill 安装**：`ui-ux-pro-max` 全局安装至 `C:\Users\Administrator\.codex\skills\ui-ux-pro-max\`（所有 session 可加载）；冗余克隆 `ui-ux-pro-max-skill\` 已删除。
+- **部署 #1**：备份 `/var/www/image2pindou.backup-20260803-022716`，nginx -t + reload 通过，线上验证 HTTP/2 200、manifest/图标/OG 正常。
+
+## 4. 2026-08-02（晚）· 第二轮优化（Round 2）
+
+- **Commit**：`ab6eb10`（`feat: smart recommendations, style presets, inventory shortfall, and testable state machines`）
+- **方式**：三个并行 sub-agent —— 智能化 / 工程化 / UI 集成。
+- **内容**：
+  - 智能化：`src/domain/recommend.ts`（`analyzeSource` 降采样分析 → 像素画/照片分类 → `recommendSettings` 全参数推荐；4 个风格预设）、`src/domain/shortfall.ts`（库存 v2 按色号计数、localStorage 持久化、v1 自动迁移、差缺计算）。
+  - 工程化：`src/domain/drafts.ts`（草稿序列化纯模块）、`src/domain/conversionCoordinator.ts`（转换竞态/取消状态机）、`src/domain/exporters.ts` CSV 转义导出、`App.tsx` 机械重构**净删 81 行**（UI 零漂移）。
+  - UI 集成：设置面板「风格预设」chips +「✨ 智能推荐」差异一键应用；色板库存交互 +「项目用色记为库存」；统计表新增「已有/差缺」列（差缺红色高亮）。
+  - 测试：新增 71 个用例（recommend/shortfall/drafts/conversion-coordinator/exporters）。
+- **质量门**：`npm test` **142/142 通过**（8 文件）、`npm run build` 成功（PWA 预缓存 13 项 / 396.56 KiB；入口 `index-c14KWk2-.js` + `index-CwGCiFS-.css`，抠图懒加载 chunk `index-LLYB6zQB.js`）。
+- **浏览器冒烟**（Playwright + chromium-1169，本地 preview + 生产域名各一轮）：预设切换、上传 32×32 图、智能推荐出现并可一键应用、库存差缺 677→672→"—" 联动正确，**零 console/page error**。
+- **部署 #2**：备份 `/var/www/image2pindou.backup-20260803-025904`，nginx -t + reload 通过，线上新 hash 资源全部 200。
+- **文档**：`deepseek-version-optimize.md` 已标记 2.1/2.3/2.4/5.1(partial)/5.6 完成并补部署记录。
+
+---
+
+## 5. 发布记录汇总
+
+| # | 时间（本地） | 对应 commit | 服务器备份目录 | 结果 |
+|---|---|---|---|---|
+| 1 | 2026-08-02 | `29cd7bb` | `/var/www/image2pindou.backup-20260803-022716` | ✅ 线上验证通过 |
+| 2 | 2026-08-02 晚 | `ab6eb10` | `/var/www/image2pindou.backup-20260803-025904` | ✅ 线上 E2E 通过 |
+
+> 时间说明：本地为 America/Vancouver；服务器备份目录名使用服务器时钟（UTC+ 时区），二者相差数小时属正常。
+
+## 6. 测试基线演进
+
+| 日期 | 测试文件数 | 用例数 | 说明 |
+|---|---|---|---|
+| 2026-08-02（Round 1 后） | 3 | 71 | domain / app / design-preview |
+| 2026-08-02 晚（Round 2 后） | 8 | 142 | + recommend(18) / shortfall(20) / drafts(10) / conversion-coordinator(14) / exporters(9) |
