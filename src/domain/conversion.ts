@@ -453,6 +453,23 @@ export function estimatePixelArtScale(source: PixelSource): number | null {
     return strongest / total;
   };
 
+  const hasBalancedHalfPeriodPhases = (scores: Float64Array, period: number) => {
+    if (period < 5) return false;
+    const buckets = new Float64Array(period);
+    for (let position = 1; position < scores.length; position += 1) {
+      buckets[position % period] += scores[position];
+    }
+    const ranked = Array.from(buckets, (score, phase) => ({ score, phase }))
+      .sort((left, right) => right.score - left.score);
+    const [first, second] = ranked;
+    if (!first || !second || first.score <= 0 || second.score < first.score * 0.65) {
+      return false;
+    }
+    const directDistance = Math.abs(first.phase - second.phase);
+    const circularDistance = Math.min(directDistance, period - directDistance);
+    return Math.abs(circularDistance - period / 2) <= 1;
+  };
+
   const candidates: Array<{ period: number; raw: number; gain: number }> = [];
   let bestGain = 0;
   for (let period = 2; period <= maxPeriod; period += 1) {
@@ -466,7 +483,26 @@ export function estimatePixelArtScale(source: PixelSource): number | null {
 
   const credible = candidates.filter(({ raw, gain }) =>
     raw >= 0.34 && gain >= Math.max(0.12, bestGain * 0.65));
-  const result = credible.length > 0 ? credible[credible.length - 1].period : null;
+  // 基础像素周期及其 2x/3x 倍频可能同时通过可信度门槛。旧逻辑直接取最大的
+  // 合格周期，会把 9px 基础格误选成 18px，最终让图纸宽高各缩小一半。
+  // gain 已扣除了随机落入同一余数桶的基线，选择 gain 最强的候选更接近基础周期；
+  // 极小浮点误差内优先 raw 更强、再优先较小周期，保证结果稳定。
+  const strongest = credible.reduce<(typeof credible)[number] | null>((best, candidate) => {
+    if (!best || candidate.gain > best.gain + 1e-9) return candidate;
+    if (Math.abs(candidate.gain - best.gain) > 1e-9) return best;
+    if (candidate.raw > best.raw + 1e-9) return candidate;
+    if (Math.abs(candidate.raw - best.raw) > 1e-9) return best;
+    return candidate.period < best.period ? candidate : best;
+  }, null);
+  let result = strongest?.period ?? null;
+  // 图片经过截图缩放或去背景模型重采样后，真实 7.5px 网格会交替落在 7/8px，
+  // 整数周期搜索只能看到 15px。若横纵两个方向都出现强度接近、相隔半周期的
+  // 双峰，它表示两个基础格相位而非一个 15px 大格，此时恢复为半周期。
+  if (result !== null
+    && hasBalancedHalfPeriodPhases(vertical, result)
+    && hasBalancedHalfPeriodPhases(horizontal, result)) {
+    result /= 2;
+  }
   pixelArtScaleCache.set(source, result);
   return result;
 }

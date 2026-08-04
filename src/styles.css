@@ -303,6 +303,18 @@ h2 {
   line-height: 1.4;
 }
 
+.smart-size-feedback {
+  display: block;
+  padding: 9px 10px;
+  border: 1px solid #d8e6f3;
+  border-radius: 10px;
+  background: #f1f7fc;
+  color: #31506f;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
 .inline-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;

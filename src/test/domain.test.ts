@@ -482,6 +482,56 @@ describe("pixel-art detail recovery", () => {
     expect(estimatePixelArtScale(source)).toBe(9);
   });
 
+  it("prefers the fundamental pixel scale over a credible doubled harmonic", () => {
+    const logicalWidth = 24;
+    const logicalHeight = 32;
+    const scale = 9;
+    const width = logicalWidth * scale;
+    const height = logicalHeight * scale;
+    const data = new Uint8ClampedArray(width * height * 4);
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const logicalX = Math.floor(x / scale);
+        const logicalY = Math.floor(y / scale);
+        // 左侧保留逐格细节，其余区域以 2x2 逻辑格组成大色块。
+        // 9px 与 18px 都会成为可信候选，但基础像素仍应识别为 9px。
+        const light = logicalX < 8
+          ? (logicalX + logicalY) % 2 === 0
+          : (Math.floor(logicalX / 2) + Math.floor(logicalY / 2)) % 2 === 0;
+        data.set(light ? [245, 170, 35, 255] : [10, 15, 22, 255], (y * width + x) * 4);
+      }
+    }
+
+    const source = { width, height, data };
+    expect(estimatePixelArtScale(source)).toBe(9);
+    expect(resolveSmartGridSize(source, { boardWidth: 52, boardHeight: 52, smartSize: true }))
+      .toEqual({ width: 24, height: 32 });
+  });
+
+  it("recovers a fractional base scale after a pixel sprite was resampled", () => {
+    const logicalWidth = 23;
+    const logicalHeight = 31;
+    const scale = 7.5;
+    const width = Math.round(logicalWidth * scale);
+    const height = Math.round(logicalHeight * scale);
+    const data = new Uint8ClampedArray(width * height * 4);
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const logicalX = Math.floor(x / scale);
+        const logicalY = Math.floor(y / scale);
+        const light = (logicalX + logicalY) % 2 === 0;
+        data.set(light ? [245, 170, 35, 255] : [10, 15, 22, 255], (y * width + x) * 4);
+      }
+    }
+
+    const source = { width, height, data };
+    expect(estimatePixelArtScale(source)).toBe(7.5);
+    expect(resolveSmartGridSize(source, { boardWidth: 52, boardHeight: 52, smartSize: true }))
+      .toEqual({ width: 23, height: 31 });
+  });
+
   it("frames an Agumon-like 9px sprite into the expected 23 by 31 logical chart", () => {
     const subject = makeUpscaledChecker(21, 29, 9);
     const width = subject.width + 36;

@@ -65,6 +65,36 @@ describe("smart recommendation feedback", () => {
     const transparencyDiff = screen.getByText("透明空格").closest("li");
     expect(transparencyDiff).toHaveTextContent("关 → 开");
   });
+
+  it("explains the detected logical grid when smart sizing is active", () => {
+    const settings: UiSettings = {
+      boardPreset: "smart",
+      customWidth: 64,
+      customHeight: 64,
+      maxColors: 24,
+      keepTransparent: true,
+      showLabels: true,
+      fit: "contain",
+      sampling: "auto",
+      autoFrame: true,
+      dither: false,
+      ditherMode: "floyd-steinberg",
+      smooth: 0,
+      outline: false,
+      ignoreWhiteBg: true,
+      adjustments: { brightness: 0, contrast: 0, saturation: 0 }
+    };
+
+    render(
+      <SettingsPanel
+        settings={settings}
+        onChange={vi.fn()}
+        smartSizeHint="检测为像素画：已按基础像素格还原为 23 × 31；52 针是尺寸上限。"
+      />
+    );
+
+    expect(screen.getByText(/还原为 23 × 31/)).toHaveAttribute("aria-live", "polite");
+  });
 });
 
 describe("mobile pattern preview", () => {
