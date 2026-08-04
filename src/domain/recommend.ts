@@ -1,4 +1,6 @@
 import type { PixelSource } from "./types";
+import { isLikelyPixelArt } from "./conversion";
+import { autoFramePixelSource } from "./crop";
 
 /**
  * 一键推荐 / 风格预设的领域逻辑。
@@ -59,9 +61,15 @@ export function analyzeSource(source: PixelSource): ImageAnalysis {
   const sampled = downsampleToAnalysisSize(source);
   const metrics = computeMetrics(sampled);
   const aspectRatio = width / Math.max(1, height);
+  // 推荐和实际转换共用同一套周期像素画识别。仅靠 64px 分析缩略图时，
+  // 大色块像素画的边缘密度会被稀释，曾导致推荐“照片平滑”，转换却按像素画处理。
+  const structuralSource = autoFramePixelSource(source, { ignoreWhiteBg: true });
+  const kind = isLikelyPixelArt(structuralSource)
+    ? "pixel-art"
+    : classifyKind(metrics.edgeSharpness, metrics.uniqueColorEstimate);
 
   return {
-    kind: classifyKind(metrics.edgeSharpness, metrics.uniqueColorEstimate),
+    kind,
     width,
     height,
     aspectRatio,

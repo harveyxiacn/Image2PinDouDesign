@@ -102,9 +102,13 @@ export default function App() {
   const recommendationImage = images.find((image) => image.id === activeId) ?? images[0];
 
   // 一键推荐：分析当前正在编辑的图片，避免裁剪/去背后仍沿用首张原图的判断。
-  const recommendation = useMemo(
-    () => (recommendationImage ? recommendSettings(analyzeSource(recommendationImage.source)) : null),
+  const recommendationAnalysis = useMemo(
+    () => (recommendationImage ? analyzeSource(recommendationImage.source) : null),
     [recommendationImage]
+  );
+  const recommendation = useMemo(
+    () => (recommendationAnalysis ? recommendSettings(recommendationAnalysis) : null),
+    [recommendationAnalysis]
   );
 
   // 单个常驻 Worker，把整张图的转换搬离主线程；组件卸载时回收。
@@ -257,6 +261,15 @@ export default function App() {
   }, [activeDesign]);
   const activeHistory = activeDesign ? editHistories[activeDesign.id] : undefined;
   const activeGeneratedDesign = activeDesign ? generatedDesignsRef.current.get(activeDesign.id) : undefined;
+  const smartSizeHint = settings.boardPreset === "smart"
+    && !isConverting
+    && activeDesign
+    && recommendationImage?.id === activeDesign.id
+    && recommendationAnalysis
+    ? recommendationAnalysis.kind === "pixel-art"
+      ? `检测为像素画：已按基础像素格还原为 ${activeDesign.boardWidth} × ${activeDesign.boardHeight}；52 针是尺寸上限。`
+      : `检测为照片或插画：智能尺寸使用 ${activeDesign.boardWidth} × ${activeDesign.boardHeight}。`
+    : null;
 
   const persistDraftMutation = (nextDesign: BeadDesign) => {
     if (!localDraftIdsRef.current.has(nextDesign.id)) return;
@@ -590,6 +603,7 @@ export default function App() {
             onChange={setSettings}
             onApplyPreset={(id) => setSettings((s) => ({ ...s, ...applyStylePreset(id as StylePresetId, s as RecommendedSettings) }))}
             recommendation={recommendation}
+            smartSizeHint={smartSizeHint}
             onApplyRecommendation={() => {
               if (recommendation) {
                 setSettings((s) => ({ ...s, ...recommendation }));

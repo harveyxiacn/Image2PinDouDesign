@@ -63,6 +63,25 @@ function gradientSource(width: number, height: number): PixelSource {
   return { width, height, data };
 }
 
+/** 放大的低边缘密度像素画：缩略图分类容易当成照片，但原图存在稳定周期。 */
+function enlargedBlockArtSource(): PixelSource {
+  const logicalWidth = 24;
+  const logicalHeight = 32;
+  const scale = 9;
+  const width = logicalWidth * scale;
+  const height = logicalHeight * scale;
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const logicalX = Math.floor(x / scale);
+      const logicalY = Math.floor(y / scale);
+      const light = (Math.floor(logicalX / 2) + Math.floor(logicalY / 2)) % 2 === 0;
+      data.set(light ? [245, 170, 35, 255] : [10, 15, 22, 255], (y * width + x) * 4);
+    }
+  }
+  return { width, height, data };
+}
+
 const pixelArtAnalysis: ImageAnalysis = {
   kind: "pixel-art",
   width: 32,
@@ -109,6 +128,17 @@ describe("analyzeSource", () => {
     expect(analysis.uniqueColorEstimate).toBeGreaterThanOrEqual(8);
     expect(analysis.transparencyRatio).toBe(0);
     expect(analysis.colorfulness).toBeLessThan(0.01);
+  });
+
+  it("uses the conversion detector for enlarged low-edge-density pixel art", () => {
+    const analysis = analyzeSource(enlargedBlockArtSource());
+    expect(analysis.kind).toBe("pixel-art");
+    expect(recommendSettings(analysis)).toMatchObject({
+      boardPreset: "smart",
+      sampling: "nearest",
+      dither: false,
+      smooth: 0
+    });
   });
 
   it("treats a flat solid color as pixel-art (sharp, no dither)", () => {

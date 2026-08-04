@@ -52,6 +52,7 @@ type SettingsPanelProps = {
   onApplyPreset?: (presetId: string) => void;
   recommendation?: RecommendedSettings | null;
   onApplyRecommendation?: () => void;
+  smartSizeHint?: string | null;
 };
 
 const maxColorOptions: Array<{ label: string; value: MaxColors }> = [
@@ -118,7 +119,14 @@ function buildRecommendDiffs(settings: UiSettings, recommendation: RecommendedSe
   return diffs;
 }
 
-export function SettingsPanel({ settings, onChange, onApplyPreset, recommendation, onApplyRecommendation }: SettingsPanelProps) {
+export function SettingsPanel({
+  settings,
+  onChange,
+  onApplyPreset,
+  recommendation,
+  onApplyRecommendation,
+  smartSizeHint
+}: SettingsPanelProps) {
   const activeBoard = BOARD_PRESETS.find((preset) => preset.id === settings.boardPreset) ?? BOARD_PRESETS[0];
   const activeFit = fitOptions.find((option) => option.value === settings.fit) ?? fitOptions[0];
   const activeSampling = samplingOptions.find((option) => option.value === settings.sampling) ?? samplingOptions[0];
@@ -202,6 +210,9 @@ export function SettingsPanel({ settings, onChange, onApplyPreset, recommendatio
           ))}
         </select>
         <small className="muted">{activeBoard.description}</small>
+        {settings.boardPreset === "smart" && smartSizeHint && (
+          <small className="smart-size-feedback" aria-live="polite">{smartSizeHint}</small>
+        )}
       </label>
 
       {settings.boardPreset === "custom" && (
