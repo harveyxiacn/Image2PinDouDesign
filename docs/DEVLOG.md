@@ -23,7 +23,7 @@
 **常用命令：**
 
 ```bash
-npm test                 # Vitest 全量回归（当前 11 个文件 / 162 用例）
+npm test                 # Vitest 全量回归（当前 11 个文件 / 166 用例）
 npm run build            # tsc -b + vite build → dist/（PWA 预缓存）
 npm run dev              # 本地开发 http://localhost:5173
 npm run preview          # 本地预览构建产物（默认 4173 端口）
@@ -124,6 +124,15 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 - **提交与发布**：commit `4933d72`（`fix: improve cutout transparency and recommendations`）已推送 `origin/main`；产物经 `promote-release.sh` 原子发布，回滚备份 `/var/www/image2pindou.backup-20260803-044634`。首次上传包目录权限为 `0700`，源站回归及时发现后已统一为目录 `0755` / 文件 `0644`，并将权限规范固化到发布脚本。
 - **线上验证**：源站首页、主入口、去背 chunk、CSS、manifest、Service Worker 与 192/512 图标全部 HTTP 200；公网 PWA 自动更新到 `index-DSBQJR-B.js`。真实亚古兽线上去背与推荐流程通过，封闭蓝底消失、推荐后无黑底、透明开关保持勾选，**零 console error**。
 
+## 5.2 2026-08-03 · 裁剪像素画智能尺寸修复（已发布）
+
+- **问题**：从合照裁剪出的像素角色经过截图缩放后，基础像素格可能以 7/8px 交替出现；整数周期搜索只看到 15px 倍频，并且旧逻辑偏向最大的可信周期，导致智能尺寸把约 23×31 的角色错误缩成 11×15。推荐分析使用 64px 缩略图时还会与转换器产生“照片 / 像素画”分类分歧。
+- **修复**：像素周期检测改为优先最强基础周期，并识别双相位半周期以恢复 7.5px 等非整数像素格；推荐分析与转换器共用结构化像素画检测；智能板型下新增可访问的尺寸说明，明确实际逻辑格数与“52 针为上限”。
+- **质量门**：`npm test` **166/166 通过**（11 文件）；`npm run build` 成功（PWA 预缓存 13 项 / 411.48 KiB；主入口 `index-BCt6leN2.js`、CSS `index-BGRK9mwY.css`、Worker `conversion.worker-pk1enJnj.js`）。
+- **真实回归**：本地与生产站上传从用户合照裁出的实际角色图，默认智能尺寸均恢复为 **23×31**；推荐改为“像素锐利”，应用推荐后仍保持 23×31，尺寸说明正确显示，**零 console error**。
+- **提交与发布**：commit `88e68d3`（`fix: recover smart size for cropped pixel art`）已推送 `origin/main`；产物经 `promote-release.sh` 原子发布，回滚备份 `/var/www/image2pindou.backup-20260803-222001`。
+- **线上验证**：公网首页、新入口/CSS、转换 Worker、抠图懒加载 chunk、manifest、Service Worker 与图标全部 HTTP 200。旧 PWA 标签首次命中历史预缓存，自动更新并刷新后切换到新入口，真实交互回归通过。
+
 ---
 
 ## 6. 发布记录汇总
@@ -134,6 +143,7 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 | 2 | 2026-08-02 晚 | `ab6eb10` | `/var/www/image2pindou.backup-20260803-025904` | ✅ 线上 E2E 通过 |
 | 3 | 2026-08-03 | `f10ffe6` | `/var/www/image2pindou.backup-20260803-041852` | ✅ 线上焦点裁剪 / 统计筛选 E2E 通过 |
 | 4 | 2026-08-03 | `4933d72` | `/var/www/image2pindou.backup-20260803-044634` | ✅ 亚古兽去背 / 推荐 / PWA 线上 E2E 通过 |
+| 5 | 2026-08-03 | `88e68d3` | `/var/www/image2pindou.backup-20260803-222001` | ✅ 裁剪像素画 23×31 智能尺寸 / 推荐一致性线上 E2E 通过 |
 
 > 时间说明：本地为 America/Vancouver；服务器备份目录名使用服务器时钟（UTC+ 时区），二者相差数小时属正常。
 
@@ -145,3 +155,4 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 | 2026-08-02 晚（Round 2 后） | 8 | 142 | + recommend(18) / shortfall(20) / drafts(10) / conversion-coordinator(14) / exporters(9) |
 | 2026-08-02 深夜（Round 3，本地） | 11 | 156 | + focus(7) / project-stats(4) / crop-dialog(1) / recommend 自动描边回归(2) |
 | 2026-08-03（亚古兽缺陷修复） | 11 | 162 | + 封闭色键孔洞 / 中性底保护 / 三种量化透明填色兜底 / 推荐透明差异提示 |
+| 2026-08-03（裁剪像素画智能尺寸修复） | 11 | 166 | + 基础周期优先 / 7.5px 半周期恢复 / 推荐分类一致性 / 尺寸说明 |
