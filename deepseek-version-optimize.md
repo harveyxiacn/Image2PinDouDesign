@@ -275,7 +275,11 @@
 
 ---
 
-## 8. 环境与状态记录（2026-08-02）
+## 8. 环境与状态记录
+
+- **2026-09-07 角色原图精细图纸（本地完成，未发布）**：新增按主体比例多档尺寸、精细采样与特征色保护、独立图片设置/尺寸副本、完整高清图纸清单；修复固定步长漏检像素边界与取消迟到结果。全量 181/181、生产构建及真实角色/375px 浏览器回归通过。使用入口、验证与局限见 `docs/ITERATIONS.md` §1.11 和 `docs/DEVLOG.md` §5.3；本轮未提交推送或部署。
+
+### 2026-08-02 及后续历史记录
 
 - **ui-ux-pro-max skill 已全局安装**：`C:\Users\Administrator\.codex\skills\ui-ux-pro-max\`（含 `SKILL.md`、`data/`、`scripts/`），所有 Codex session 均可加载使用（本 session 已验证 `search.py` 可运行）。
 - 安装方式说明：仓库 `cli/` 模板按 Codex 规范生成的 `SKILL.md`；全局路径已改写为 `~/.codex/skills/`；未使用 `uipro-cli`（npm 上的 2.2.3 缺少 `--global` 参数，仓库代码为 2.5.0 未发布）。

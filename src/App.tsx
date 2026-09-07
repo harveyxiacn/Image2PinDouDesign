@@ -7,7 +7,9 @@ import { StatsTable } from "./components/StatsTable";
 import { UploadPanel } from "./components/UploadPanel";
 import { IconClose, IconCrop, IconDownload, IconEdit, IconPlus, IconSettings } from "./components/icons";
 import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
-import { getBoardSize, getBoardTilePins } from "./domain/boards";
+import { getBoardSize } from "./domain/boards";
+import { DEFAULT_SETTINGS, toConversionSettings } from "./domain/settings";
+import { getDesignSizeOptions, getSmartSizeDescription, type DesignSizeOption } from "./domain/designSizing";
 import { autoCropToContent, cropPixelSource, rectFromFractions } from "./domain/crop";
 import { countsToCsv, downloadBlob, downloadTextFile, openPrintableSheet } from "./domain/exporters";
 import { applyConversionMessage, cancelConversionTask, createConversionCoordinator, type ConversionCoordinatorState, type ConversionTaskProgress } from "./domain/conversionCoordinator";
@@ -28,6 +30,7 @@ type UploadedImage = {
   fileName: string;
   source: PixelSource;
   previewUrl: string;
+  settings: UiSettings;
 };
 
 const VALID_COLOR_CODES = new Set(MARD_PALETTE.map((color) => color.code));
@@ -35,24 +38,6 @@ const STATS_SOURCE_LABELS: Record<StatsSourceFilter, string> = {
   all: "全部图纸",
   projects: "正式项目",
   drafts: "本机草稿"
-};
-
-const initialSettings: UiSettings = {
-  boardPreset: "smart",
-  customWidth: 64,
-  customHeight: 64,
-  maxColors: 24,
-  keepTransparent: true,
-  showLabels: true,
-  fit: "contain",
-  sampling: "auto",
-  autoFrame: true,
-  dither: false,
-  ditherMode: "floyd-steinberg",
-  adjustments: { brightness: 0, contrast: 0, saturation: 0 },
-  smooth: 0,
-  outline: false,
-  ignoreWhiteBg: true
 };
 
 type EditHistory = {
@@ -63,7 +48,7 @@ type EditHistory = {
 const MAX_EDIT_HISTORY = 30;
 
 export default function App() {
-  const [settings, setSettings] = useState<UiSettings>(initialSettings);
+  const [uploadSettings, setUploadSettings] = useState<UiSettings>(DEFAULT_SETTINGS);
   const [images, setImages] = useState<UploadedImage[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -87,6 +72,22 @@ export default function App() {
   const localDraftsRef = useRef<BeadDesign[]>(designs);
   const localDraftIdsRef = useRef(new Set(designs.map((design) => design.id)));
   const savedCopyIdsRef = useRef(new Map<string, string>());
+  const convertedInputsRef = useRef(new Map<string, { source: PixelSource; key: string }>());
+
+  const activeDesign = designs.find((design) => design.id === activeId)
+    ?? (images.some((image) => image.id === activeId) ? undefined : designs[0]);
+  const activeImage = images.find((image) => image.id === activeId)
+    ?? images.find((image) => image.id === activeDesign?.id);
+  const settings = activeImage?.settings ?? uploadSettings;
+  const setSettings = (update: UiSettings | ((current: UiSettings) => UiSettings)) => {
+    const apply = (current: UiSettings) => typeof update === "function" ? update(current) : update;
+    if (activeImage) {
+      setImages((current) => current.map((image) => image.id === activeImage.id
+        ? { ...image, settings: apply(image.settings) } : image));
+    } else {
+      setUploadSettings(apply);
+    }
+  };
 
   useEffect(() => {
     persistOwnedInventory(inventory);
@@ -94,22 +95,26 @@ export default function App() {
 
   const boardSize = getBoardSize(settings.boardPreset, settings.customWidth, settings.customHeight);
   // v2 库存：限制模式开启时取 owned>0 的色号集合；引用随 inventory 变化，保持转换 effect 依赖稳定。
-  const allowedCodesArray = useMemo(() => {
-    const allowed = ownedToAllowedCodes(inventory);
-    return allowed ? Array.from(allowed) : null;
-  }, [inventory]);
+  const allowedCodesKey = inventory.restrictEnabled ? [...(ownedToAllowedCodes(inventory) ?? [])].sort().join(",") : null;
+  const allowedCodesArray = useMemo(() => allowedCodesKey === null ? null : allowedCodesKey.split(",").filter(Boolean), [allowedCodesKey]);
 
-  const recommendationImage = images.find((image) => image.id === activeId) ?? images[0];
+  const recommendationImage = activeImage;
 
   // 一键推荐：分析当前正在编辑的图片，避免裁剪/去背后仍沿用首张原图的判断。
   const recommendationAnalysis = useMemo(
     () => (recommendationImage ? analyzeSource(recommendationImage.source) : null),
-    [recommendationImage]
+    [recommendationImage?.source]
   );
   const recommendation = useMemo(
     () => (recommendationAnalysis ? recommendSettings(recommendationAnalysis) : null),
     [recommendationAnalysis]
   );
+  const sizeOptions = useMemo(() => recommendationImage
+    ? getDesignSizeOptions(recommendationImage.source, settings.autoFrame, settings.ignoreWhiteBg) : undefined,
+  [recommendationImage?.source, settings.autoFrame, settings.ignoreWhiteBg]);
+  const smartSizeHint = useMemo(() => settings.boardPreset === "smart" && recommendationImage
+    ? getSmartSizeDescription(recommendationImage.source, settings.autoFrame, settings.ignoreWhiteBg) : null,
+  [recommendationImage?.source, settings.boardPreset, settings.autoFrame, settings.ignoreWhiteBg]);
 
   // 单个常驻 Worker，把整张图的转换搬离主线程；组件卸载时回收。
   useEffect(() => {
@@ -138,15 +143,28 @@ export default function App() {
       setDesigns((current) => current.filter((design) => localDraftIdsRef.current.has(design.id)));
       setEditHistories({});
       generatedDesignsRef.current.clear();
+      convertedInputsRef.current.clear();
       setIsConverting(false);
       return;
     }
 
+    const pendingImages = images.map((image) => {
+      const conversionSettings = toConversionSettings(image.settings, allowedCodesArray);
+      return { image, conversionSettings, key: JSON.stringify(conversionSettings) };
+    }).filter(({ image, key }) => {
+      const previous = convertedInputsRef.current.get(image.id);
+      return previous?.source !== image.source || previous.key !== key;
+    });
+    if (pendingImages.length === 0) {
+      setIsConverting(false);
+      setConversionProgress({});
+      return;
+    }
     const generation = (generationRef.current += 1);
     conversionCoordinatorRef.current = null;
     let coordinator = createConversionCoordinator(
       generation,
-      images.map((image) => ({ id: image.id, fileName: image.fileName }))
+      pendingImages.map(({ image }) => ({ id: image.id, fileName: image.fileName }))
     );
     conversionCoordinatorRef.current = coordinator;
     setConversionProgress(coordinator.progress);
@@ -154,6 +172,8 @@ export default function App() {
     setIsConverting(true);
 
     const handleMessage = (event: MessageEvent<ConversionResponse>) => {
+      if (event.data.generation !== generation) return;
+      coordinator = conversionCoordinatorRef.current ?? coordinator;
       const previousResults = coordinator.results;
       coordinator = applyConversionMessage(coordinator, event.data);
       conversionCoordinatorRef.current = coordinator;
@@ -173,6 +193,8 @@ export default function App() {
             continue;
           }
           const design = coordinator.results[id];
+          const input = pendingImages.find(({ image }) => image.id === id);
+          if (input) convertedInputsRef.current.set(id, { source: input.image.source, key: input.key });
           generatedDesignsRef.current.set(id, design);
           setEditHistories((current) => {
             if (!current[id]) return current;
@@ -181,40 +203,27 @@ export default function App() {
             return next;
           });
         }
-        setDesigns((current) => [
-          ...current.filter((design) => localDraftIdsRef.current.has(design.id)),
-          ...images.map((image) => coordinator.results[image.id]).filter((design): design is BeadDesign => Boolean(design))
-        ]);
+        setDesigns((current) => {
+          const byId = new Map(current.map((design) => [design.id, design]));
+          for (const [id, design] of Object.entries(coordinator.results)) {
+            if (!Object.prototype.hasOwnProperty.call(previousResults, id)) byId.set(id, design);
+          }
+          return [...current.filter((design) => localDraftIdsRef.current.has(design.id)),
+            ...images.map((image) => byId.get(image.id)).filter((design): design is BeadDesign => Boolean(design))];
+        });
       }
     };
 
     worker.addEventListener("message", handleMessage);
 
     const timer = window.setTimeout(() => {
-      for (const image of images) {
+      for (const { image, conversionSettings } of pendingImages) {
         const request: ConversionRequest = {
           generation,
           id: image.id,
           fileName: image.fileName,
           source: image.source,
-          settings: {
-            boardWidth: boardSize.width,
-            boardHeight: boardSize.height,
-            maxColors: settings.maxColors,
-            keepTransparent: settings.keepTransparent,
-            transparentThreshold: 10,
-            dither: settings.dither,
-            ditherMode: settings.ditherMode,
-            fit: settings.fit,
-            sampling: settings.sampling,
-            autoFrame: settings.autoFrame,
-            smartSize: settings.boardPreset === "smart",
-            allowedColorCodes: allowedCodesArray,
-            adjustments: settings.adjustments,
-            smooth: settings.smooth,
-            outline: settings.outline,
-            ignoreWhiteBg: settings.ignoreWhiteBg
-          }
+          settings: conversionSettings
         };
         worker.postMessage(request);
       }
@@ -225,25 +234,8 @@ export default function App() {
       worker.removeEventListener("message", handleMessage);
       conversionCoordinatorRef.current = null;
     };
-  }, [
-    allowedCodesArray,
-    boardSize.height,
-    boardSize.width,
-    images,
-    settings.adjustments,
-    settings.autoFrame,
-    settings.boardPreset,
-    settings.dither,
-    settings.fit,
-    settings.ignoreWhiteBg,
-    settings.keepTransparent,
-    settings.maxColors,
-    settings.outline,
-    settings.sampling,
-    settings.smooth
-  ]);
+  }, [allowedCodesArray, images]);
 
-  const activeDesign = designs.find((design) => design.id === activeId) ?? designs[0];
   const activeOriginalUrl = activeDesign
     ? images.find((image) => image.id === activeDesign.id)?.previewUrl
     : undefined;
@@ -261,15 +253,6 @@ export default function App() {
   }, [activeDesign]);
   const activeHistory = activeDesign ? editHistories[activeDesign.id] : undefined;
   const activeGeneratedDesign = activeDesign ? generatedDesignsRef.current.get(activeDesign.id) : undefined;
-  const smartSizeHint = settings.boardPreset === "smart"
-    && !isConverting
-    && activeDesign
-    && recommendationImage?.id === activeDesign.id
-    && recommendationAnalysis
-    ? recommendationAnalysis.kind === "pixel-art"
-      ? `检测为像素画：已按基础像素格还原为 ${activeDesign.boardWidth} × ${activeDesign.boardHeight}；52 针是尺寸上限。`
-      : `检测为照片或插画：智能尺寸使用 ${activeDesign.boardWidth} × ${activeDesign.boardHeight}。`
-    : null;
 
   const persistDraftMutation = (nextDesign: BeadDesign) => {
     if (!localDraftIdsRef.current.has(nextDesign.id)) return;
@@ -422,11 +405,12 @@ export default function App() {
         id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
         fileName: file.name,
         source: await imageFileToPixelSource(file),
-        previewUrl: URL.createObjectURL(file)
+        previewUrl: URL.createObjectURL(file),
+        settings: { ...uploadSettings, adjustments: { ...uploadSettings.adjustments } }
       })));
 
       setImages((current) => [...current, ...loaded]);
-      setActiveId((current) => current ?? loaded[0]?.id ?? null);
+      setActiveId(loaded[0]?.id ?? null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "图片处理失败。");
     } finally {
@@ -436,6 +420,7 @@ export default function App() {
 
   const removeDesign = (id: string) => {
     generatedDesignsRef.current.delete(id);
+    convertedInputsRef.current.delete(id);
     if (localDraftIdsRef.current.has(id)) {
       localDraftsRef.current = localDraftsRef.current.filter((draft) => draft.id !== id);
       localDraftIdsRef.current.delete(id);
@@ -494,7 +479,8 @@ export default function App() {
         id,
         fileName: `${base}-${ordinal}.png`,
         source: derived,
-        previewUrl: pixelSourceToDataUrl(derived)
+        previewUrl: pixelSourceToDataUrl(derived),
+        settings: { ...sourceImage.settings }
       };
       setImages((current) => [...current, newImage]);
       setActiveId(id);
@@ -505,6 +491,24 @@ export default function App() {
       setCropBusy(false);
       setCropProgress(null);
     }
+  };
+
+  const selectSize = (option: DesignSizeOption) => {
+    setSettings((current) => ({ ...current, boardPreset: "custom", customWidth: option.width,
+      customHeight: option.height, fit: "contain", sampling: recommendationAnalysis?.kind === "pixel-art" ? "nearest" : "detail",
+      dither: false, smooth: 0, outline: false }));
+  };
+
+  const duplicateActiveImage = () => {
+    if (!activeImage) return;
+    const id = `${activeImage.id}-variant-${Math.random().toString(36).slice(2, 9)}`;
+    const copy: UploadedImage = {
+      ...activeImage, id, fileName: `${stripExtension(activeImage.fileName)}-尺寸副本.png`,
+      previewUrl: pixelSourceToDataUrl(activeImage.source),
+      settings: { ...activeImage.settings, adjustments: { ...activeImage.settings.adjustments } }
+    };
+    setImages((current) => [...current, copy]);
+    setActiveId(id);
   };
 
   const exportActiveCsv = () => {
@@ -531,8 +535,9 @@ export default function App() {
       const blob = await renderDesignToBlob(activeDesign, MARD_PALETTE, {
         cellSize: getHighResolutionCellSize(activeDesign),
         showLabels: true,
-        boardLineEvery: getBoardTilePins(settings.boardPreset),
-        showCoordinates: true
+        boardLineEvery: activeDesign.settings?.boardTilePins ?? 52,
+        showCoordinates: true,
+        sheet: true
       });
       downloadBlob(`${stripExtension(activeDesign.fileName)}-高清色号图.png`, blob);
     } catch (caught) {
@@ -546,7 +551,7 @@ export default function App() {
     if (!activeDesign) {
       return;
     }
-    const pins = getBoardTilePins(settings.boardPreset);
+    const pins = activeDesign.settings?.boardTilePins ?? 52;
     const opened = openPrintableSheet(activeDesign, MARD_PALETTE, {
       boardWidth: pins,
       boardHeight: pins,
@@ -569,7 +574,7 @@ export default function App() {
             <p className="eyebrow">Image to PinDou Design</p>
             <h1>拼豆图纸工坊</h1>
             <p className="hero-copy">
-              上传图片，选择 52 针、104 针或自定义尺寸，自动转换成拼豆网格，并汇总每种 MARD 色号需要多少颗豆。
+              上传角色原图，按主体比例选择简洁、标准或精细尺寸，生成带色号与用豆清单的拼豆图纸。每张图纸可以独立调整。
             </p>
             <div className="hero-actions">
               <a href="#upload-title" className="button primary">开始上传</a>
@@ -604,6 +609,9 @@ export default function App() {
             onApplyPreset={(id) => setSettings((s) => ({ ...s, ...applyStylePreset(id as StylePresetId, s as RecommendedSettings) }))}
             recommendation={recommendation}
             smartSizeHint={smartSizeHint}
+            sourceName={activeImage?.fileName}
+            sizeOptions={sizeOptions}
+            onSelectSize={selectSize}
             onApplyRecommendation={() => {
               if (recommendation) {
                 setSettings((s) => ({ ...s, ...recommendation }));
@@ -646,8 +654,8 @@ export default function App() {
             <div className="design-tabs" aria-label="图纸列表">
               {designs.map((design) => (
                 <span key={design.id} className={`design-tab ${design.id === activeDesign?.id ? "active" : ""}`}>
-                  <button type="button" onClick={() => setActiveId(design.id)}>
-                    {design.fileName}
+                  <button type="button" aria-label={design.fileName} onClick={() => setActiveId(design.id)}>
+                    {design.fileName} <small>{design.boardWidth} × {design.boardHeight}</small>
                   </button>
                   <button
                     type="button"
@@ -670,6 +678,9 @@ export default function App() {
                 onClick={() => setCropImageId(activeDesign.id)}
               >
                 <IconCrop /> 裁剪 / 智能去背景
+              </button>
+              <button type="button" className="button small" onClick={duplicateActiveImage} disabled={isConverting}>
+                <IconPlus /> 复制为另一尺寸
               </button>
               <small className="muted">框选一个主体 → 智能去背景 → 生成独立图纸；可对同一张总图重复操作拆出多个。</small>
             </div>

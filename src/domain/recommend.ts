@@ -1,6 +1,7 @@
-import type { PixelSource } from "./types";
+import type { PixelSource, SamplingMode } from "./types";
 import { isLikelyPixelArt } from "./conversion";
 import { autoFramePixelSource } from "./crop";
+import { isFlatIllustration } from "./sourceStyle";
 
 /**
  * 一键推荐 / 风格预设的领域逻辑。
@@ -12,7 +13,7 @@ import { autoFramePixelSource } from "./crop";
 export type RecommendedSettings = {
   boardPreset: string;
   maxColors: 8 | 16 | 24 | 32 | 48 | "all";
-  sampling: "auto" | "nearest" | "area";
+  sampling: SamplingMode;
   dither: boolean;
   ditherMode: "floyd-steinberg" | "bayer";
   smooth: 0 | 1 | 2;
@@ -23,7 +24,7 @@ export type RecommendedSettings = {
 };
 
 export type ImageAnalysis = {
-  kind: "pixel-art" | "photo";
+  kind: "pixel-art" | "illustration" | "photo";
   width: number;
   height: number;
   aspectRatio: number;
@@ -66,7 +67,8 @@ export function analyzeSource(source: PixelSource): ImageAnalysis {
   const structuralSource = autoFramePixelSource(source, { ignoreWhiteBg: true });
   const kind = isLikelyPixelArt(structuralSource)
     ? "pixel-art"
-    : classifyKind(metrics.edgeSharpness, metrics.uniqueColorEstimate);
+    : isFlatIllustration(structuralSource) ? "illustration"
+      : classifyKind(metrics.edgeSharpness, metrics.uniqueColorEstimate);
 
   return {
     kind,
@@ -281,7 +283,10 @@ const PHOTO_BASE: RecommendedSettings = {
  */
 export function recommendSettings(analysis: ImageAnalysis): RecommendedSettings {
   const isPixelArt = analysis.kind === "pixel-art";
-  const settings: RecommendedSettings = isPixelArt ? { ...PIXEL_ART_BASE } : { ...PHOTO_BASE };
+  const settings: RecommendedSettings = isPixelArt ? { ...PIXEL_ART_BASE }
+    : analysis.kind === "illustration"
+      ? { ...PIXEL_ART_BASE, sampling: "detail", maxColors: 32 }
+      : { ...PHOTO_BASE };
 
   if (isPixelArt) {
     if (analysis.uniqueColorEstimate <= 8) {
@@ -290,7 +295,7 @@ export function recommendSettings(analysis: ImageAnalysis): RecommendedSettings 
     if (analysis.strongOutlineRatio >= STRONG_OUTLINE_RATIO_THRESHOLD) {
       settings.outline = true;
     }
-  } else {
+  } else if (analysis.kind === "photo") {
     settings.boardPreset = boardPresetForAspectRatio(analysis.aspectRatio);
   }
 
@@ -312,7 +317,7 @@ function boardPresetForAspectRatio(aspectRatio: number): "52x104" | "104" | "52"
   return "52";
 }
 
-export type StylePresetId = "default" | "pixel-art" | "photo" | "minimal";
+export type StylePresetId = "default" | "pixel-art" | "photo" | "minimal" | "character";
 
 export type StylePreset = {
   id: StylePresetId;
@@ -370,6 +375,12 @@ export const STYLE_PRESETS: StylePreset[] = [
       autoFrame: true,
       keepTransparent: true
     }
+  },
+  {
+    id: "character",
+    name: "精细角色",
+    description: "按主体比例生成，保留主色和细轮廓；关闭抖动与降噪，避免碎色和细节模糊。",
+    settings: { ...PIXEL_ART_BASE, sampling: "detail", maxColors: 32 }
   }
 ];
 

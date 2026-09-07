@@ -1,6 +1,6 @@
 import type { PixelSource } from "./types";
 
-export async function imageFileToPixelSource(file: File, maxDimension = 1200): Promise<PixelSource> {
+export async function imageFileToPixelSource(file: File, maxDimension = 2048): Promise<PixelSource> {
   const url = URL.createObjectURL(file);
   try {
     const image = await loadImage(url);
