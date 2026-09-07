@@ -2,43 +2,9 @@ import { BOARD_PRESETS } from "../domain/boards";
 import { STYLE_PRESETS, type RecommendedSettings } from "../domain/recommend";
 import type { FitMode, ImageAdjustments, MaxColors, SamplingMode } from "../domain/types";
 import { IconChevronDown, IconRotateCcw } from "./icons";
-
-export type UiSettings = {
-  boardPreset: string;
-  customWidth: number;
-  customHeight: number;
-  maxColors: MaxColors;
-  keepTransparent: boolean;
-  showLabels: boolean;
-  fit: FitMode;
-  sampling: SamplingMode;
-  autoFrame: boolean;
-  dither: boolean;
-  ditherMode: "floyd-steinberg" | "bayer";
-  adjustments: ImageAdjustments;
-  smooth: number;
-  outline: boolean;
-  ignoreWhiteBg: boolean;
-};
-
-/** 与 App.tsx initialSettings 保持一致的默认值，用于“恢复默认”。 */
-const DEFAULT_SETTINGS: UiSettings = {
-  boardPreset: "smart",
-  customWidth: 64,
-  customHeight: 64,
-  maxColors: 24,
-  keepTransparent: true,
-  showLabels: true,
-  fit: "contain",
-  sampling: "auto",
-  autoFrame: true,
-  dither: false,
-  ditherMode: "floyd-steinberg",
-  adjustments: { brightness: 0, contrast: 0, saturation: 0 },
-  smooth: 0,
-  outline: false,
-  ignoreWhiteBg: true
-};
+import { DEFAULT_SETTINGS, type UiSettings } from "../domain/settings";
+import type { DesignSizeOption } from "../domain/designSizing";
+export type { UiSettings } from "../domain/settings";
 
 const smoothOptions: Array<{ label: string; value: number }> = [
   { label: "关", value: 0 },
@@ -53,6 +19,9 @@ type SettingsPanelProps = {
   recommendation?: RecommendedSettings | null;
   onApplyRecommendation?: () => void;
   smartSizeHint?: string | null;
+  sizeOptions?: DesignSizeOption[];
+  onSelectSize?: (option: DesignSizeOption) => void;
+  sourceName?: string;
 };
 
 const maxColorOptions: Array<{ label: string; value: MaxColors }> = [
@@ -73,6 +42,7 @@ const fitOptions: Array<{ label: string; value: FitMode; hint: string }> = [
 const samplingOptions: Array<{ label: string; value: SamplingMode; hint: string }> = [
   { label: "智能细节（推荐）", value: "auto", hint: "自动识别像素画并保持硬边；照片继续平滑缩放。" },
   { label: "像素锐利", value: "nearest", hint: "不混合相邻色块，适合像素画、图标和已有拼豆图。" },
+  { label: "角色精细", value: "detail", hint: "保留主色与深色轮廓，适合动漫角色、装甲和服饰；建议搭配精细尺寸。" },
   { label: "照片平滑", value: "area", hint: "面积平均减少锯齿，适合照片、渐变和普通插画。" }
 ];
 
@@ -125,7 +95,10 @@ export function SettingsPanel({
   onApplyPreset,
   recommendation,
   onApplyRecommendation,
-  smartSizeHint
+  smartSizeHint,
+  sizeOptions,
+  onSelectSize,
+  sourceName
 }: SettingsPanelProps) {
   const activeBoard = BOARD_PRESETS.find((preset) => preset.id === settings.boardPreset) ?? BOARD_PRESETS[0];
   const activeFit = fitOptions.find((option) => option.value === settings.fit) ?? fitOptions[0];
@@ -150,6 +123,27 @@ export function SettingsPanel({
           恢复默认
         </button>
       </div>
+
+      {sourceName && <p className="muted settings-scope">当前图片：{sourceName}。调整仅影响这张图纸。</p>}
+
+      {sizeOptions && onSelectSize && (
+        <fieldset className="size-options">
+          <legend>按原图比例选择尺寸</legend>
+          <p className="muted">每格一颗豆。尺寸越大，细节空间和制作量越多。</p>
+          <div className="size-options-grid">
+            {sizeOptions.map((option) => (
+              <button key={option.id} type="button" className="size-option"
+                aria-pressed={settings.boardPreset === "custom" && settings.customWidth === option.width && settings.customHeight === option.height}
+                onClick={() => onSelectSize(option)} title={option.description}>
+                <strong>{option.label}</strong>
+                <span>{option.width} × {option.height}</span>
+                <small>最多 {option.width * option.height} 颗</small>
+              </button>
+            ))}
+          </div>
+          <small className="muted">复杂背景请先“裁剪 / 智能去背景”；原图越清晰，细节恢复越可靠。</small>
+        </fieldset>
+      )}
 
       {onApplyPreset && (
         <div className="preset-section">
@@ -221,7 +215,7 @@ export function SettingsPanel({
             <span>宽度</span>
             <input
               type="number"
-              min={8}
+              min={1}
               max={208}
               value={settings.customWidth}
               onChange={(event) => onChange({ ...settings, customWidth: Number(event.target.value) })}
@@ -231,7 +225,7 @@ export function SettingsPanel({
             <span>高度</span>
             <input
               type="number"
-              min={8}
+              min={1}
               max={208}
               value={settings.customHeight}
               onChange={(event) => onChange({ ...settings, customHeight: Number(event.target.value) })}

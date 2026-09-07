@@ -259,13 +259,14 @@ describe("recommendSettings", () => {
 });
 
 describe("STYLE_PRESETS", () => {
-  it("exposes the four presets with required names", () => {
-    expect(STYLE_PRESETS.map((preset) => preset.id)).toEqual(["default", "pixel-art", "photo", "minimal"]);
+  it("exposes the original presets and a detailed character preset", () => {
+    expect(STYLE_PRESETS.map((preset) => preset.id)).toEqual(["default", "pixel-art", "photo", "minimal", "character"]);
     expect(STYLE_PRESETS.map((preset) => preset.name)).toEqual([
       "默认（智能）",
       "像素画",
       "照片 / 渐变",
-      "简约低多边"
+      "简约低多边",
+      "精细角色"
     ]);
     for (const preset of STYLE_PRESETS) {
       expect(preset.description.length).toBeGreaterThan(0);

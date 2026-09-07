@@ -3,10 +3,10 @@ import type { BoardPreset } from "./types";
 export const BOARD_PRESETS: BoardPreset[] = [
   {
     id: "smart",
-    name: "智能尺寸（最多 52 针）",
-    width: 52,
-    height: 52,
-    description: "像素画自动恢复原始逻辑格数，照片则使用 52 针。"
+    name: "智能尺寸（最多 156 针）",
+    width: 156,
+    height: 156,
+    description: "像素画还原原始格数；普通图片按比例生成，支持超过一块板的精细图。"
   },
   {
     id: "29",
@@ -79,7 +79,7 @@ export function sanitizeBoardDimension(value: number): number {
     return 52;
   }
 
-  return Math.max(8, Math.min(208, Math.round(value)));
+  return Math.max(1, Math.min(208, Math.round(value)));
 }
 
 /**

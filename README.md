@@ -18,7 +18,8 @@ The hard part of a bead-pattern tool isn't the UI — it's **mapping millions of
 - **Full-palette CIEDE2000 per cell.** Every cell is matched against the whole MARD chart with CIEDE2000 (no lossy pre-filtering — a ΔE\*76 pre-select would visibly flip some blues/purples, see the D15-vs-C9 regression test). The squared ΔE\*76 distance is used only to rank colors when building the active palette.
 - **Off-main-thread conversion.** The pixelize → match → count pipeline runs in a **Web Worker** (`src/worker/conversion.worker.ts`) so the UI never blocks on large images.
 - **Smart in-browser background removal.** Uniform borders use a fast edge-connected color key that preserves fine details; complex scenes fall back to `@imgly/background-removal` (WASM).
-- **Pixel-art grid recovery.** Repeated edge periods are detected before resampling, so an enlarged 23×31 sprite returns to its real logical grid instead of being stretched into a blurry, duplicate-filled 52×52 chart. Photos and illustrations keep area-filtered scaling.
+- **Pixel-art grid recovery.** Repeated edge periods are detected before resampling, so an enlarged 23×31 sprite returns to its real logical grid. Staggered sampling avoids missing regular pixel boundaries; smart sizing supports logical grids up to 156 pins per side.
+- **Character detail sampling.** Flat illustrations use dominant-color / dark-outline sampling; the detail preset also balances color frequency with Lab diversity, preserving small distinctive eye or emblem colors. Photos can still use area-filtered scaling.
 - **Saliency-aware palette limiting.** High-contrast rare colors such as eyes and highlights reserve a small part of the color budget instead of losing every tie to large background/body regions.
 - **Real palette.** Color codes come from the MARD bead color chart (source attributed in `src/domain/palette.ts`); the matcher works against actual purchasable bead colors, and the stats table tells you exactly how many of each to buy.
 
@@ -29,7 +30,8 @@ Everything runs **client-side** — images never leave the device, and the built
 ## Features
 
 - Upload one or many images; crop / scale with automatic saliency focus or manual focal-point control, with per-task conversion progress and cancel.
-- Smart logical size (up to 52 pins), fixed 29/50/52/104-pin boards (plus 52×104 and 156 tiling), or custom width × height — prints/PDF paginate per physical board.
+- Proportional compact/standard/detail/large options (long-edge targets 40/72/104/156); smart non-pixel output defaults to at most 104 on the long edge. Fixed boards and custom width × height (1–208 per side) remain available; prints/PDF paginate per physical board.
+- Independent settings for each uploaded/cropped image; duplicate an image to compare different sizes without replacing another chart's manual edits.
 - Automatic subject framing, pixel-art/photo sampling selection, high-contrast outline recommendations, and perceptual color matching to the bead palette.
 - Post-generation pattern workbench: recolor/erase individual cells, pick colors, undo/redo up to 30 steps (Ctrl+Z / Ctrl+Shift+Z), reset, mirror horizontally — plus full keyboard grid navigation (arrows + Enter/Space/Delete).
 - Mobile build assistant: focus one color, tap cells complete, see remaining bead counts, and resume progress from local storage.
@@ -37,8 +39,17 @@ Everything runs **client-side** — images never leave the device, and the built
 - Per-image and whole-**project** color/count aggregation, filterable by project or local draft, with inventory shortfall and purchase-list CSV export.
 - Adjustments: brightness/contrast, color simplification, dithering (Floyd-Steinberg or Bayer ordered), and non-destructive outer H7 black outlining.
 - Palette panel, stats table, grid/color-code preview with zoom.
-- Exports of the chart and counts.
+- High-resolution PNG sheets with four-side coordinates, every-cell codes, 5-cell guides, physical board boundaries, and a color/count legend; printable board pages and CSV counts.
 - Installable **PWA** (works offline once loaded).
+
+### 角色原图生成精细图纸
+
+1. 上传清晰的角色原图；合照或复杂背景先使用“裁剪 / 智能去背景”添加独立角色图纸。
+2. 选择“精细角色”，再按制作量选择“标准 / 精细 / 超精细”。需要指定尺寸时选择“自定义”，例如 57×60；每格对应一颗豆。
+3. 通过“复制为另一尺寸”保留多个方案。设置只影响当前图片；改变当前图的生成参数会重新生成当前图，请先保存需要保留的手工修改为草稿。
+4. 放大检查眼睛、细线和背景边缘，必要时逐格修正；下载高清色号 PNG 或分板 PDF。
+
+此流程分析原图的颜色、边缘和像素周期，不是角色语义识别或 AI 重绘。增大格数不能补出原图没有的细节；压缩、模糊或复杂背景仍可能需要手动清理。带网格、文字和水印的已有图纸截图不在本轮识别范围内。参考示例使用的色号格式/色卡版本也不保证与本项目逐项一致。
 
 ## Tech
 

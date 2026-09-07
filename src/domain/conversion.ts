@@ -5,6 +5,7 @@ import { autoFramePixelSource } from "./crop";
 import { computeCropRect, estimateFocus } from "./focus";
 import { preparePalette } from "./palette";
 import { medianSmoothGrid } from "./simplify";
+import { isFlatIllustration } from "./sourceStyle";
 import type {
   BeadDesign,
   BeadMatrix,
@@ -59,7 +60,10 @@ export function convertPixelSourceToDesign(
   const grid = effectiveSettings.smooth
     ? medianSmoothGrid(adjusted, effectiveSettings.smooth, palette)
     : adjusted;
-  const activePalette = selectActivePalette(grid, effectiveSettings, palette);
+  const detailPalette = effectiveSettings.sampling === "detail"
+    || ((effectiveSettings.sampling ?? "auto") === "auto"
+      && !isLikelyPixelArt(framedSource) && isFlatIllustration(framedSource));
+  const activePalette = selectActivePalette(grid, effectiveSettings, palette, detailPalette);
   // 抖动模式：默认 Floyd-Steinberg；ditherMode: "bayer" 可切换为有序抖动（Bayer 4x4）。
   const ditherMode = (effectiveSettings as ConversionSettingsWithDither).ditherMode ?? "floyd-steinberg";
   const quantized = effectiveSettings.dither
@@ -240,6 +244,7 @@ export function resampleToGrid(source: PixelSource, settings: ConversionSettings
   const sh = source.height;
   const sampling = settings.sampling ?? "area";
   const useNearest = sampling === "nearest" || (sampling === "auto" && isLikelyPixelArt(source));
+  const useDetail = sampling === "detail" || (sampling === "auto" && !useNearest && isFlatIllustration(source));
 
   let scaleX: number;
   let scaleY: number;
@@ -292,7 +297,9 @@ export function resampleToGrid(source: PixelSource, settings: ConversionSettings
       const srcBottom = sourceOffsetY + (dy + 1) * scaleY;
       cells[ty * tw + tx] = useNearest
         ? sampleNearest(source, (srcLeft + srcRight) / 2, (srcTop + srcBottom) / 2)
-        : sampleArea(source, srcLeft, srcTop, srcRight, srcBottom);
+        : useDetail
+          ? sampleDetail(source, srcLeft, srcTop, srcRight, srcBottom)
+          : sampleArea(source, srcLeft, srcTop, srcRight, srcBottom);
     }
   }
 
@@ -354,8 +361,11 @@ export function isLikelyPixelArt(source: PixelSource): boolean {
     }
   };
 
-  for (let y = 0; y < source.height; y += stride) {
-    for (let x = 0; x < source.width; x += stride) {
+  // 错开每个采样块的相位，避免步长恰好整除像素格时始终跳过边界。
+  for (let blockY = 0, row = 0; blockY < source.height; blockY += stride, row++) {
+    for (let blockX = 0, column = 0; blockX < source.width; blockX += stride, column++) {
+      const x = Math.min(source.width - 1, blockX + row % stride);
+      const y = Math.min(source.height - 1, blockY + column % stride);
       const index = (y * source.width + x) * 4;
       if (source.data[index + 3] >= 32) {
         coarseColors.add(
@@ -378,7 +388,9 @@ export function isLikelyPixelArt(source: PixelSource): boolean {
   const hardRatio = hard / evaluated;
   const blockLike = coarseColors.size <= 128 && flatRatio >= 0.48 && hardRatio >= 0.015 && hard > soft * 0.45;
   const needsPeriodicProof = source.width > 64 || source.height > 64;
-  const result = blockLike && (!needsPeriodicProof || estimatePixelArtScale(source) !== null);
+  const nativePixelArt = source.width <= 208 && source.height <= 208
+    && coarseColors.size <= 64 && hardRatio >= 0.08 && soft / evaluated < 0.025;
+  const result = blockLike && (!needsPeriodicProof || nativePixelArt || estimatePixelArtScale(source) !== null);
   pixelArtLikelihoodCache.set(source, result);
   return result;
 }
@@ -512,8 +524,15 @@ export function resolveSmartGridSize(
   settings: Pick<ConversionSettings, "boardWidth" | "boardHeight" | "smartSize">
 ): { width: number; height: number } {
   const maximum = { width: settings.boardWidth, height: settings.boardHeight };
-  if (!settings.smartSize || !isLikelyPixelArt(source)) {
+  if (!settings.smartSize) {
     return maximum;
+  }
+  if (!isLikelyPixelArt(source)) {
+    // 普通原图按自身比例生成，默认长边 104 格；不为凑方形而浪费有效针数。
+    const shrink = Math.min(1, Math.min(104, maximum.width) / source.width,
+      Math.min(104, maximum.height) / source.height);
+    return { width: Math.max(1, Math.round(source.width * shrink)),
+      height: Math.max(1, Math.round(source.height * shrink)) };
   }
 
   const scale = estimatePixelArtScale(source);
@@ -535,6 +554,41 @@ export function resolveSmartGridSize(
     width: Math.max(1, Math.min(maximum.width, Math.round(logicalWidth * shrink))),
     height: Math.max(1, Math.min(maximum.height, Math.round(logicalHeight * shrink)))
   };
+}
+
+// 在单格内取稳定主色，并为占比足够的深色轮廓保留落点。
+// 用于“角色精细”及智能识别的平涂插画；照片仍可用面积平均保留渐变。
+function sampleDetail(source: PixelSource, left: number, top: number, right: number, bottom: number): SampledCell {
+  const average = sampleArea(source, left, top, right, bottom);
+  if (!average || average.a < 1) return average;
+  const buckets = new Map<number, { r: number; g: number; b: number; weight: number }>();
+  let total = 0;
+  for (let y = 0; y < 7; y += 1) {
+    for (let x = 0; x < 7; x += 1) {
+      const sample = sampleNearest(source, left + (x + 0.5) / 7 * (right - left),
+        top + (y + 0.5) / 7 * (bottom - top));
+      if (!sample || sample.a < 32) continue;
+      const key = (sample.r >> 5) << 6 | (sample.g >> 5) << 3 | (sample.b >> 5);
+      const bucket = buckets.get(key) ?? { r: 0, g: 0, b: 0, weight: 0 };
+      const weight = sample.a / 255;
+      bucket.r += sample.r * weight;
+      bucket.g += sample.g * weight;
+      bucket.b += sample.b * weight;
+      bucket.weight += weight;
+      total += weight;
+      buckets.set(key, bucket);
+    }
+  }
+  const colors = [...buckets.values()].map((bucket) => ({
+    r: bucket.r / bucket.weight, g: bucket.g / bucket.weight, b: bucket.b / bucket.weight,
+    weight: bucket.weight
+  })).sort((a, b) => b.weight - a.weight);
+  if (!colors.length) return average;
+  const luminance = (color: Rgb) => 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+  const outline = colors.find((color) => color.weight / total >= 0.2
+    && luminance(color) < 72 && luminance(average) - luminance(color) > 40);
+  const chosen = outline ?? colors[0];
+  return { r: chosen.r, g: chosen.g, b: chosen.b, a: average.a };
 }
 
 function sampleArea(source: PixelSource, left: number, top: number, right: number, bottom: number): SampledCell {
@@ -612,7 +666,8 @@ function sampleArea(source: PixelSource, left: number, top: number, right: numbe
 function selectActivePalette(
   grid: SampledGrid,
   settings: ConversionSettings,
-  palette: PaletteColor[]
+  palette: PaletteColor[],
+  preserveColorDiversity = false
 ): PaletteColor[] {
   const pool = restrictPaletteByAllowed(palette, settings.allowedColorCodes);
 
@@ -649,6 +704,27 @@ function selectActivePalette(
       }
       return (byCode.get(leftCode)?.sortOrder ?? 0) - (byCode.get(rightCode)?.sortOrder ?? 0);
     });
+
+  if (preserveColorDiversity) {
+    // 数量的平方根平衡主色与小面积特征色，再按未覆盖的 Lab 色差选色。
+    // 近似肤色/黄色不再耗尽名额，把眼睛、徽章等稀少但独特的颜色挤掉。
+    const candidates = byFrequency.map(([code, count]) => ({ color: byCode.get(code)!, count, distance: Infinity }));
+    const chosen: PaletteColor[] = [];
+    let next = candidates[0];
+    while (chosen.length < settings.maxColors && candidates.length) {
+      const added = next.color;
+      chosen.push(added);
+      candidates.splice(candidates.indexOf(next), 1);
+      let bestScore = -1;
+      for (const candidate of candidates) {
+        const a = candidate.color.lab, b = added.lab;
+        candidate.distance = Math.min(candidate.distance, (a.l - b.l) ** 2 + (a.a - b.a) ** 2 + (a.b - b.b) ** 2);
+        const score = Math.sqrt(candidate.count) * candidate.distance;
+        if (score > bestScore) { bestScore = score; next = candidate; }
+      }
+    }
+    return chosen;
+  }
 
   // 少量高对比色往往是眼睛、高光、徽章等识别关键。为它们保留少数名额，
   // 避免纯按数量限色时被大面积肤色/背景色挤掉。

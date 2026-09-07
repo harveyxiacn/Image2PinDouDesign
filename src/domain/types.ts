@@ -41,7 +41,7 @@ export type BoardPreset = {
 export type MaxColors = 1 | 8 | 16 | 24 | 32 | 48 | "all";
 
 export type FitMode = "contain" | "cover" | "stretch";
-export type SamplingMode = "auto" | "nearest" | "area";
+export type SamplingMode = "auto" | "nearest" | "area" | "detail";
 
 // 量化前的图像微调，取值区间 [-100, 100]，0 表示不变。
 export type ImageAdjustments = {
@@ -80,6 +80,8 @@ export type ConversionSettings = {
   outline?: boolean;
   // 忽略白色背景：与边缘相连的近白色格清成空格，不计入用豆、不标色号（主体内部白保留）。
   ignoreWhiteBg?: boolean;
+  // 物理板分块信息随图纸保存，切换图纸后导出仍使用正确的分板规格。
+  boardTilePins?: number;
 };
 
 export type PixelSource = {

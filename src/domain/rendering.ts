@@ -4,11 +4,13 @@ export type RenderOptions = {
   cellSize: number;
   showLabels: boolean;
   boardLineEvery: number;
-  // 绘制行列坐标尺与分块编号，便于多块拼接对位。默认关闭。
+  // 绘制行列坐标尺，便于多块拼接对位。默认关闭。
   showCoordinates?: boolean;
   // 制作模式：淡化非当前色号，并在已完成格上画勾；仅用于交互预览。
   focusCode?: string | null;
   completedCells?: ReadonlySet<number>;
+  sheet?: boolean;
+  guideLineEvery?: number;
 };
 
 const PREFERRED_EXPORT_CELL_SIZE = 32;
@@ -28,6 +30,11 @@ export function renderDesignToCanvas(
   palette: PaletteColor[],
   options: RenderOptions
 ): void {
+  if (options.sheet) {
+    renderPatternSheetToCanvas(canvas, design, palette, options);
+    return;
+  }
+  options = { ...options, boardLineEvery: safeLineEvery(options.boardLineEvery) };
   const gutter = gutterFor(options);
   const gridWidth = design.boardWidth * options.cellSize;
   const gridHeight = design.boardHeight * options.cellSize;
@@ -120,10 +127,16 @@ export function renderDesignToBlob(
 
 // 手机浏览器对超大 Canvas 的内存较敏感：小图优先使用 32px/格保证色号清楚，
 // 大图则按总像素预算自适应，但不低于 20px/格。
-export function getHighResolutionCellSize(design: Pick<BeadDesign, "boardWidth" | "boardHeight">): number {
-  const cells = Math.max(1, design.boardWidth * design.boardHeight);
-  const sizeByPixelBudget = Math.floor(Math.sqrt(MAX_EXPORT_PIXELS / cells));
-  return Math.max(MIN_EXPORT_CELL_SIZE, Math.min(PREFERRED_EXPORT_CELL_SIZE, sizeByPixelBudget));
+export function getHighResolutionCellSize(design: Pick<BeadDesign, "boardWidth" | "boardHeight"> & Partial<Pick<BeadDesign, "colorCounts">>): number {
+  // 把四边坐标和完整用色清单一起计入预算；没有计数时按 512 色保守估算。
+  const colorCount = design.colorCounts ? Object.values(design.colorCounts).filter((count) => count > 0).length : 512;
+  for (let cell = PREFERRED_EXPORT_CELL_SIZE; cell >= MIN_EXPORT_CELL_SIZE; cell--) {
+    const width = Math.max(520, (design.boardWidth + 4) * cell);
+    const columns = Math.max(1, Math.floor((width - cell * 2) / 180));
+    const height = (design.boardHeight + 7) * cell + 40 + Math.ceil(colorCount / columns) * 48;
+    if (width * height <= MAX_EXPORT_PIXELS) return cell;
+  }
+  return MIN_EXPORT_CELL_SIZE;
 }
 
 function drawGrid(
@@ -155,6 +168,17 @@ function drawGrid(
   }
 
   context.lineWidth = 2;
+  if (options.guideLineEvery && options.guideLineEvery > 0) {
+    context.strokeStyle = "rgba(61, 90, 128, 0.36)";
+    for (let x = options.guideLineEvery; x < design.boardWidth; x += options.guideLineEvery) {
+      const position = gutter + x * options.cellSize + 0.5;
+      context.beginPath(); context.moveTo(position, gutter); context.lineTo(position, gutter + gridHeight); context.stroke();
+    }
+    for (let y = options.guideLineEvery; y < design.boardHeight; y += options.guideLineEvery) {
+      const position = gutter + y * options.cellSize + 0.5;
+      context.beginPath(); context.moveTo(gutter, position); context.lineTo(gutter + gridWidth, position); context.stroke();
+    }
+  }
   context.strokeStyle = "rgba(15, 23, 42, 0.58)";
   for (let x = options.boardLineEvery; x < design.boardWidth; x += options.boardLineEvery) {
     const position = gutter + x * options.cellSize + 0.5;
@@ -172,7 +196,7 @@ function drawGrid(
   }
 }
 
-// 坐标尺：每 5 格标一个序号（含末格），并在每个 boardLineEvery 分块的左上角标块号，便于多块拼接。
+// 预览坐标尺：每 5 格标一个序号（含末格），不在格内叠加块号。
 function drawCoordinates(
   context: CanvasRenderingContext2D,
   design: BeadDesign,
@@ -204,23 +228,81 @@ function drawCoordinates(
     context.fillText(String(y), gutter / 2, center);
   }
 
-  const blocksX = Math.ceil(design.boardWidth / options.boardLineEvery);
-  const blocksY = Math.ceil(design.boardHeight / options.boardLineEvery);
-  if (blocksX * blocksY <= 1) {
-    return;
-  }
+}
 
-  context.fillStyle = "rgba(37, 99, 235, 0.85)";
-  context.font = `700 ${Math.max(10, Math.floor(options.cellSize * 0.9))}px ui-sans-serif, system-ui, sans-serif`;
+function safeLineEvery(value: number): number {
+  return Number.isFinite(value) && value >= 1 ? Math.round(value) : 52;
+}
+
+export function renderPatternSheetToCanvas(canvas: HTMLCanvasElement, design: BeadDesign,
+  palette: PaletteColor[], options: RenderOptions): void {
+  const cell = options.cellSize;
+  const margin = cell;
+  const ruler = cell;
+  const header = cell * 3;
+  const gridWidth = design.boardWidth * cell;
+  const gridHeight = design.boardHeight * cell;
+  const left = margin + ruler;
+  const top = header + ruler;
+  const width = Math.max(520, gridWidth + (margin + ruler) * 2);
+  const used = palette.filter((color) => (design.colorCounts[color.code] ?? 0) > 0);
+  const legendColumns = Math.max(1, Math.floor((width - margin * 2) / 180));
+  const legendRows = Math.ceil(used.length / legendColumns);
+  const legendTop = top + gridHeight + ruler + margin;
+  canvas.width = width;
+  canvas.height = legendTop + 40 + legendRows * 48 + margin;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas rendering is not available");
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "#172033";
   context.textAlign = "left";
-  context.textBaseline = "top";
-  for (let by = 0; by < blocksY; by += 1) {
-    for (let bx = 0; bx < blocksX; bx += 1) {
-      const left = gutter + bx * options.boardLineEvery * options.cellSize + 3;
-      const top = gutter + by * options.boardLineEvery * options.cellSize + 3;
-      context.fillText(`${String.fromCharCode(65 + by)}${bx + 1}`, left, top);
-    }
+  context.textBaseline = "middle";
+  context.font = `700 ${Math.max(18, cell * 0.75)}px sans-serif`;
+  context.fillText(design.fileName.replace(/\.[^.]+$/, ""), margin, header * 0.32, width - margin * 2);
+  const total = Object.values(design.colorCounts).reduce((sum, count) => sum + count, 0);
+  context.font = `${Math.max(13, cell * 0.48)}px sans-serif`;
+  const pins = safeLineEvery(options.boardLineEvery);
+  context.fillText(`${design.boardWidth} × ${design.boardHeight} 格  ·  MARD ${used.length} 色  ·  ${total} 颗豆  ·  每板 ${pins} 针`,
+    margin, header * 0.74, width - margin * 2);
+  const chart = document.createElement("canvas");
+  renderDesignToCanvas(chart, design, palette, {
+    ...options, sheet: false, showCoordinates: false, showLabels: true,
+    guideLineEvery: 5, focusCode: undefined, completedCells: undefined
+  });
+  context.drawImage(chart, left, top);
+  // 四边逐格坐标；块号不再覆盖格内色号。
+  context.fillStyle = "#edf3f8";
+  context.fillRect(left, top - ruler, gridWidth, ruler);
+  context.fillRect(left, top + gridHeight, gridWidth, ruler);
+  context.fillRect(left - ruler, top, ruler, gridHeight);
+  context.fillRect(left + gridWidth, top, ruler, gridHeight);
+  context.fillStyle = "#31506f";
+  context.font = `${Math.max(10, Math.floor(cell * 0.4))}px monospace`;
+  context.textAlign = "center";
+  for (let x = 1; x <= design.boardWidth; x++) {
+    const center = left + (x - 0.5) * cell;
+    context.fillText(String(x), center, top - ruler / 2);
+    context.fillText(String(x), center, top + gridHeight + ruler / 2);
   }
+  for (let y = 1; y <= design.boardHeight; y++) {
+    const center = top + (y - 0.5) * cell;
+    context.fillText(String(y), left - ruler / 2, center);
+    context.fillText(String(y), left + gridWidth + ruler / 2, center);
+  }
+  context.textAlign = "left";
+  context.font = "16px sans-serif";
+  context.fillText("用色清单 · 空格不计豆 · 每 5 格辅助线 / 粗线为分板边界", margin, legendTop + 12, width - margin * 2);
+  const legendWidth = (width - margin * 2) / legendColumns;
+  used.forEach((color, index) => {
+    const x = margin + index % legendColumns * legendWidth;
+    const y = legendTop + 40 + Math.floor(index / legendColumns) * 48;
+    context.fillStyle = color.hex;
+    context.fillRect(x, y, legendWidth - 10, 38);
+    context.fillStyle = readableTextColor(color.hex);
+    context.font = "700 16px monospace";
+    context.fillText(`${color.code} · ${design.colorCounts[color.code]} 颗`, x + 10, y + 19, legendWidth - 28);
+  });
 }
 
 function readableTextColor(hex: string): string {

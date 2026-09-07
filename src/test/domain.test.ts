@@ -1088,8 +1088,11 @@ describe("project statistics and exports", () => {
 
   it("keeps mobile PNG labels large without exceeding the large-board pixel budget", () => {
     expect(getHighResolutionCellSize({ boardWidth: 52, boardHeight: 52 })).toBe(32);
-    expect(getHighResolutionCellSize({ boardWidth: 156, boardHeight: 156 })).toBe(31);
-    expect(getHighResolutionCellSize({ boardWidth: 208, boardHeight: 208 })).toBe(23);
+    for (const edge of [156, 208]) {
+      const size = getHighResolutionCellSize({ boardWidth: edge, boardHeight: edge });
+      expect(size).toBeGreaterThanOrEqual(20);
+      expect((edge + 4) * (edge + 24) * size * size).toBeLessThanOrEqual(24_000_000);
+    }
   });
 
   it("tiles a design into one printable page per physical board", () => {

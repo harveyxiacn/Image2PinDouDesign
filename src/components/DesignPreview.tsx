@@ -129,7 +129,8 @@ export function DesignPreview({
     renderDesignToCanvas(canvasRef.current, design, palette, {
       cellSize,
       showLabels,
-      boardLineEvery: 52,
+      boardLineEvery: design.settings?.boardTilePins ?? 52,
+      guideLineEvery: 5,
       showCoordinates: true,
       focusCode: mode === "build" ? focusCode : null,
       completedCells: mode === "build" ? completedCells : undefined
@@ -488,7 +489,7 @@ export function DesignPreview({
               </div>
             </div>
             <div className="canvas-footer">
-              <figcaption>拼豆图纸 · 粗线为 52 针分板边界</figcaption>
+              <figcaption>拼豆图纸 · 粗线为 {design.settings?.boardTilePins ?? 52} 针分板边界</figcaption>
               {onDownload && (
                 <button
                   id="download-pattern"
@@ -512,6 +513,5 @@ export function DesignPreview({
     </section>
   );
 }
-
 
 
