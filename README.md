@@ -30,6 +30,8 @@ Everything runs **client-side** — images never leave the device, and the built
 ## Features
 
 - Upload one or many images; crop / scale with automatic saliency focus or manual focal-point control, with per-task conversion progress and cancel.
+- Explicit **pixelate → match** pipeline: edge-aware pixelation avoids blended halo colors at hard edges, the pre-match pixel grid can be compared with the original, and bead clean-up merges isolated near-identical beads (plus optional rare-color merging) to cut stray colors.
+- **Board picker by pin count**: choose a single-board size (29 / 50 / 52 / custom 10–104 pins) and tile it N × M boards (auto-fit to the image ratio); split lines and printed pages follow the chosen pins.
 - Proportional compact/standard/detail/large options (long-edge targets 40/72/104/156); smart non-pixel output defaults to at most 104 on the long edge. Fixed boards and custom width × height (1–208 per side) remain available; prints/PDF paginate per physical board.
 - Independent settings for each uploaded/cropped image; duplicate an image to compare different sizes without replacing another chart's manual edits.
 - Automatic subject framing, pixel-art/photo sampling selection, high-contrast outline recommendations, and perceptual color matching to the bead palette.

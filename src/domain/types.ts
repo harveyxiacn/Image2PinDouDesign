@@ -82,6 +82,12 @@ export type ConversionSettings = {
   ignoreWhiteBg?: boolean;
   // 物理板分块信息随图纸保存，切换图纸后导出仍使用正确的分板规格。
   boardTilePins?: number;
+  // 像素化阶段：格子跨越强边缘时取主色而不是混合色，避免边缘出现"过渡色晕"。
+  edgeAwarePixelate?: boolean;
+  // 孤豆清理：周围没有同色、且与邻居色差很小的单颗豆并入邻居色（抖动/像素画模式不启用）。
+  cleanupNoise?: boolean;
+  // 零散色合并：少于 N 颗、且有相近主色可替代的颜色并入主色，减少要买的色号。0 表示关闭。
+  mergeRareColors?: number;
 };
 
 export type PixelSource = {
@@ -109,4 +115,6 @@ export type BeadDesign = {
   colorCounts: Record<string, number>;
   settings?: ConversionSettings;
   previewUrl?: string;
+  // 匹配色号前的像素化结果（每格一个 RGBA），仅用于预览对比，不写入本机草稿。
+  pixelated?: PixelSource;
 };

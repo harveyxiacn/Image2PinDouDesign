@@ -84,7 +84,9 @@ describe("detail sampling", () => {
     const source = { width, height, data };
     const base = { ...toConversionSettings(DEFAULT_SETTINGS, null), boardWidth: 1, boardHeight: 1 };
     expect(resampleToGrid(source, { ...base, sampling: "detail" }).cells[0]).toMatchObject({ r: 10, g: 10, b: 10 });
-    expect(resampleToGrid(source, { ...base, sampling: "area" }).cells[0]?.r).toBeGreaterThan(150);
+    expect(resampleToGrid(source, { ...base, sampling: "area", edgeAwarePixelate: false }).cells[0]?.r).toBeGreaterThan(150);
+    // 边缘感知像素化（界面默认开启）在照片模式下同样保住占比足够的深色轮廓。
+    expect(resampleToGrid(source, { ...base, sampling: "area", edgeAwarePixelate: true }).cells[0]?.r).toBeLessThan(80);
   });
 
   it("ignores hidden RGB in transparent cells and preserves empty space", () => {

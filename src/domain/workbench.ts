@@ -39,8 +39,24 @@ export function mirrorDesignHorizontally(design: BeadDesign): BeadDesign {
   return {
     ...design,
     matrix: design.matrix.map((row) => row.slice().reverse()),
-    colorCounts: { ...design.colorCounts }
+    colorCounts: { ...design.colorCounts },
+    pixelated: design.pixelated ? mirrorPixels(design.pixelated) : undefined
   };
+}
+
+function mirrorPixels(source: NonNullable<BeadDesign["pixelated"]>): NonNullable<BeadDesign["pixelated"]> {
+  const data = new Uint8ClampedArray(source.data.length);
+  for (let y = 0; y < source.height; y += 1) {
+    for (let x = 0; x < source.width; x += 1) {
+      const from = (y * source.width + x) * 4;
+      const to = (y * source.width + (source.width - 1 - x)) * 4;
+      data[to] = source.data[from];
+      data[to + 1] = source.data[from + 1];
+      data[to + 2] = source.data[from + 2];
+      data[to + 3] = source.data[from + 3];
+    }
+  }
+  return { width: source.width, height: source.height, data };
 }
 
 export function designFingerprint(design: Pick<BeadDesign, "boardWidth" | "boardHeight" | "matrix">): string {

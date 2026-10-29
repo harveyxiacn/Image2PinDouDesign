@@ -1,5 +1,6 @@
 import { applyAdjustmentsToGrid } from "./adjustments";
 import { dropBorderWhite } from "./background";
+import { cleanupIsolatedBeads, mergeRareColors } from "./beadCleanup";
 import { clamp, findNearestCodeByLab, findNearestPaletteColor, rgbToLab } from "./color";
 import { autoFramePixelSource } from "./crop";
 import { computeCropRect, estimateFocus } from "./focus";
@@ -71,7 +72,16 @@ export function convertPixelSourceToDesign(
       ? quantizeWithBayer(grid, activePalette, effectiveSettings)
       : quantizeWithFloydSteinberg(grid, activePalette, effectiveSettings))
     : quantize(grid, activePalette, effectiveSettings);
-  const matrix = effectiveSettings.outline ? outlineMatrix(quantized, OUTLINE_CODE) : quantized;
+  // 拼豆后处理：抖动本身依赖散点、像素画每格都是原作者的落点，这两类不做孤豆清理。
+  const usesNearest = effectiveSettings.sampling === "nearest"
+    || ((effectiveSettings.sampling ?? "auto") === "auto" && isLikelyPixelArt(framedSource));
+  const denoised = effectiveSettings.cleanupNoise && !effectiveSettings.dither && !usesNearest
+    ? cleanupIsolatedBeads(quantized, activePalette)
+    : quantized;
+  const merged = effectiveSettings.mergeRareColors
+    ? mergeRareColors(denoised, activePalette, effectiveSettings.mergeRareColors)
+    : denoised;
+  const matrix = effectiveSettings.outline ? outlineMatrix(merged, OUTLINE_CODE) : merged;
 
   return {
     id: createDesignId(fileName),
@@ -80,8 +90,24 @@ export function convertPixelSourceToDesign(
     boardHeight: effectiveSettings.boardHeight,
     matrix,
     colorCounts: countMatrixColors(matrix),
-    settings: effectiveSettings
+    settings: effectiveSettings,
+    pixelated: gridToPixelSource(grid, effectiveSettings)
   };
+}
+
+// 像素化结果（色号匹配前，每格一个颜色）转成 RGBA 位图，供“原图 → 像素化 → 图纸”对比预览。
+export function gridToPixelSource(grid: SampledGrid, settings: ConversionSettings): PixelSource {
+  const data = new Uint8ClampedArray(grid.width * grid.height * 4);
+  for (let index = 0; index < grid.cells.length; index += 1) {
+    const cell = prepareCellForMatching(grid.cells[index], settings);
+    if (!cell) continue;
+    const offset = index * 4;
+    data[offset] = cell.r;
+    data[offset + 1] = cell.g;
+    data[offset + 2] = cell.b;
+    data[offset + 3] = 255;
+  }
+  return { width: grid.width, height: grid.height, data };
 }
 
 export const OUTLINE_CODE = "H7"; // 黑色
@@ -245,6 +271,7 @@ export function resampleToGrid(source: PixelSource, settings: ConversionSettings
   const sampling = settings.sampling ?? "area";
   const useNearest = sampling === "nearest" || (sampling === "auto" && isLikelyPixelArt(source));
   const useDetail = sampling === "detail" || (sampling === "auto" && !useNearest && isFlatIllustration(source));
+  const useEdgeAware = Boolean(settings.edgeAwarePixelate) && !useNearest && !useDetail;
 
   let scaleX: number;
   let scaleY: number;
@@ -299,7 +326,9 @@ export function resampleToGrid(source: PixelSource, settings: ConversionSettings
         ? sampleNearest(source, (srcLeft + srcRight) / 2, (srcTop + srcBottom) / 2)
         : useDetail
           ? sampleDetail(source, srcLeft, srcTop, srcRight, srcBottom)
-          : sampleArea(source, srcLeft, srcTop, srcRight, srcBottom);
+          : useEdgeAware
+            ? sampleEdgeAware(source, srcLeft, srcTop, srcRight, srcBottom)
+            : sampleArea(source, srcLeft, srcTop, srcRight, srcBottom);
     }
   }
 
@@ -588,6 +617,75 @@ function sampleDetail(source: PixelSource, left: number, top: number, right: num
   const outline = colors.find((color) => color.weight / total >= 0.2
     && luminance(color) < 72 && luminance(average) - luminance(color) > 40);
   const chosen = outline ?? colors[0];
+  return { r: chosen.r, g: chosen.g, b: chosen.b, a: average.a };
+}
+
+// 边缘感知像素化：把格子分成 3×3 子块各自面积平均，再做 2-均值聚类。
+// 子块颜色接近（渐变、平涂）时等同普通面积平均；格子横跨强边缘时，普通平均会得到
+// 两侧都不是的“中间色”，匹配到色卡后就是一圈脏边。此时改取主色簇，
+// 若少数簇是明显更暗、占比足够的轮廓线，则优先保留轮廓。
+const EDGE_SPLIT_DISTANCE = 56;
+
+export function sampleEdgeAware(source: PixelSource, left: number, top: number, right: number, bottom: number): SampledCell {
+  const average = sampleArea(source, left, top, right, bottom);
+  if (!average || average.a < 1) return average;
+  const stepX = (right - left) / 3;
+  const stepY = (bottom - top) / 3;
+  // 每格不足约 3 个源像素时没有可分的子结构，直接用面积平均。
+  if (stepX < 1 && stepY < 1) return average;
+
+  const subs: Array<Rgba & { weight: number }> = [];
+  for (let sy = 0; sy < 3; sy += 1) {
+    for (let sx = 0; sx < 3; sx += 1) {
+      const sub = sampleArea(source, left + sx * stepX, top + sy * stepY, left + (sx + 1) * stepX, top + (sy + 1) * stepY);
+      if (sub && sub.a >= 32) subs.push({ ...sub, weight: sub.a / 255 });
+    }
+  }
+  if (subs.length < 4) return average;
+
+  const luminance = (color: Rgb) => 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+  const distance = (a: Rgb, b: Rgb) => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
+  let dark: Rgb = subs[0];
+  let light: Rgb = subs[0];
+  for (const sub of subs) {
+    if (luminance(sub) < luminance(dark)) dark = sub;
+    if (luminance(sub) > luminance(light)) light = sub;
+  }
+  // 亮度相近但色相不同的边缘（如红/绿交界）也要能拆开：取离最暗块最远的子块作第二个中心。
+  let farthest = light;
+  for (const sub of subs) {
+    if (distance(sub, dark) > distance(farthest, dark)) farthest = sub;
+  }
+  let centers: [Rgb, Rgb] = [{ ...dark }, { ...farthest }];
+  if (distance(centers[0], centers[1]) < EDGE_SPLIT_DISTANCE) return average;
+
+  const weights = [0, 0];
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    const sums = [{ r: 0, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }];
+    weights[0] = 0;
+    weights[1] = 0;
+    for (const sub of subs) {
+      const cluster = distance(sub, centers[0]) <= distance(sub, centers[1]) ? 0 : 1;
+      sums[cluster].r += sub.r * sub.weight;
+      sums[cluster].g += sub.g * sub.weight;
+      sums[cluster].b += sub.b * sub.weight;
+      weights[cluster] += sub.weight;
+    }
+    centers = [0, 1].map((cluster) => weights[cluster] > 0
+      ? { r: sums[cluster].r / weights[cluster], g: sums[cluster].g / weights[cluster], b: sums[cluster].b / weights[cluster] }
+      : centers[cluster]) as [Rgb, Rgb];
+  }
+  const total = weights[0] + weights[1];
+  if (total <= 0 || weights[0] === 0 || weights[1] === 0
+    || distance(centers[0], centers[1]) < EDGE_SPLIT_DISTANCE) {
+    return average;
+  }
+  const major = weights[0] >= weights[1] ? 0 : 1;
+  const minor = 1 - major;
+  const outlineWins = weights[minor] / total >= 0.3
+    && luminance(centers[minor]) < 80
+    && luminance(centers[major]) - luminance(centers[minor]) > 48;
+  const chosen = centers[outlineWins ? minor : major];
   return { r: chosen.r, g: chosen.g, b: chosen.b, a: average.a };
 }
 
