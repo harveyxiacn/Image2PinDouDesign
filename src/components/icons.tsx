@@ -216,3 +216,34 @@ export function IconSliders(props: IconProps) {
     </IconBase>
   );
 }
+
+/** 减号（步进器） */
+export function IconMinus(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M5 12h14" />
+    </IconBase>
+  );
+}
+
+/** 智能推荐 */
+export function IconSparkles(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7z" />
+      <path d="M18.5 14.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z" />
+      <path d="M5 15.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4L3 17.5l1.4-.6z" />
+    </IconBase>
+  );
+}
+
+/** 按比例自动排板 */
+export function IconWand(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M4 20L15 9" />
+      <path d="M13.5 7.5l3 3" />
+      <path d="M17 3v3M15.5 4.5h3M20 8v2M19 9h2" />
+    </IconBase>
+  );
+}

@@ -3,7 +3,9 @@ import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent
 import { renderDesignToCanvas } from "../domain/rendering";
 import type { BeadDesign, PaletteColor } from "../domain/types";
 import { designFingerprint, getColorBuildProgress } from "../domain/workbench";
-import { IconCheck, IconEdit, IconPlus } from "./icons";
+import { PixelCanvas } from "./DesignGallery";
+import { IconCheck, IconEdit, IconMinus, IconPlus } from "./icons";
+import { Segmented } from "./Segmented";
 
 type DesignPreviewProps = {
   design?: BeadDesign;
@@ -24,6 +26,7 @@ type DesignPreviewProps = {
 };
 
 type PreviewZoom = "fit" | 1 | 1.5 | 2;
+type CompareView = "original" | "pixelated";
 type InteractionMode = "view" | "paint" | "pick" | "erase" | "build";
 
 const ZOOM_LEVELS: Array<Exclude<PreviewZoom, "fit">> = [1, 1.5, 2];
@@ -61,6 +64,8 @@ export function DesignPreview({
   const [cursorCell, setCursorCell] = useState<{ x: number; y: number } | null>(null);
   const [cursorBox, setCursorBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const cursorRef = useRef<HTMLDivElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [compareView, setCompareView] = useState<CompareView>("original");
 
   const byCode = useMemo(() => new Map(palette.map((color) => [color.code, color])), [palette]);
   const designCodes = useMemo(() => Object.entries(design?.colorCounts ?? {})
@@ -68,6 +73,10 @@ export function DesignPreview({
   const progressStorageKey = useMemo(
     () => design ? `${PROGRESS_PREFIX}${designFingerprint(design)}` : "",
     [design]
+  );
+  const totalBeads = useMemo(
+    () => designCodes.reduce((sum, [, count]) => sum + count, 0),
+    [designCodes]
   );
   const buildProgress = useMemo(
     () => design ? getColorBuildProgress(design, completedCells, focusCode) : { total: 0, completed: 0, remaining: 0 },
@@ -137,6 +146,23 @@ export function DesignPreview({
     });
     setCanvasWidth(canvasRef.current.width);
   }, [completedCells, design, focusCode, mode, palette, showLabels]);
+
+  // 新生成结果（新图纸或重新转换，pixelated 引用会变化）到达时做一次逐行“铺豆”揭示；
+  // 单格编辑沿用同一引用，不会反复播放。动画只用 clip-path，结束与否不影响任何状态。
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !design) return;
+    stage.classList.remove("is-revealing");
+    void stage.offsetWidth;
+    stage.classList.add("is-revealing");
+    const timer = window.setTimeout(() => stage.classList.remove("is-revealing"), 900);
+    return () => window.clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [design?.id, design?.pixelated]);
+
+  useEffect(() => {
+    if (!originalUrl && design?.pixelated) setCompareView("pixelated");
+  }, [design?.pixelated, originalUrl]);
 
   useEffect(() => {
     const previousZoom = previousZoomRef.current;
@@ -350,12 +376,46 @@ export function DesignPreview({
         {design && <span className="badge">{design.boardWidth} x {design.boardHeight}</span>}
       </div>
 
+      {design && (
+        <ol className="pipeline-strip" aria-label="生成步骤">
+          <li><span>原图</span><small>{originalUrl ? "已裁剪主体" : "本机草稿"}</small></li>
+          <li><span>像素化</span><small>{design.boardWidth} × {design.boardHeight} 格</small></li>
+          <li><span>匹配色号</span><small>{designCodes.length} 种 MARD 色</small></li>
+          <li><span>用豆</span><small>{totalBeads} 颗</small></li>
+        </ol>
+      )}
+
       {design ? (
         <div className="preview-compare">
-          {originalUrl && (
+          {(originalUrl || design.pixelated) && (
             <figure className="preview-original">
-              <img src={originalUrl} alt={`${design.fileName} 原图`} />
-              <figcaption>原图</figcaption>
+              {originalUrl && design.pixelated && (
+                <Segmented
+                  label="对比视图"
+                  size="compact"
+                  value={compareView}
+                  options={[
+                    { value: "original", label: "原图" },
+                    { value: "pixelated", label: "像素化" }
+                  ]}
+                  onChange={setCompareView}
+                />
+              )}
+              <div className="compare-frame">
+                {compareView === "pixelated" && design.pixelated ? (
+                  <PixelCanvas
+                    key="pixelated"
+                    source={design.pixelated}
+                    className="compare-pixels"
+                    label={`${design.fileName} 像素化结果`}
+                  />
+                ) : originalUrl ? (
+                  <img key="original" src={originalUrl} alt={`${design.fileName} 原图`} />
+                ) : null}
+              </div>
+              <figcaption>{compareView === "pixelated" && design.pixelated
+                ? "像素化：每格一个颜色，再匹配到最接近的色号"
+                : "原图"}</figcaption>
             </figure>
           )}
           <figure className="canvas-shell">
@@ -453,7 +513,7 @@ export function DesignPreview({
                 ? "放大后可滑动查看每格色号与坐标；聚焦图纸后可用方向键逐格查看"
                 : "点格子或按方向键移动光标，Enter/空格上色，Delete 擦除"}</span>
               <div className="zoom-controls" role="group" aria-label="图纸缩放">
-                <button type="button" onClick={zoomOut} disabled={zoom === "fit"} aria-label="缩小图纸">−</button>
+                <button type="button" onClick={zoomOut} disabled={zoom === "fit"} aria-label="缩小图纸"><IconMinus /></button>
                 <button type="button" className="zoom-value" onClick={() => setZoom("fit")}>{zoomLabel}</button>
                 <button type="button" onClick={zoomIn} disabled={zoom === 2} aria-label="放大图纸"><IconPlus /></button>
               </div>
@@ -477,7 +537,7 @@ export function DesignPreview({
               onKeyDown={handleGridKeyDown}
               onDoubleClick={() => { if (mode === "view") setZoom((current) => current === "fit" ? 1 : "fit"); }}
             >
-              <div className={`canvas-stage ${zoom === "fit" ? "is-fit" : "is-zoomed"}`} style={stageStyle}>
+              <div ref={stageRef} className={`canvas-stage ${zoom === "fit" ? "is-fit" : "is-zoomed"}`} style={stageStyle}>
                 <canvas
                   ref={canvasRef}
                   aria-label={`${design.fileName} 拼豆图纸`}
@@ -506,12 +566,39 @@ export function DesignPreview({
         </div>
       ) : (
         <div className="empty-state">
+          <EmptyIllustration />
           <strong>还没有图纸</strong>
-          <span>上传图片后会自动生成，并显示“编辑图纸”入口。</span>
+          <span>上传图片后自动完成：原图 → 像素化 → 匹配色号 → 统计用豆。</span>
+          <a className="button primary" href="#upload-title">上传第一张图片</a>
         </div>
       )}
     </section>
   );
 }
 
+// 空状态插画：一颗 9×9 的像素爱心按顺序“落豆”，示意图片被转换成拼豆格。
+const HEART = [
+  "..##.##..",
+  ".#######.",
+  "#########",
+  "#########",
+  ".#######.",
+  "..#####..",
+  "...###...",
+  "....#....",
+  "........."
+];
 
+function EmptyIllustration() {
+  return (
+    <div className="empty-illustration" aria-hidden="true">
+      {HEART.flatMap((row, y) => row.split("").map((cell, x) => (
+        <i
+          key={`${x}-${y}`}
+          className={cell === "#" ? (x + y < 6 ? "is-light" : "is-filled") : ""}
+          style={{ animationDelay: `${(x + y) * 45}ms` }}
+        />
+      )))}
+    </div>
+  );
+}

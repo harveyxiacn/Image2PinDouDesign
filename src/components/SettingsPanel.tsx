@@ -1,8 +1,9 @@
-import { BOARD_PRESETS } from "../domain/boards";
 import { STYLE_PRESETS, type RecommendedSettings } from "../domain/recommend";
 import type { FitMode, ImageAdjustments, MaxColors, SamplingMode } from "../domain/types";
-import { IconChevronDown, IconRotateCcw } from "./icons";
-import { DEFAULT_SETTINGS, type UiSettings } from "../domain/settings";
+import { BoardPicker } from "./BoardPicker";
+import { IconChevronDown, IconRotateCcw, IconSparkles } from "./icons";
+import { Segmented } from "./Segmented";
+import { DEFAULT_SETTINGS, resolveBoardLayout, type UiSettings } from "../domain/settings";
 import type { DesignSizeOption } from "../domain/designSizing";
 export type { UiSettings } from "../domain/settings";
 
@@ -22,14 +23,23 @@ type SettingsPanelProps = {
   sizeOptions?: DesignSizeOption[];
   onSelectSize?: (option: DesignSizeOption) => void;
   sourceName?: string;
+  aspectRatio?: number | null;
+  generatedSize?: { width: number; height: number } | null;
 };
 
+const mergeOptions: Array<{ label: string; value: number; title: string }> = [
+  { label: "关", value: 0, title: "保留所有匹配到的颜色" },
+  { label: "< 3 颗", value: 3, title: "少于 3 颗且有相近主色的颜色并入主色" },
+  { label: "< 6 颗", value: 6, title: "少于 6 颗且有相近主色的颜色并入主色" },
+  { label: "< 10 颗", value: 10, title: "少于 10 颗且有相近主色的颜色并入主色" }
+];
+
 const maxColorOptions: Array<{ label: string; value: MaxColors }> = [
-  { label: "8 色", value: 8 },
-  { label: "16 色", value: 16 },
-  { label: "24 色", value: 24 },
-  { label: "32 色", value: 32 },
-  { label: "48 色", value: 48 },
+  { label: "8", value: 8 },
+  { label: "16", value: 16 },
+  { label: "24", value: 24 },
+  { label: "32", value: 32 },
+  { label: "48", value: 48 },
   { label: "全部", value: "all" }
 ];
 
@@ -54,8 +64,12 @@ const adjustmentControls: Array<{ key: keyof ImageAdjustments; label: string }> 
 
 type RecommendDiff = { label: string; detail: string };
 
-const formatBoard = (id: string): string =>
-  BOARD_PRESETS.find((preset) => preset.id === id)?.name ?? id;
+const formatBoard = (settings: UiSettings): string => {
+  if (settings.boardPreset === "smart") return "智能尺寸";
+  if (settings.boardPreset === "custom") return `自定义 ${settings.customWidth}×${settings.customHeight}`;
+  const layout = resolveBoardLayout(settings);
+  return `${layout.pins} 针 ${layout.cols}×${layout.rows} 块`;
+};
 
 const formatColors = (value: string | number): string =>
   value === "all" ? "全部" : `${value} 色`;
@@ -76,7 +90,7 @@ function buildRecommendDiffs(settings: UiSettings, recommendation: RecommendedSe
       diffs.push({ label, detail: `${current} → ${recommended}` });
     }
   };
-  push("板型", formatBoard(settings.boardPreset), formatBoard(recommendation.boardPreset));
+  push("尺寸", formatBoard(settings), formatBoard({ ...settings, boardPreset: recommendation.boardPreset }));
   push("色数", formatColors(settings.maxColors), formatColors(recommendation.maxColors));
   push("采样", formatSampling(settings.sampling), formatSampling(recommendation.sampling));
   push("抖动", formatOnOff(settings.dither), formatOnOff(recommendation.dither));
@@ -98,9 +112,10 @@ export function SettingsPanel({
   smartSizeHint,
   sizeOptions,
   onSelectSize,
-  sourceName
+  sourceName,
+  aspectRatio,
+  generatedSize
 }: SettingsPanelProps) {
-  const activeBoard = BOARD_PRESETS.find((preset) => preset.id === settings.boardPreset) ?? BOARD_PRESETS[0];
   const activeFit = fitOptions.find((option) => option.value === settings.fit) ?? fitOptions[0];
   const activeSampling = samplingOptions.find((option) => option.value === settings.sampling) ?? samplingOptions[0];
   const hasAdjustment = adjustmentControls.some(({ key }) => settings.adjustments[key] !== 0);
@@ -126,24 +141,15 @@ export function SettingsPanel({
 
       {sourceName && <p className="muted settings-scope">当前图片：{sourceName}。调整仅影响这张图纸。</p>}
 
-      {sizeOptions && onSelectSize && (
-        <fieldset className="size-options">
-          <legend>按原图比例选择尺寸</legend>
-          <p className="muted">每格一颗豆。尺寸越大，细节空间和制作量越多。</p>
-          <div className="size-options-grid">
-            {sizeOptions.map((option) => (
-              <button key={option.id} type="button" className="size-option"
-                aria-pressed={settings.boardPreset === "custom" && settings.customWidth === option.width && settings.customHeight === option.height}
-                onClick={() => onSelectSize(option)} title={option.description}>
-                <strong>{option.label}</strong>
-                <span>{option.width} × {option.height}</span>
-                <small>最多 {option.width * option.height} 颗</small>
-              </button>
-            ))}
-          </div>
-          <small className="muted">复杂背景请先“裁剪 / 智能去背景”；原图越清晰，细节恢复越可靠。</small>
-        </fieldset>
-      )}
+      <BoardPicker
+        settings={settings}
+        onChange={onChange}
+        sizeOptions={sizeOptions}
+        onSelectSize={onSelectSize}
+        smartSizeHint={smartSizeHint}
+        aspectRatio={aspectRatio}
+        generatedSize={generatedSize}
+      />
 
       {onApplyPreset && (
         <div className="preset-section">
@@ -171,7 +177,7 @@ export function SettingsPanel({
       {recommendation && onApplyRecommendation && (
         <div className="recommend-box" role="group" aria-labelledby="recommend-title">
           <div className="recommend-head">
-            <span id="recommend-title">✨ 智能推荐</span>
+            <span id="recommend-title"><IconSparkles className="button-icon" />智能推荐</span>
             <button type="button" className="button small recommend-apply" onClick={onApplyRecommendation}>
               一键应用
             </button>
@@ -192,76 +198,52 @@ export function SettingsPanel({
       )}
 
       {/* 基础区：高频项 */}
-      <label className="field">
-        <span>板型</span>
-        <select
-          aria-label="板型"
-          value={settings.boardPreset}
-          onChange={(event) => onChange({ ...settings, boardPreset: event.target.value })}
-        >
-          {BOARD_PRESETS.map((preset) => (
-            <option value={preset.id} key={preset.id}>{preset.name}</option>
-          ))}
-        </select>
-        <small className="muted">{activeBoard.description}</small>
-        {settings.boardPreset === "smart" && smartSizeHint && (
-          <small className="smart-size-feedback" aria-live="polite">{smartSizeHint}</small>
-        )}
-      </label>
+      <div className="field">
+        <span id="max-colors-label">最大颜色数</span>
+        <Segmented
+          label="最大颜色数"
+          size="compact"
+          value={settings.maxColors}
+          options={maxColorOptions.map((option) => ({ value: option.value, label: option.label }))}
+          onChange={(value) => onChange({ ...settings, maxColors: value })}
+        />
+        <small className="muted">色数越少越好买豆；角色眼睛等小面积特征色会优先保留。</small>
+      </div>
 
-      {settings.boardPreset === "custom" && (
-        <div className="inline-fields">
-          <label className="field">
-            <span>宽度</span>
-            <input
-              type="number"
-              min={1}
-              max={208}
-              value={settings.customWidth}
-              onChange={(event) => onChange({ ...settings, customWidth: Number(event.target.value) })}
-            />
-          </label>
-          <label className="field">
-            <span>高度</span>
-            <input
-              type="number"
-              min={1}
-              max={208}
-              value={settings.customHeight}
-              onChange={(event) => onChange({ ...settings, customHeight: Number(event.target.value) })}
-            />
-          </label>
-        </div>
-      )}
-
-      <label className="field">
-        <span>最大颜色数</span>
-        <select
-          value={String(settings.maxColors)}
-          onChange={(event) => {
-            const value = event.target.value === "all" ? "all" : Number(event.target.value) as MaxColors;
-            onChange({ ...settings, maxColors: value });
-          }}
-        >
-          {maxColorOptions.map((option) => (
-            <option key={String(option.value)} value={String(option.value)}>{option.label}</option>
-          ))}
-        </select>
-      </label>
-
-      <label className="field">
+      <div className="field">
         <span>适配方式</span>
-        <select
-          aria-label="适配方式"
+        <Segmented
+          label="适配方式"
+          size="compact"
           value={settings.fit}
-          onChange={(event) => onChange({ ...settings, fit: event.target.value as FitMode })}
-        >
-          {fitOptions.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
-        </select>
+          options={fitOptions.map((option) => ({ value: option.value, label: option.label, title: option.hint }))}
+          onChange={(value) => onChange({ ...settings, fit: value })}
+        />
         <small className="muted">{activeFit.hint}</small>
-      </label>
+      </div>
+
+      <div className="bead-tuning" role="group" aria-labelledby="bead-tuning-title">
+        <span id="bead-tuning-title" className="bead-tuning-title">拼豆优化</span>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={settings.cleanupNoise ?? false}
+            onChange={(event) => onChange({ ...settings, cleanupNoise: event.target.checked })}
+          />
+          <span>清理孤豆<small>与周围几乎同色的单颗杂点并入邻色；高光、细线等高对比细节保留。像素画和抖动不处理。</small></span>
+        </label>
+        <div className="field">
+          <span>合并零散色</span>
+          <Segmented
+            label="合并零散色"
+            size="compact"
+            value={settings.mergeRareColors ?? 0}
+            options={mergeOptions}
+            onChange={(value) => onChange({ ...settings, mergeRareColors: value })}
+          />
+          <small className="muted">用量很少、又有相近主色可替代的颜色并入主色，少买几个色号。</small>
+        </div>
+      </div>
 
       {/* 高级区：低频项渐进披露 */}
       <details className="advanced-settings">
@@ -323,19 +305,17 @@ export function SettingsPanel({
             ))}
           </div>
 
-          <label className="field">
+          <div className="field">
             <span>色块简化 / 降噪</span>
-            <select
-              aria-label="色块简化"
-              value={String(settings.smooth)}
-              onChange={(event) => onChange({ ...settings, smooth: Number(event.target.value) })}
-            >
-              {smoothOptions.map((option) => (
-                <option key={option.value} value={String(option.value)}>{option.label}</option>
-              ))}
-            </select>
+            <Segmented
+              label="色块简化"
+              size="compact"
+              value={settings.smooth}
+              options={smoothOptions}
+              onChange={(value) => onChange({ ...settings, smooth: value })}
+            />
             <small className="muted">把碎噪点合并成干净色块；截图/照片类源建议开「弱」或「强」。</small>
-          </label>
+          </div>
 
           <label className="toggle">
             <input

@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CropDialog, type CropFractions } from "./components/CropDialog";
+import { DesignGallery } from "./components/DesignGallery";
 import { DesignPreview } from "./components/DesignPreview";
 import { PalettePanel } from "./components/PalettePanel";
 import { SettingsPanel, type UiSettings } from "./components/SettingsPanel";
 import { StatsTable } from "./components/StatsTable";
 import { UploadPanel } from "./components/UploadPanel";
-import { IconClose, IconCrop, IconDownload, IconEdit, IconPlus, IconSettings } from "./components/icons";
+import { IconCrop, IconDownload, IconEdit, IconPlus, IconSettings } from "./components/icons";
 import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
-import { getBoardSize } from "./domain/boards";
-import { DEFAULT_SETTINGS, toConversionSettings } from "./domain/settings";
+import { DEFAULT_SETTINGS, resolveBoardSize, toConversionSettings } from "./domain/settings";
 import { getDesignSizeOptions, getSmartSizeDescription, type DesignSizeOption } from "./domain/designSizing";
 import { autoCropToContent, cropPixelSource, rectFromFractions } from "./domain/crop";
 import { countsToCsv, downloadBlob, downloadTextFile, openPrintableSheet } from "./domain/exporters";
@@ -93,7 +93,7 @@ export default function App() {
     persistOwnedInventory(inventory);
   }, [inventory]);
 
-  const boardSize = getBoardSize(settings.boardPreset, settings.customWidth, settings.customHeight);
+  const boardSize = resolveBoardSize(settings);
   // v2 库存：限制模式开启时取 owned>0 的色号集合；引用随 inventory 变化，保持转换 effect 依赖稳定。
   const allowedCodesKey = inventory.restrictEnabled ? [...(ownedToAllowedCodes(inventory) ?? [])].sort().join(",") : null;
   const allowedCodesArray = useMemo(() => allowedCodesKey === null ? null : allowedCodesKey.split(",").filter(Boolean), [allowedCodesKey]);
@@ -112,6 +112,11 @@ export default function App() {
   const sizeOptions = useMemo(() => recommendationImage
     ? getDesignSizeOptions(recommendationImage.source, settings.autoFrame, settings.ignoreWhiteBg) : undefined,
   [recommendationImage?.source, settings.autoFrame, settings.ignoreWhiteBg]);
+  // 紧贴主体后的宽高比：用最大的尺寸档位反推，和图纸实际比例一致。
+  const subjectAspectRatio = useMemo(() => {
+    const reference = sizeOptions?.[sizeOptions.length - 1];
+    return reference ? reference.width / reference.height : recommendationAnalysis?.aspectRatio ?? null;
+  }, [recommendationAnalysis?.aspectRatio, sizeOptions]);
   const smartSizeHint = useMemo(() => settings.boardPreset === "smart" && recommendationImage
     ? getSmartSizeDescription(recommendationImage.source, settings.autoFrame, settings.ignoreWhiteBg) : null,
   [recommendationImage?.source, settings.boardPreset, settings.autoFrame, settings.ignoreWhiteBg]);
@@ -248,6 +253,8 @@ export default function App() {
     [designs, sourceFilter]
   );
   const totalBeads = Object.values(projectTotals).reduce((sum, count) => sum + count, 0);
+  const hasInput = images.length > 0 || designs.length > 0;
+  const flowStep = !hasInput ? 0 : !activeDesign ? (isConverting ? 2 : 1) : 3;
   const currentDesignCodes = useMemo(() => {
     return activeDesign ? new Set(Object.keys(activeDesign.colorCounts)) : new Set<string>();
   }, [activeDesign]);
@@ -564,31 +571,33 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <header className="hero">
-        <nav className="nav">
-          <strong>Pixel Beads Designer</strong>
-          <span>MARD 色卡 · 多图统计 · PNG/CSV 导出</span>
-        </nav>
-        <div className="hero-grid">
-          <div>
-            <p className="eyebrow">Image to PinDou Design</p>
-            <h1>拼豆图纸工坊</h1>
-            <p className="hero-copy">
-              上传角色原图，按主体比例选择简洁、标准或精细尺寸，生成带色号与用豆清单的拼豆图纸。每张图纸可以独立调整。
-            </p>
-            <div className="hero-actions">
-              <a href="#upload-title" className="button primary">开始上传</a>
-              <a href="#palette-title" className="button secondary">查看色卡</a>
-            </div>
+      <header className="topbar">
+        <div className="topbar-inner">
+          <div className="brand">
+            <BrandMark />
+            <span className="brand-text">
+              <h1>拼豆图纸工坊</h1>
+              <small>图片像素化 · MARD 色号 · 用豆清单</small>
+            </span>
           </div>
-          <div className="hero-card">
-            <span>{STATS_SOURCE_LABELS[sourceFilter]}统计</span>
-            <strong>{filteredDesignCount}</strong>
-            <small>张图纸</small>
-            <strong>{totalBeads}</strong>
-            <small>颗豆子</small>
+          <ol className="flow-steps" aria-label="制作流程">
+            {FLOW_STEPS.map((step, index) => (
+              <li key={step.href} data-state={index < flowStep ? "done" : index === flowStep ? "current" : "todo"}>
+                <a href={step.href} aria-current={index === flowStep ? "step" : undefined}>
+                  <span className="flow-step-index">{index + 1}</span>
+                  {step.label}
+                </a>
+              </li>
+            ))}
+          </ol>
+          <div className="topbar-stats" aria-label={`${STATS_SOURCE_LABELS[sourceFilter]}统计`}>
+            <span><strong>{filteredDesignCount}</strong> 张图纸</span>
+            <span><strong>{totalBeads}</strong> 颗豆</span>
           </div>
         </div>
+        <p className="topbar-lede">
+          上传角色或照片，先按拼豆板针数像素化，再逐格匹配 MARD 色号；每张图纸可以独立设置尺寸、手工修改并导出分板打印图。图片只在本机浏览器处理。
+        </p>
       </header>
 
       <nav className="mobile-nav" aria-label="手机端快捷导航">
@@ -612,6 +621,9 @@ export default function App() {
             sourceName={activeImage?.fileName}
             sizeOptions={sizeOptions}
             onSelectSize={selectSize}
+            aspectRatio={subjectAspectRatio}
+            generatedSize={activeDesign && activeImage?.id === activeDesign.id
+              ? { width: activeDesign.boardWidth, height: activeDesign.boardHeight } : null}
             onApplyRecommendation={() => {
               if (recommendation) {
                 setSettings((s) => ({ ...s, ...recommendation }));
@@ -624,7 +636,8 @@ export default function App() {
         <section className="main-column">
           {isConverting && (
             <div className="converting-banner" role="status">
-              <strong>正在生成图纸…</strong>
+              <span className="bead-loader" aria-hidden="true"><i /><i /><i /><i /></span>
+              <strong>正在像素化并匹配色号…</strong>
               {Object.keys(conversionProgress).length > 0 && (
                 <ul className="conversion-task-list">
                   {Object.entries(conversionProgress).map(([id, task]) => (
@@ -650,25 +663,15 @@ export default function App() {
               )}
             </div>
           )}
-          {designs.length > 0 && (
-            <div className="design-tabs" aria-label="图纸列表">
-              {designs.map((design) => (
-                <span key={design.id} className={`design-tab ${design.id === activeDesign?.id ? "active" : ""}`}>
-                  <button type="button" aria-label={design.fileName} onClick={() => setActiveId(design.id)}>
-                    {design.fileName} <small>{design.boardWidth} × {design.boardHeight}</small>
-                  </button>
-                  <button
-                    type="button"
-                    className="design-tab-remove"
-                    aria-label={`移除 ${design.fileName}`}
-                    onClick={() => removeDesign(design.id)}
-                  >
-                    <IconClose />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
+          <DesignGallery
+            designs={designs}
+            activeId={activeDesign?.id}
+            palette={MARD_PALETTE}
+            draftIds={localDraftIdsRef.current}
+            progress={conversionProgress}
+            onSelect={setActiveId}
+            onRemove={removeDesign}
+          />
 
           {activeDesign && activeOriginalUrl && (
             <div className="preview-toolbar">
@@ -782,6 +785,28 @@ export default function App() {
         );
       })()}
     </div>
+  );
+}
+
+const FLOW_STEPS = [
+  { label: "上传图片", href: "#upload-title" },
+  { label: "选择尺寸", href: "#settings-title" },
+  { label: "生成图纸", href: "#preview-title" },
+  { label: "编辑导出", href: "#download-pattern" }
+];
+
+// 品牌标：3×3 拼豆格，中心空孔呼应真实拼豆。
+function BrandMark() {
+  const colors = ["#ee6c4d", "#f4a261", "#e9c46a", "#2a9d8f", "#264653", "#e76f51", "#8ab17d", "#3d5a80", "#f2cc8f"];
+  return (
+    <svg className="brand-mark" viewBox="0 0 36 36" aria-hidden="true">
+      {colors.map((color, index) => (
+        <g key={color} transform={`translate(${(index % 3) * 12 + 6} ${Math.floor(index / 3) * 12 + 6})`}>
+          <circle r="5.2" fill={color} />
+          <circle r="1.8" fill="#fffaf2" />
+        </g>
+      ))}
+    </svg>
   );
 }
 

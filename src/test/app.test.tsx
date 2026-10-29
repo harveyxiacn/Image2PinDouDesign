@@ -14,7 +14,9 @@ describe("App", () => {
 
     expect(screen.getByRole("heading", { name: /拼豆图纸工坊/ })).toBeInTheDocument();
     expect(screen.getByLabelText(/选择图片文件/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/板型/)).toHaveDisplayValue("智能尺寸（最多 156 针）");
+    expect(screen.getByRole("group", { name: "尺寸方式" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "智能比例" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("group", { name: "单块拼豆板针数" })).toBeInTheDocument();
     expect(screen.getByLabelText(/细节算法/)).toHaveDisplayValue("智能细节（推荐）");
     expect(screen.getByText(/项目总用豆/)).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "手机端快捷导航" })).toBeInTheDocument();
