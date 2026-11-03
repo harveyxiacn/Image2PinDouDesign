@@ -106,7 +106,7 @@ describe("DesignPreview 键盘网格", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "开始编辑图纸" }));
     expect(screen.getByRole("button", { name: "完成编辑" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "逐格改色" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "画笔" })).toHaveAttribute("aria-pressed", "true");
     vi.restoreAllMocks();
   });
 });

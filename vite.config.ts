@@ -6,7 +6,8 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: "autoUpdate",
+      // prompt：新版本就绪后由页面提示用户刷新（见 src/main.tsx），不再静默留在旧版本。
+      registerType: "prompt",
       includeAssets: ["pindou.svg", "pindou-192.png", "pindou-512.png"],
       manifest: {
         name: "拼豆图纸工坊",
@@ -68,6 +69,8 @@ export default defineConfig({
   test: {
     environment: "node",
     globals: true,
+    // 只跑项目源码里的测试；.agents/ 等本地目录里的浏览器配置文件可能带有第三方扩展的测试文件。
+    include: ["src/**/*.test.{ts,tsx}"],
     pool: "forks"
   }
 });

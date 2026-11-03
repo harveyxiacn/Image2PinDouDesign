@@ -9,6 +9,8 @@ export type RenderOptions = {
   // 制作模式：淡化非当前色号，并在已完成格上画勾；仅用于交互预览。
   focusCode?: string | null;
   completedCells?: ReadonlySet<number>;
+  // 按板制作：淡化当前板以外的格子，并给当前板描边。
+  region?: { x: number; y: number; width: number; height: number } | null;
   sheet?: boolean;
   guideLineEvery?: number;
 };
@@ -82,6 +84,12 @@ export function renderDesignToCanvas(
         context.fillRect(left, top, options.cellSize, options.cellSize);
       }
 
+      const region = options.region;
+      if (region && (x < region.x || y < region.y || x >= region.x + region.width || y >= region.y + region.height)) {
+        context.fillStyle = "rgba(241, 245, 249, 0.86)";
+        context.fillRect(left, top, options.cellSize, options.cellSize);
+      }
+
       const cellIndex = y * design.boardWidth + x;
       if (code && options.completedCells?.has(cellIndex)) {
         context.fillStyle = "rgba(255, 255, 255, 0.72)";
@@ -95,6 +103,13 @@ export function renderDesignToCanvas(
   }
 
   drawGrid(context, design, options, gutter);
+  if (options.region) {
+    const { x, y, width, height } = options.region;
+    context.lineWidth = 3;
+    context.strokeStyle = "#e76f51";
+    context.strokeRect(gutter + x * options.cellSize + 1.5, gutter + y * options.cellSize + 1.5,
+      width * options.cellSize - 3, height * options.cellSize - 3);
+  }
   if (options.showCoordinates) {
     drawCoordinates(context, design, options, gutter);
   }

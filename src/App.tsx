@@ -7,13 +7,14 @@ import { DropOverlay } from "./components/DropOverlay";
 import { INSPECTOR_TABS, Inspector, type InspectorTab } from "./components/Inspector";
 import { PalettePanel } from "./components/PalettePanel";
 import { ColorSettings, EffectSettings, RecommendDiffList, RecommendationCard, SizeSettings, type UiSettings } from "./components/SettingsPanel";
-import { InventoryFitCard } from "./components/InventoryFitCard";
+import { InventoryFitCard, type FitTolerance } from "./components/InventoryFitCard";
 import { SmartAdvisorCard } from "./components/SmartAdvisorCard";
 import { fitDesignToInventory } from "./domain/inventoryFit";
 import { adviseForSource } from "./domain/smartAdvisor";
 import { StatsTable } from "./components/StatsTable";
 import { ToastRegion, useToasts } from "./components/Toasts";
 import { UploadPanel } from "./components/UploadPanel";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { IconCrop, IconDroplet, IconEdit, IconGrid, IconPlus, IconRotateCcw, IconSettings, IconSliders } from "./components/icons";
 import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
@@ -33,7 +34,8 @@ import { MARD_PALETTE } from "./domain/palette";
 import { PALETTE_KITS, getPaletteKit, loadPaletteKitId, paletteForKit, persistPaletteKitId, resolveAllowedCodes } from "./domain/paletteKits";
 import { getHighResolutionCellSize, renderDesignToBlob } from "./domain/rendering";
 import type { BeadDesign, PixelSource } from "./domain/types";
-import { mirrorDesignHorizontally, replaceDesignCell, replaceDesignCells } from "./domain/workbench";
+import { applyCellPatch, mirrorDesignHorizontally, replaceDesignCell, replaceDesignCells, type CellPatch } from "./domain/workbench";
+import { PROJECT_FILE_EXTENSION, buildProjectFile, inventoryToCsv, parseInventoryCsv, parseProjectFile } from "./domain/projectFile";
 import type { ConversionRequest, ConversionResponse } from "./worker/conversion.worker";
 
 type UploadedImage = {
@@ -77,6 +79,9 @@ export default function App() {
   const [sourceFilter, setSourceFilter] = useState<StatsSourceFilter>("all");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("size");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [fitTolerance, setFitTolerance] = useState<FitTolerance>(8);
+  const projectInputRef = useRef<HTMLInputElement | null>(null);
+  const inventoryInputRef = useRef<HTMLInputElement | null>(null);
   const { toasts, notify, dismiss } = useToasts();
 
   const workerRef = useRef<Worker | null>(null);
@@ -318,6 +323,11 @@ export default function App() {
     commitActiveDesign(replaceDesignCells(activeDesign, cells, code));
   };
 
+  const patchActiveDesign = (changes: CellPatch[]) => {
+    if (!activeDesign) return;
+    commitActiveDesign(applyCellPatch(activeDesign, changes));
+  };
+
   const mirrorActiveDesign = () => {
     if (!activeDesign) return;
     commitActiveDesign(mirrorDesignHorizontally(activeDesign));
@@ -425,6 +435,60 @@ export default function App() {
     setDesigns((current) => current.filter((design) =>
       !design.id.startsWith("draft-") || localDraftIdsRef.current.has(design.id)));
     notify(`已保存为本机草稿（最多保留 ${MAX_LOCAL_DRAFTS} 份）`);
+  };
+
+  // ---- 图纸文件 / 库存 CSV：本机数据的备份与换设备 ----
+  const exportDesignsFile = () => {
+    if (designs.length === 0) return;
+    const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+    downloadTextFile(`拼豆图纸-${date}${PROJECT_FILE_EXTENSION}`, buildProjectFile(designs), "application/json;charset=utf-8");
+    notify(`已导出 ${designs.length} 张图纸，可在其他设备上导入`);
+  };
+
+  const importDesignsFile = async (file: File) => {
+    setError(null);
+    try {
+      const { designs: imported, skipped } = parseProjectFile(await file.text(), VALID_COLOR_CODES);
+      if (imported.length === 0) {
+        setError("文件里没有可以导入的图纸。");
+        return;
+      }
+      // 本机草稿有上限：只占用空位，绝不挤掉已有草稿。
+      const free = Math.max(0, MAX_LOCAL_DRAFTS - localDraftsRef.current.length);
+      const accepted = imported.slice(0, free);
+      if (accepted.length === 0) {
+        setError(`本机最多保留 ${MAX_LOCAL_DRAFTS} 份草稿，请先删除不需要的草稿再导入。`);
+        return;
+      }
+      localDraftsRef.current = [...accepted, ...localDraftsRef.current];
+      localDraftIdsRef.current = new Set(localDraftsRef.current.map((draft) => draft.id));
+      persistDesignDrafts(localDraftsRef.current);
+      setDesigns((current) => [...accepted, ...current]);
+      setActiveId(accepted[0].id);
+      const notImported = imported.length - accepted.length + skipped;
+      notify(notImported > 0
+        ? `已导入 ${accepted.length} 张图纸；另有 ${notImported} 张未导入（草稿已满或数据无效）`
+        : `已导入 ${accepted.length} 张图纸`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "图纸文件读取失败。");
+    }
+  };
+
+  const exportInventoryCsv = () => {
+    downloadTextFile("我的拼豆库存.csv", inventoryToCsv(inventory.owned, MARD_PALETTE));
+    notify("已导出库存 CSV");
+  };
+
+  const importInventoryCsv = async (file: File) => {
+    const { owned, unknown } = parseInventoryCsv(await file.text(), VALID_COLOR_CODES);
+    const count = Object.keys(owned).length;
+    if (count === 0) {
+      notify("文件里没有找到可识别的色号和颗数", "error");
+      return;
+    }
+    // 合并：文件里列出的色号以文件为准，没列出的保持不变。
+    setInventory((current) => ({ ...current, owned: { ...current.owned, ...owned } }));
+    notify(`已导入 ${count} 种颜色的库存${unknown.length > 0 ? `，${unknown.length} 个色号无法识别已忽略` : ""}`);
   };
 
   const handleFiles = async (files: File[]) => {
@@ -624,8 +688,8 @@ export default function App() {
   const activeShortageTotal = Object.values(activeShortfall).reduce((sum, count) => sum + count, 0);
   const hasInventory = Object.values(inventory.owned).some((count) => count > 0);
   const inventoryFit = useMemo(
-    () => activeDesign && hasInventory && activeShortageTotal > 0 ? fitDesignToInventory(activeDesign, inventory.owned, MARD_PALETTE) : null,
-    [activeDesign, activeShortageTotal, hasInventory, inventory.owned]
+    () => activeDesign && hasInventory && activeShortageTotal > 0 ? fitDesignToInventory(activeDesign, inventory.owned, MARD_PALETTE, fitTolerance) : null,
+    [activeDesign, activeShortageTotal, fitTolerance, hasInventory, inventory.owned]
   );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const kitRegisteredCount = kitPalette.filter((color) => (inventory.owned[color.code] ?? 0) > 0).length;
@@ -683,6 +747,24 @@ export default function App() {
         aria-hidden="true"
         onChange={(event) => { void handleFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }}
       />
+      <input
+        ref={projectInputRef}
+        className="sr-only"
+        type="file"
+        accept=".json,application/json"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => { const file = event.target.files?.[0]; if (file) void importDesignsFile(file); event.target.value = ""; }}
+      />
+      <input
+        ref={inventoryInputRef}
+        className="sr-only"
+        type="file"
+        accept=".csv,text/csv,.txt"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => { const file = event.target.files?.[0]; if (file) void importInventoryCsv(file); event.target.value = ""; }}
+      />
       <header className="topbar">
         <div className="topbar-inner">
           <div className="brand">
@@ -731,7 +813,11 @@ export default function App() {
               onSelect={setActiveId}
               onRemove={removeDesign}
             />
-            <p className="rail-hint">也可以把图片直接拖进窗口添加。</p>
+            <div className="data-tools" aria-label="图纸文件">
+              <button type="button" className="button small" onClick={exportDesignsFile} disabled={designs.length === 0}>导出图纸文件</button>
+              <button type="button" className="button small" onClick={() => projectInputRef.current?.click()}>导入图纸文件</button>
+            </div>
+            <p className="rail-hint">也可以把图片直接拖进窗口添加。图纸文件只含色号格子，可用于备份或换设备。</p>
           </aside>
 
           <section className="stage" aria-label="图纸">
@@ -775,6 +861,7 @@ export default function App() {
               isDownloading={isExportingPng}
               onCellChange={activeDesign ? editActiveCell : undefined}
               onCellsChange={activeDesign ? editActiveCells : undefined}
+              onPatch={activeDesign ? patchActiveDesign : undefined}
               onMirror={activeDesign ? mirrorActiveDesign : undefined}
               onUndo={activeDesign ? undoActiveEdit : undefined}
               onRedo={activeDesign ? redoActiveEdit : undefined}
@@ -852,7 +939,7 @@ export default function App() {
                     <select aria-label="色卡套装" value={activeKit.id} onChange={(event) => setPaletteKitId(event.target.value)}>
                       {PALETTE_KITS.map((kit) => <option key={kit.id} value={kit.id}>{kit.name}</option>)}
                     </select>
-                    <small className="muted">{activeKit.description}所有图纸只从这套里选色。</small>
+                    <small className="muted">{activeKit.description}所有图纸只从这套里选色{activeKit.id === "mard-291" ? "" : "；套装内容以实际购买的色卡为准"}。</small>
                   </label>
                   <label className="toggle">
                     <input type="checkbox" checked={inventory.restrictEnabled} onChange={(event) => toggleRestrict(event.target.checked)} />
@@ -874,6 +961,8 @@ export default function App() {
                     fit={inventoryFit}
                     palette={MARD_PALETTE}
                     shortageTotal={activeShortageTotal}
+                    tolerance={fitTolerance}
+                    onToleranceChange={setFitTolerance}
                     onApply={() => {
                       const swapped = inventoryFit.substitutions.reduce((sum, item) => sum + item.count, 0);
                       commitActiveDesign(inventoryFit.design);
@@ -928,6 +1017,7 @@ export default function App() {
           kits={PALETTE_KITS}
           kitId={activeKit.id}
           onKitChange={setPaletteKitId}
+          onImportProject={() => projectInputRef.current?.click()}
         />
       )}
 
@@ -954,6 +1044,12 @@ export default function App() {
 
       {paletteOpen && (
         <Dialog title={`${activeKit.name} · 色卡与库存`} wide onClose={() => setPaletteOpen(false)}>
+          <div className="palette-data-tools">
+            <span>库存备份：</span>
+            <button type="button" className="button small" onClick={exportInventoryCsv} disabled={!hasInventory}>导出库存 CSV</button>
+            <button type="button" className="button small" onClick={() => inventoryInputRef.current?.click()}>导入库存 CSV</button>
+            <small>CSV 第一列为色号、最后一列为颗数，可用表格软件编辑。</small>
+          </div>
           <PalettePanel
             embedded
             palette={kitPalette}
@@ -966,6 +1062,7 @@ export default function App() {
       )}
 
       <ToastRegion toasts={toasts} onDismiss={dismiss} />
+      <UpdateBanner />
 
       {cropImageId && (() => {
         const cropImage = images.find((image) => image.id === cropImageId);

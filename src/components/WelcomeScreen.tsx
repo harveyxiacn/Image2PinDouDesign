@@ -11,6 +11,8 @@ type WelcomeScreenProps = {
   kits: PaletteKit[];
   kitId: string;
   onKitChange: (id: string) => void;
+  // 换设备 / 清缓存后，从之前导出的图纸文件恢复。
+  onImportProject?: () => void;
 };
 
 const STEPS = [
@@ -20,7 +22,7 @@ const STEPS = [
 ];
 
 /** 还没有任何图纸时的首屏：只突出“上传”，并让用户先确认拼豆板和色卡套装。 */
-export function WelcomeScreen({ onFiles, isProcessing, boardPins, onBoardPinsChange, kits, kitId, onKitChange }: WelcomeScreenProps) {
+export function WelcomeScreen({ onFiles, isProcessing, boardPins, onBoardPinsChange, kits, kitId, onKitChange, onImportProject }: WelcomeScreenProps) {
   const pinOptions = BOARD_PIN_OPTIONS.some((option) => option.pins === boardPins)
     ? BOARD_PIN_OPTIONS
     : [...BOARD_PIN_OPTIONS, { pins: boardPins, label: `${boardPins} 针`, hint: "自定义" }];
@@ -51,6 +53,12 @@ export function WelcomeScreen({ onFiles, isProcessing, boardPins, onBoardPinsCha
               {kits.map((kit) => <option key={kit.id} value={kit.id}>{kit.name}</option>)}
             </select>
           </label>
+          {onImportProject && (
+            <p className="welcome-import">
+              换了设备或清过浏览器？
+              <button type="button" className="link-button" onClick={onImportProject}>导入之前导出的图纸文件</button>
+            </p>
+          )}
         </div>
       </div>
 

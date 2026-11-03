@@ -27,19 +27,30 @@ describe("board pins and palette kits", () => {
     expect(maxBoardsPerSide(104)).toBe(2);
   });
 
-  it("provides nested curated kits from 24 to 168 colors plus 221 and 291", () => {
-    const sizes = [24, 48, 72, 96, 120, 144, 168];
+  it("provides the official MARD retail kits from 24 to 264 colors plus all 291", () => {
+    const sizes = [24, 48, 72, 96, 120, 144, 168, 192, 216, 221];
     let previous: readonly string[] = [];
     for (const size of sizes) {
-      const kit = getPaletteKit(`curated-${size}`);
+      const kit = getPaletteKit(`mard-${size}`);
       expect(kit.codes).toHaveLength(size);
       expect(new Set(kit.codes).size).toBe(size);
       expect(kit.codes.every((code) => STANDARD.has(code))).toBe(true);
-      expect(kit.codes).toEqual(expect.arrayContaining(["H2", "H7"]));
-      expect(kit.codes.slice(0, previous.length)).toEqual(previous);
+      expect(new Set(kit.codes)).toEqual(new Set([...previous, ...kit.codes]));
+      expect(previous.every((code) => kit.codes.includes(code))).toBe(true);
       previous = kit.codes;
     }
-    expect(PALETTE_KITS.map((kit) => kit.codes.length)).toEqual([...sizes, 221, 291]);
+    // 官方 24 色套装的固定内容（含黑白）。
+    expect(getPaletteKit("mard-24").codes).toEqual(expect.arrayContaining(["H1", "H2", "H7", "A4", "B5", "C5"]));
+    const kit264 = getPaletteKit("mard-264");
+    expect(kit264.codes).toHaveLength(264);
+    expect(kit264.codes).not.toContain("C29");
+    expect(kit264.codes).toEqual(expect.arrayContaining(["P1", "R13", "Y5", "Q5", "T1"]));
+    expect(PALETTE_KITS.map((kit) => kit.codes.length)).toEqual([...sizes, 264, 291]);
+  });
+
+  it("migrates the old curated kit ids to the official kit of the same size", () => {
+    expect(getPaletteKit("curated-48").id).toBe("mard-48");
+    expect(getPaletteKit("nope").id).toBe("mard-221");
   });
 });
 

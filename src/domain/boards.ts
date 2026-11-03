@@ -189,3 +189,12 @@ export function boardsNeeded(width: number, height: number, pins: number): { col
     rows: Math.max(1, Math.ceil(height / safePins))
   };
 }
+
+// 成品实际尺寸：每颗豆在板上的中心距约等于豆子直径。
+// MARD 常见为 2.6mm 迷你豆，也有 5mm 标准豆；两种都给出，方便估算相框/展示尺寸。
+export const BEAD_PITCH_MM = { mini: 2.6, standard: 5 } as const;
+
+export function physicalSizeCm(width: number, height: number, pitchMm: number): { width: number; height: number } {
+  const toCm = (cells: number) => Math.round(cells * pitchMm) / 10;
+  return { width: toCm(width), height: toCm(height) };
+}
