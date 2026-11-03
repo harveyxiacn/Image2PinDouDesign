@@ -25,6 +25,7 @@ type SettingsPanelProps = {
   sourceName?: string;
   aspectRatio?: number | null;
   generatedSize?: { width: number; height: number } | null;
+  paletteKitName?: string;
 };
 
 const mergeOptions: Array<{ label: string; value: number; title: string }> = [
@@ -114,7 +115,8 @@ export function SettingsPanel({
   onSelectSize,
   sourceName,
   aspectRatio,
-  generatedSize
+  generatedSize,
+  paletteKitName
 }: SettingsPanelProps) {
   const activeFit = fitOptions.find((option) => option.value === settings.fit) ?? fitOptions[0];
   const activeSampling = samplingOptions.find((option) => option.value === settings.sampling) ?? samplingOptions[0];
@@ -207,7 +209,10 @@ export function SettingsPanel({
           options={maxColorOptions.map((option) => ({ value: option.value, label: option.label }))}
           onChange={(value) => onChange({ ...settings, maxColors: value })}
         />
-        <small className="muted">色数越少越好买豆；角色眼睛等小面积特征色会优先保留。</small>
+        <small className="muted">
+          色数越少越好买豆；角色眼睛等小面积特征色会优先保留。
+          {paletteKitName && <> 当前从 <a href="#palette-title">{paletteKitName}</a> 中选色。</>}
+        </small>
       </div>
 
       <div className="field">

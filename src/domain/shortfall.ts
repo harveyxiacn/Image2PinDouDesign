@@ -19,8 +19,21 @@ const MAX_OWNED_COUNT = 99999;
 /**
  * 读取库存：优先 v2；无 v2 时从 v1 迁移（allowedCodes 每个色号记为 owned=1，
  * restrictEnabled 沿用）；都无则返回默认空库存。任何解析失败都回退到默认值。
+ * 传入 validCodes 时丢弃不认识的色号，避免“已登记 N 色”把无效数据算进去。
  */
-export function loadOwnedInventory(): OwnedInventory {
+export function loadOwnedInventory(validCodes?: ReadonlySet<string>): OwnedInventory {
+  const inventory = readOwnedInventory();
+  if (!validCodes) {
+    return inventory;
+  }
+  const owned: Record<string, number> = {};
+  for (const [code, count] of Object.entries(inventory.owned)) {
+    if (validCodes.has(code)) owned[code] = count;
+  }
+  return { restrictEnabled: inventory.restrictEnabled, owned };
+}
+
+function readOwnedInventory(): OwnedInventory {
   if (typeof window === "undefined") {
     return { restrictEnabled: false, owned: {} };
   }

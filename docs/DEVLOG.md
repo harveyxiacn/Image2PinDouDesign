@@ -158,6 +158,14 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 - **界面**：紧凑顶栏 + 四步流程指示；`BoardPicker`（针数分段选择、智能比例/按拼豆板/自定义、步进器、拼板示意与主体占位、成品厘米估算）；`Segmented` 通用分段控件替换色数/适配/降噪下拉；`DesignGallery` 缩略图画廊（生成中占位/草稿标记）；生成步骤条；拖拽投放区状态；新图纸逐行揭示、拼豆加载指示、空状态落豆插画；全部动效在 `prefers-reduced-motion` 下关闭。
 - **验证**：`npm test` 15 文件 / 190 例全绿（新增 `bead-pipeline.test.ts` 9 例；`detail-design` 轮廓用例改为分别断言普通平均与边缘感知）；`npm run build` 成功；本地 production preview + 无依赖 CDP 冒烟脚本（`.agents/smoke/cdp-smoke.mjs`，本机 Edge headless）上传亚古兽实图 → 生成 104×90 → 像素化对比 → 29 针 2×2 拼板（58×58）全链路，零 console/page error，390px 视口无横向溢出。
 
+## 5.5 2026-11-03 · 按 mard_color_sheet 核对色卡 + 色卡套装选择
+
+- **来源**：`mard_color_sheet/mard_color_sheet.jpg`（A1–A26、B1–B32、C1–C29、D1–D26、E1–E24、F1–F25、G1–G21、H1–H23、M1–M15，共 221 色）。逐项转录后与图中色块像素交叉核对，并与原色卡比对：221 个色号的 HEX 与原数据完全一致。
+- **色卡结构**：`MARD_221_SEEDS`（标准 221 色）+ `MARD_EXTENDED_SEEDS`（T1、P、Q、R、Y、ZG 共 70 色）= `MARD_PALETTE` 291 色，显示、统计、导出与草稿校验都按 291 色查色。
+- **色卡套装**：新增 `src/domain/paletteKits.ts`，套装就是一份色号清单；色卡面板可选“MARD 221 色”（默认）或“MARD 291 色”，选择保存在本机。生成图纸只用套装内颜色；库存模式时取“套装 ∩ 库存”，交集为空回退整套。设置面板的色数提示显示当前套装。
+- **待补**：市售 24/48/72/96/120/144/168/265/295 色等套装尚无可靠的色号清单，拿到商品色号表后在 `PALETTE_KITS` 追加即可，不按数量臆造。
+- **验证**：新增 `mard-palette.test.ts`（221 色号序列、各系列 HEX 抽检、291 色完整性、套装默认/记忆、套装 ∩ 库存、套装外颜色不参与匹配、库存过滤）。
+
 ## 6. 发布记录汇总
 
 | # | 时间（本地） | 对应 commit | 服务器备份目录 | 结果 |

@@ -20,6 +20,7 @@ import { aggregateCounts, countDesignsBySource, type StatsSourceFilter } from ".
 import { analyzeSource, applyStylePreset, recommendSettings, type RecommendedSettings, type StylePresetId } from "./domain/recommend";
 import { computeShortfall, loadOwnedInventory, ownedToAllowedCodes, persistOwnedInventory, setOwnedCount, type OwnedInventory } from "./domain/shortfall";
 import { MARD_PALETTE } from "./domain/palette";
+import { PALETTE_KITS, getPaletteKit, loadPaletteKitId, paletteForKit, persistPaletteKitId, resolveAllowedCodes } from "./domain/paletteKits";
 import { getHighResolutionCellSize, renderDesignToBlob } from "./domain/rendering";
 import type { BeadDesign, PixelSource } from "./domain/types";
 import { mirrorDesignHorizontally, replaceDesignCell } from "./domain/workbench";
@@ -55,7 +56,8 @@ export default function App() {
   const [isConverting, setIsConverting] = useState(false);
   const [designs, setDesigns] = useState<BeadDesign[]>(() => loadDesignDrafts(VALID_COLOR_CODES));
   const [error, setError] = useState<string | null>(null);
-  const [inventory, setInventory] = useState<OwnedInventory>(() => loadOwnedInventory());
+  const [inventory, setInventory] = useState<OwnedInventory>(() => loadOwnedInventory(VALID_COLOR_CODES));
+  const [paletteKitId, setPaletteKitId] = useState<string>(() => loadPaletteKitId());
   const [cropImageId, setCropImageId] = useState<string | null>(null);
   const [cropBusy, setCropBusy] = useState(false);
   const [cropProgress, setCropProgress] = useState<RemovalProgress | null>(null);
@@ -93,9 +95,17 @@ export default function App() {
     persistOwnedInventory(inventory);
   }, [inventory]);
 
+  useEffect(() => {
+    persistPaletteKitId(paletteKitId);
+  }, [paletteKitId]);
+
   const boardSize = resolveBoardSize(settings);
   // v2 库存：限制模式开启时取 owned>0 的色号集合；引用随 inventory 变化，保持转换 effect 依赖稳定。
-  const allowedCodesKey = inventory.restrictEnabled ? [...(ownedToAllowedCodes(inventory) ?? [])].sort().join(",") : null;
+  // 可用色号 = 所选色卡套装 ∩ 库存（库存模式开启时）；套装为全部 291 色且不限库存时为 null。
+  const activeKit = getPaletteKit(paletteKitId);
+  const kitPalette = useMemo(() => paletteForKit(activeKit), [activeKit]);
+  const allowedCodes = resolveAllowedCodes(activeKit, inventory.restrictEnabled ? ownedToAllowedCodes(inventory) : null);
+  const allowedCodesKey = allowedCodes === null ? null : allowedCodes.join(",");
   const allowedCodesArray = useMemo(() => allowedCodesKey === null ? null : allowedCodesKey.split(",").filter(Boolean), [allowedCodesKey]);
 
   const recommendationImage = activeImage;
@@ -619,6 +629,7 @@ export default function App() {
             recommendation={recommendation}
             smartSizeHint={smartSizeHint}
             sourceName={activeImage?.fileName}
+            paletteKitName={activeKit.name}
             sizeOptions={sizeOptions}
             onSelectSize={selectSize}
             aspectRatio={subjectAspectRatio}
@@ -757,7 +768,10 @@ export default function App() {
         </section>
 
         <PalettePanel
-          palette={MARD_PALETTE}
+          palette={kitPalette}
+          kits={PALETTE_KITS}
+          kitId={activeKit.id}
+          onKitChange={setPaletteKitId}
           restrictEnabled={inventory.restrictEnabled}
           ownedCounts={inventory.owned}
           currentDesignCodes={currentDesignCodes}

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { addOwnedForCodes, setOwnedCount } from "../domain/shortfall";
+import type { PaletteKit } from "../domain/paletteKits";
 import type { PaletteColor } from "../domain/types";
 import { IconChevronDown, IconSearch } from "./icons";
 
@@ -8,6 +9,9 @@ type PalettePanelProps = {
   restrictEnabled: boolean;
   ownedCounts: Record<string, number>;
   currentDesignCodes?: Set<string>;
+  kits?: PaletteKit[];
+  kitId?: string;
+  onKitChange?: (id: string) => void;
   onChange: (next: { restrictEnabled: boolean; ownedCounts: Record<string, number> }) => void;
 };
 
@@ -16,8 +20,12 @@ export function PalettePanel({
   restrictEnabled,
   ownedCounts,
   currentDesignCodes,
+  kits,
+  kitId,
+  onKitChange,
   onChange
 }: PalettePanelProps) {
+  const activeKit = kits?.find((kit) => kit.id === kitId);
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState(true);
 
@@ -34,7 +42,8 @@ export function PalettePanel({
   }, [palette, query]);
 
   const isOwned = (code: string): boolean => (ownedCounts[code] ?? 0) > 0;
-  const registeredCount = Object.values(ownedCounts).filter((count) => count > 0).length;
+  // 只统计当前套装内登记的色号，切换套装后数字与可用颜色保持一致。
+  const registeredCount = palette.filter((color) => (ownedCounts[color.code] ?? 0) > 0).length;
 
   /** 每个色号至少登记为 1 颗（全选）。 */
   const allOwnedOne = (): Record<string, number> => {
@@ -107,7 +116,7 @@ export function PalettePanel({
       <div className="palette-head">
         <div className="palette-heading">
           <p className="eyebrow">Palette</p>
-          <h2 id="palette-title">MARD 色卡</h2>
+          <h2 id="palette-title">{activeKit ? activeKit.name : "MARD 色卡"}</h2>
         </div>
         <button
           type="button"
@@ -120,6 +129,18 @@ export function PalettePanel({
           <span className="sr-only">{expanded ? "收起色卡" : "展开色卡"}</span>
         </button>
       </div>
+
+      {kits && kits.length > 1 && onKitChange && (
+        <label className="field palette-kit">
+          <span>我的色卡套装</span>
+          <select aria-label="色卡套装" value={kitId} onChange={(event) => onKitChange(event.target.value)}>
+            {kits.map((kit) => (
+              <option key={kit.id} value={kit.id}>{kit.name}</option>
+            ))}
+          </select>
+          {activeKit && <small className="muted">{activeKit.description}生成图纸只使用这套里的颜色。</small>}
+        </label>
+      )}
 
       <div
         className="palette-progress"

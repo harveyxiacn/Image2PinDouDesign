@@ -21,11 +21,10 @@ export function preparePalette(colors: PaletteSeed[]): PaletteColor[] {
   });
 }
 
-// 完整 MARD 色卡（291 色）。色号与 HEX 取自官方色号表
-// （https://www.pixel-beads.com/zh/mard-bead-color-chart），权威可用于配色与采购。
-// 中文色名为便于阅读统计表/导出文件的参考名，按色相语义标注，下单前请以官方为准。
-export const MARD_PALETTE_SEEDS: PaletteSeed[] = [
-  { code: "T1", nameZh: "白色", hex: "#ffffff" },
+// MARD 标准 221 色（A1–A26、B1–B32、C1–C29、D1–D26、E1–E24、F1–F25、G1–G21、H1–H23、M1–M15）。
+// 色号与 HEX 以项目内 mard_color_sheet/mard_color_sheet.jpg 色卡表为准（2026-11-03 逐项核对一致）。
+// 中文色名为便于阅读统计表/导出文件的参考名，按色相语义标注，下单前请以色卡为准。
+export const MARD_221_SEEDS: PaletteSeed[] = [
   // A：黄 / 橙
   { code: "A1", nameZh: "米黄", hex: "#faf4c8" },
   { code: "A2", nameZh: "浅奶黄", hex: "#ffffd5" },
@@ -255,7 +254,13 @@ export const MARD_PALETTE_SEEDS: PaletteSeed[] = [
   { code: "M12", nameZh: "深褐灰", hex: "#644749" },
   { code: "M13", nameZh: "浅赭", hex: "#d19066" },
   { code: "M14", nameZh: "砖粉", hex: "#c77362" },
-  { code: "M15", nameZh: "中性灰", hex: "#757d78" },
+  { code: "M15", nameZh: "中性灰", hex: "#757d78" }
+];
+
+// 291 色套装在 221 色之外的扩展系列（T1、P、Q、R、Y、ZG），色号与 HEX 来自
+// https://www.pixel-beads.com/zh/mard-bead-color-chart 。
+export const MARD_EXTENDED_SEEDS: PaletteSeed[] = [
+  { code: "T1", nameZh: "白色", hex: "#ffffff" },
   // P：杂色
   { code: "P1", nameZh: "雪白", hex: "#fcf7f8" },
   { code: "P2", nameZh: "灰色", hex: "#b0a9ac" },
@@ -332,4 +337,7 @@ export const MARD_PALETTE_SEEDS: PaletteSeed[] = [
   { code: "ZG8", nameZh: "灰紫", hex: "#ab91c0" }
 ];
 
+// 全部已知 MARD 色号（291 色）：图纸显示、统计、导出与草稿校验都用它查色，
+// 生成图纸时能用哪些颜色由所选色卡套装（paletteKits.ts）决定。
+export const MARD_PALETTE_SEEDS: PaletteSeed[] = [...MARD_221_SEEDS, ...MARD_EXTENDED_SEEDS];
 export const MARD_PALETTE = preparePalette(MARD_PALETTE_SEEDS);
