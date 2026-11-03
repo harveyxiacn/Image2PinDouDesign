@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { renderDesignToCanvas } from "../domain/rendering";
 import type { BeadDesign, PaletteColor } from "../domain/types";
 import { designFingerprint, getColorBuildProgress } from "../domain/workbench";
 import { PixelCanvas } from "./DesignGallery";
-import { IconCheck, IconEdit, IconMinus, IconPlus } from "./icons";
+import { IconCheck, IconDownload, IconEdit, IconMinus, IconPlus } from "./icons";
 import { Segmented } from "./Segmented";
 
 type DesignPreviewProps = {
@@ -23,10 +23,13 @@ type DesignPreviewProps = {
   canUndo?: boolean;
   canRedo?: boolean;
   canReset?: boolean;
+  onExportPdf?: () => void;
+  // 标题栏右侧的图纸级操作（裁剪 / 复制为另一尺寸），由 App 注入。
+  headerActions?: ReactNode;
 };
 
 type PreviewZoom = "fit" | 1 | 1.5 | 2;
-type CompareView = "original" | "pixelated";
+type StageView = "pattern" | "pixelated" | "original";
 type InteractionMode = "view" | "paint" | "pick" | "erase" | "build";
 
 const ZOOM_LEVELS: Array<Exclude<PreviewZoom, "fit">> = [1, 1.5, 2];
@@ -47,7 +50,9 @@ export function DesignPreview({
   onSaveDraft,
   canUndo = false,
   canRedo = false,
-  canReset = false
+  canReset = false,
+  onExportPdf,
+  headerActions
 }: DesignPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -65,7 +70,8 @@ export function DesignPreview({
   const [cursorBox, setCursorBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const cursorRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
-  const [compareView, setCompareView] = useState<CompareView>("original");
+  // 舞台视图：图纸（可编辑）/ 像素化 / 原图，同尺寸切换便于逐处对比。
+  const [stageView, setStageView] = useState<StageView>("pattern");
 
   const byCode = useMemo(() => new Map(palette.map((color) => [color.code, color])), [palette]);
   const designCodes = useMemo(() => Object.entries(design?.colorCounts ?? {})
@@ -161,8 +167,8 @@ export function DesignPreview({
   }, [design?.id, design?.pixelated]);
 
   useEffect(() => {
-    if (!originalUrl && design?.pixelated) setCompareView("pixelated");
-  }, [design?.pixelated, originalUrl]);
+    setStageView("pattern");
+  }, [design?.id]);
 
   useEffect(() => {
     const previousZoom = previousZoomRef.current;
@@ -301,6 +307,15 @@ export function DesignPreview({
     if (!design) {
       return;
     }
+    // 单键切换工具（聚焦图纸时）：V 查看、B 改色、I 取色、E 擦除。
+    const shortcut = !event.ctrlKey && !event.metaKey && !event.altKey && onCellChange
+      ? ({ v: "view", b: "paint", i: "pick", e: "erase" } as Record<string, InteractionMode>)[event.key.toLowerCase()]
+      : undefined;
+    if (shortcut) {
+      event.preventDefault();
+      selectMode(shortcut);
+      return;
+    }
     const width = design.boardWidth;
     const height = design.boardHeight;
     const current = cursorCell ?? { x: 0, y: 0 };
@@ -352,6 +367,7 @@ export function DesignPreview({
 
   const selectMode = (nextMode: InteractionMode) => {
     setMode(nextMode);
+    setStageView("pattern");
     if (nextMode !== "view" && zoom === "fit") {
       setZoom(1);
     }
@@ -368,12 +384,13 @@ export function DesignPreview({
 
   return (
     <section className="panel preview-panel" aria-labelledby="preview-title">
-      <div className="section-header">
-        <div>
-          <p className="eyebrow">Step 03</p>
+      <div className="stage-header">
+        <div className="stage-title">
           <h2 id="preview-title">图纸预览与编辑</h2>
+          {design && <span className="stage-file" title={design.fileName}>{design.fileName}</span>}
         </div>
         {design && <span className="badge">{design.boardWidth} x {design.boardHeight}</span>}
+        {design && headerActions && <div className="stage-actions">{headerActions}</div>}
       </div>
 
       {design && (
@@ -386,51 +403,29 @@ export function DesignPreview({
       )}
 
       {design ? (
-        <div className="preview-compare">
-          {(originalUrl || design.pixelated) && (
-            <figure className="preview-original">
-              {originalUrl && design.pixelated && (
-                <Segmented
-                  label="对比视图"
-                  size="compact"
-                  value={compareView}
-                  options={[
-                    { value: "original", label: "原图" },
-                    { value: "pixelated", label: "像素化" }
-                  ]}
-                  onChange={setCompareView}
-                />
-              )}
-              <div className="compare-frame">
-                {compareView === "pixelated" && design.pixelated ? (
-                  <PixelCanvas
-                    key="pixelated"
-                    source={design.pixelated}
-                    className="compare-pixels"
-                    label={`${design.fileName} 像素化结果`}
-                  />
-                ) : originalUrl ? (
-                  <img key="original" src={originalUrl} alt={`${design.fileName} 原图`} />
-                ) : null}
-              </div>
-              <figcaption>{compareView === "pixelated" && design.pixelated
-                ? "像素化：每格一个颜色，再匹配到最接近的色号"
-                : "原图"}</figcaption>
-            </figure>
-          )}
+        <div className="preview-stage">
           <figure className="canvas-shell">
             {onCellChange && (
               <div id="pattern-editor" className="pattern-workbench" aria-label="图纸编辑与制作工具">
                 <div className="workbench-heading">
                   <div>
                     <strong>编辑图纸</strong>
-                    <small>选择工具后直接点击图纸格子，修改会立即反映到下载文件。</small>
+                    <small>{mode === "view" ? "选择工具后点格子修改，每一步都能撤销。" : "修改会直接进入下载和打印文件；Ctrl+Z 撤销。"}</small>
                   </div>
-                  {mode === "view" ? (
-                    <button type="button" className="button primary" aria-pressed={false} onClick={() => selectMode("paint")}><IconEdit />开始编辑图纸</button>
-                  ) : (
-                    <button type="button" className="button secondary" aria-pressed={true} onClick={() => selectMode("view")}><IconCheck />完成编辑</button>
-                  )}
+                  <div className="workbench-heading-actions">
+                    <button
+                      type="button"
+                      className="button small workbench-save"
+                      onClick={() => { onSaveDraft?.(); setDraftSaved(true); }}
+                    >
+                      {draftSaved ? "已保存到本机 ✓" : "保存本机草稿"}
+                    </button>
+                    {mode === "view" ? (
+                      <button type="button" className="button primary" aria-pressed={false} onClick={() => selectMode("paint")}><IconEdit />开始编辑图纸</button>
+                    ) : (
+                      <button type="button" className="button secondary" aria-pressed={true} onClick={() => selectMode("view")}><IconCheck />完成编辑</button>
+                    )}
+                  </div>
                 </div>
                 <div className="workbench-modes" role="group" aria-label="图纸操作模式">
                   {([
@@ -452,19 +447,15 @@ export function DesignPreview({
                   ))}
                 </div>
 
-                <div className="workbench-actions">
-                  <button type="button" className="button small" onClick={onUndo} disabled={!canUndo}>撤销</button>
-                  <button type="button" className="button small" onClick={onRedo} disabled={!canRedo}>重做</button>
-                  <button type="button" className="button small" onClick={onMirror}>水平镜像</button>
-                  <button type="button" className="button small" onClick={onReset} disabled={!canReset}>恢复生成结果</button>
-                  <button
-                    type="button"
-                    className="button small"
-                    onClick={() => { onSaveDraft?.(); setDraftSaved(true); }}
-                  >
-                    {draftSaved ? "已保存到本机 ✓" : "保存本机草稿"}
-                  </button>
-                </div>
+                {/* 撤销/重做/镜像/恢复只在编辑时出现，查看时让图纸尽量靠上。 */}
+                {mode !== "view" && (
+                  <div className="workbench-actions">
+                    <button type="button" className="button small" onClick={onUndo} disabled={!canUndo}>撤销</button>
+                    <button type="button" className="button small" onClick={onRedo} disabled={!canRedo}>重做</button>
+                    <button type="button" className="button small" onClick={onMirror}>水平镜像</button>
+                    <button type="button" className="button small" onClick={onReset} disabled={!canReset}>恢复生成结果</button>
+                  </div>
+                )}
 
                 {(mode === "paint" || mode === "pick") && (
                   <div className="workbench-detail">
@@ -509,17 +500,43 @@ export function DesignPreview({
             )}
 
             <div className="canvas-toolbar">
-              <span>{mode === "view"
-                ? "放大后可滑动查看每格色号与坐标；聚焦图纸后可用方向键逐格查看"
-                : "点格子或按方向键移动光标，Enter/空格上色，Delete 擦除"}</span>
+              {(design.pixelated || originalUrl) && (
+                <Segmented
+                  label="对比视图"
+                  size="compact"
+                  className="stage-view-switch"
+                  value={stageView}
+                  options={[
+                    { value: "pattern" as StageView, label: "图纸" },
+                    ...(design.pixelated ? [{ value: "pixelated" as StageView, label: "像素化" }] : []),
+                    ...(originalUrl ? [{ value: "original" as StageView, label: "原图" }] : [])
+                  ]}
+                  onChange={setStageView}
+                />
+              )}
+              <span className="canvas-hint">{stageView !== "pattern"
+                ? "与图纸同尺寸对比；切回“图纸”继续查看或编辑"
+                : mode === "view"
+                  ? "双击或放大查看每格色号；聚焦后方向键逐格移动"
+                  : "点格子或方向键 + Enter 上色，Delete 擦除；快捷键 B 改色 · I 取色 · E 擦除 · V 查看"}</span>
               <div className="zoom-controls" role="group" aria-label="图纸缩放">
                 <button type="button" onClick={zoomOut} disabled={zoom === "fit"} aria-label="缩小图纸"><IconMinus /></button>
                 <button type="button" className="zoom-value" onClick={() => setZoom("fit")}>{zoomLabel}</button>
                 <button type="button" onClick={zoomIn} disabled={zoom === 2} aria-label="放大图纸"><IconPlus /></button>
               </div>
             </div>
+            {stageView !== "pattern" && (
+              <div className="compare-frame is-stage">
+                {stageView === "pixelated" && design.pixelated ? (
+                  <PixelCanvas source={design.pixelated} className="compare-pixels" label={`${design.fileName} 像素化结果`} />
+                ) : originalUrl ? (
+                  <img src={originalUrl} alt={`${design.fileName} 原图`} />
+                ) : null}
+              </div>
+            )}
             <div
               ref={viewportRef}
+              hidden={stageView !== "pattern"}
               className={`canvas-viewport ${zoom === "fit" ? "is-fit" : "is-zoomed"} ${mode !== "view" ? "is-interactive" : ""}`}
               tabIndex={0}
               role="grid"
@@ -549,18 +566,28 @@ export function DesignPreview({
               </div>
             </div>
             <div className="canvas-footer">
-              <figcaption>拼豆图纸 · 粗线为 {design.settings?.boardTilePins ?? 52} 针分板边界</figcaption>
-              {onDownload && (
-                <button
-                  id="download-pattern"
-                  type="button"
-                  className="button primary pattern-download"
-                  onClick={onDownload}
-                  disabled={isDownloading}
-                >
-                  {isDownloading ? "正在生成高清图…" : "下载高清色号图"}
-                </button>
-              )}
+              <figcaption>{stageView === "pixelated"
+                ? "像素化：每格一个颜色，再匹配到最接近的色号"
+                : stageView === "original"
+                  ? "原图"
+                  : `拼豆图纸 · 粗线为 ${design.settings?.boardTilePins ?? 52} 针分板边界`}</figcaption>
+              <div className="canvas-footer-actions">
+                {onExportPdf && (
+                  <button type="button" className="button secondary" onClick={onExportPdf}>分板打印 PDF</button>
+                )}
+                {onDownload && (
+                  <button
+                    id="download-pattern"
+                    type="button"
+                    className="button primary pattern-download"
+                    onClick={onDownload}
+                    disabled={isDownloading}
+                  >
+                    <IconDownload className="button-icon" />
+                    {isDownloading ? "正在生成高清图…" : "下载高清色号图"}
+                  </button>
+                )}
+              </div>
             </div>
           </figure>
         </div>
@@ -569,7 +596,6 @@ export function DesignPreview({
           <EmptyIllustration />
           <strong>还没有图纸</strong>
           <span>上传图片后自动完成：原图 → 像素化 → 匹配色号 → 统计用豆。</span>
-          <a className="button primary" href="#upload-title">上传第一张图片</a>
         </div>
       )}
     </section>

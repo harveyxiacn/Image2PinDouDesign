@@ -1,67 +1,47 @@
-import { useRef, useState } from "react";
-import type { ChangeEvent, DragEvent } from "react";
-import { IconUpload } from "./icons";
+import type { ChangeEvent } from "react";
+import { IconPlus, IconUpload } from "./icons";
 
 type UploadPanelProps = {
   onFiles: (files: File[]) => void;
   isProcessing: boolean;
+  // hero：欢迎页的大投放区；compact：工作台图纸栏里的“添加图片”按钮。
+  variant?: "hero" | "compact";
 };
 
-export function UploadPanel({ onFiles, isProcessing }: UploadPanelProps) {
-  const [isDragging, setIsDragging] = useState(false);
-  // dragenter/dragleave 会在子元素之间反复触发，用计数判断指针是否真正离开投放区。
-  const dragDepth = useRef(0);
+const ACCEPT = "image/png,image/jpeg,image/webp";
 
+/** 选择图片入口。拖放由整窗 DropOverlay 统一处理，这里只负责点击选择。 */
+export function UploadPanel({ onFiles, isProcessing, variant = "hero" }: UploadPanelProps) {
   const handleChange = (event: ChangeEvent<HTMLInputElement>) => {
     onFiles(Array.from(event.target.files ?? []));
     event.target.value = "";
   };
+  const input = (
+    <input aria-label="选择图片文件" type="file" accept={ACCEPT} multiple onChange={handleChange} disabled={isProcessing} />
+  );
 
-  const handleDrop = (event: DragEvent<HTMLLabelElement>) => {
-    event.preventDefault();
-    dragDepth.current = 0;
-    setIsDragging(false);
-    onFiles(Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith("image/")));
-  };
+  if (variant === "compact") {
+    return (
+      <label className={`upload-compact ${isProcessing ? "is-busy" : ""}`}>
+        {input}
+        {isProcessing
+          ? <span className="bead-loader" aria-hidden="true"><i /><i /><i /><i /></span>
+          : <IconPlus aria-hidden="true" />}
+        <span aria-live="polite">{isProcessing ? "正在读取…" : "添加图片"}</span>
+      </label>
+    );
+  }
 
   return (
-    <section className="panel upload-panel" aria-labelledby="upload-title">
-      <div>
-        <p className="eyebrow">Step 01</p>
-        <h2 id="upload-title">上传图片</h2>
-        <p className="muted">支持 JPG、PNG、WebP；图片只在本机浏览器处理，不上传服务器。</p>
-      </div>
-      <label
-        className={`dropzone ${isDragging ? "is-dragging" : ""} ${isProcessing ? "is-busy" : ""}`}
-        onDragEnter={(event) => {
-          event.preventDefault();
-          dragDepth.current += 1;
-          setIsDragging(true);
-        }}
-        onDragOver={(event) => event.preventDefault()}
-        onDragLeave={() => {
-          dragDepth.current = Math.max(0, dragDepth.current - 1);
-          if (dragDepth.current === 0) setIsDragging(false);
-        }}
-        onDrop={handleDrop}
-      >
-        <input
-          aria-label="选择图片文件"
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          multiple
-          onChange={handleChange}
-        />
-        <span className="dropzone-icon">
-          {isProcessing
-            ? <span className="bead-loader" aria-hidden="true"><i /><i /><i /><i /></span>
-            : <IconUpload aria-hidden="true" />}
-        </span>
-        <strong aria-live="polite">
-          {isProcessing ? "正在读取图片…" : isDragging ? "松开即可添加" : "拖拽图片到这里，或点击选择"}
-        </strong>
-        <small>可一次选择多张；每张独立生成图纸，并自动汇总用豆数量。</small>
-      </label>
-    </section>
+    <label className={`dropzone ${isProcessing ? "is-busy" : ""}`} id="upload-title">
+      {input}
+      <span className="dropzone-icon">
+        {isProcessing
+          ? <span className="bead-loader" aria-hidden="true"><i /><i /><i /><i /></span>
+          : <IconUpload aria-hidden="true" />}
+      </span>
+      <strong aria-live="polite">{isProcessing ? "正在读取图片…" : "拖入图片，或点击选择"}</strong>
+      <small>JPG / PNG / WebP，可一次选择多张；图片只在本机浏览器处理，不会上传。</small>
+    </label>
   );
 }

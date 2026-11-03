@@ -9,17 +9,19 @@ import { MARD_PALETTE } from "../domain/palette";
 import type { RecommendedSettings } from "../domain/recommend";
 
 describe("App", () => {
-  it("renders the core upload, board, and export sections", () => {
+  it("opens on a focused welcome screen with upload and board/kit preferences", () => {
+    window.localStorage.clear();
     render(<App />);
 
     expect(screen.getByRole("heading", { name: /拼豆图纸工坊/ })).toBeInTheDocument();
     expect(screen.getByLabelText(/选择图片文件/)).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "尺寸方式" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "智能比例" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("group", { name: "单块拼豆板针数" })).toBeInTheDocument();
-    expect(screen.getByLabelText(/细节算法/)).toHaveDisplayValue("智能细节（推荐）");
-    expect(screen.getByText(/项目总用豆/)).toBeInTheDocument();
-    expect(screen.getByRole("navigation", { name: "手机端快捷导航" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "52 针" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("色卡套装")).toHaveDisplayValue("MARD 221 色");
+    // 还没有图纸时不展示设置栏、空统计表和底部导航。
+    expect(screen.queryByRole("tablist", { name: "设置分类" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/项目总用豆/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "手机端快捷导航" })).not.toBeInTheDocument();
   });
 });
 
@@ -228,11 +230,20 @@ describe("local pattern drafts", () => {
 
     expect(screen.getByRole("button", { name: "亚古兽-本机草稿" })).toBeInTheDocument();
     expect(screen.getByText("2 x 2")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "图纸预览与编辑" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始编辑图纸" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "手机端快捷导航" })).toBeInTheDocument();
+
+    // 检查器标签页：默认“尺寸”，切换后只渲染对应分区。
+    expect(screen.getByRole("tab", { name: "尺寸" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("group", { name: "尺寸方式" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "效果" }));
+    expect(screen.getByLabelText(/细节算法/)).toHaveDisplayValue("智能细节（推荐）");
+    expect(screen.queryByRole("group", { name: "尺寸方式" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "用豆" }));
+    expect(screen.getByText(/项目总用豆/)).toBeInTheDocument();
     expect(screen.getAllByText("A4").length).toBeGreaterThan(0);
     expect(screen.queryByText("NOT-A-CODE")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "图纸预览与编辑" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "编辑图纸" })).toHaveAttribute("href", "#pattern-editor");
-    expect(screen.getByRole("link", { name: "编辑" })).toHaveAttribute("href", "#pattern-editor");
 
     fireEvent.click(screen.getByRole("button", { name: "移除 亚古兽-本机草稿" }));
     expect(screen.queryByRole("button", { name: "亚古兽-本机草稿" })).not.toBeInTheDocument();

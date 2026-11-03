@@ -247,3 +247,13 @@ export function IconWand(props: IconProps) {
     </IconBase>
   );
 }
+
+/** 颜色 / 色卡 */
+export function IconDroplet(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 3.5c3.2 3.6 5.5 6.6 5.5 9.6a5.5 5.5 0 0 1-11 0c0-3 2.3-6 5.5-9.6z" />
+      <path d="M9.5 14a2.5 2.5 0 0 0 2.5 2.5" />
+    </IconBase>
+  );
+}

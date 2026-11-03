@@ -2,11 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CropDialog, type CropFractions } from "./components/CropDialog";
 import { DesignGallery } from "./components/DesignGallery";
 import { DesignPreview } from "./components/DesignPreview";
+import { Dialog } from "./components/Dialog";
+import { DropOverlay } from "./components/DropOverlay";
+import { INSPECTOR_TABS, Inspector, type InspectorTab } from "./components/Inspector";
 import { PalettePanel } from "./components/PalettePanel";
-import { SettingsPanel, type UiSettings } from "./components/SettingsPanel";
+import { ColorSettings, EffectSettings, RecommendationCard, SizeSettings, type UiSettings } from "./components/SettingsPanel";
 import { StatsTable } from "./components/StatsTable";
+import { ToastRegion, useToasts } from "./components/Toasts";
 import { UploadPanel } from "./components/UploadPanel";
-import { IconCrop, IconDownload, IconEdit, IconPlus, IconSettings } from "./components/icons";
+import { WelcomeScreen } from "./components/WelcomeScreen";
+import { IconCrop, IconDroplet, IconEdit, IconGrid, IconPlus, IconRotateCcw, IconSettings, IconSliders } from "./components/icons";
 import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
 import { DEFAULT_SETTINGS, resolveBoardSize, toConversionSettings } from "./domain/settings";
 import { getDesignSizeOptions, getSmartSizeDescription, type DesignSizeOption } from "./domain/designSizing";
@@ -19,6 +24,7 @@ import { computeCropRect, type FocusPoint } from "./domain/focus";
 import { aggregateCounts, countDesignsBySource, type StatsSourceFilter } from "./domain/projectStats";
 import { analyzeSource, applyStylePreset, recommendSettings, type RecommendedSettings, type StylePresetId } from "./domain/recommend";
 import { computeShortfall, loadOwnedInventory, ownedToAllowedCodes, persistOwnedInventory, setOwnedCount, type OwnedInventory } from "./domain/shortfall";
+import { sanitizeBoardPins } from "./domain/boards";
 import { MARD_PALETTE } from "./domain/palette";
 import { PALETTE_KITS, getPaletteKit, loadPaletteKitId, paletteForKit, persistPaletteKitId, resolveAllowedCodes } from "./domain/paletteKits";
 import { getHighResolutionCellSize, renderDesignToBlob } from "./domain/rendering";
@@ -65,6 +71,9 @@ export default function App() {
   const [editHistories, setEditHistories] = useState<Record<string, EditHistory>>({});
   const [conversionProgress, setConversionProgress] = useState<Record<string, ConversionTaskProgress>>({});
   const [sourceFilter, setSourceFilter] = useState<StatsSourceFilter>("all");
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("size");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const { toasts, notify, dismiss } = useToasts();
 
   const workerRef = useRef<Worker | null>(null);
   const generationRef = useRef(0);
@@ -406,6 +415,7 @@ export default function App() {
     persistDesignDrafts(localDraftsRef.current);
     setDesigns((current) => current.filter((design) =>
       !design.id.startsWith("draft-") || localDraftIdsRef.current.has(design.id)));
+    notify(`已保存为本机草稿（最多保留 ${MAX_LOCAL_DRAFTS} 份）`);
   };
 
   const handleFiles = async (files: File[]) => {
@@ -533,11 +543,13 @@ export default function App() {
       return;
     }
     downloadTextFile(`${stripExtension(activeDesign.fileName)}-colors.csv`, countsToCsv(activeDesign.colorCounts, MARD_PALETTE));
+    notify("已导出当前图纸用豆 CSV");
   };
 
   const exportProjectCsv = () => {
     const prefix = sourceFilter === "drafts" ? "draft" : sourceFilter === "projects" ? "project" : "all-designs";
     downloadTextFile(`${prefix}-bead-shopping-list.csv`, countsToCsv(projectTotals, MARD_PALETTE));
+    notify("已导出采购清单 CSV");
   };
 
   const exportActivePng = async () => {
@@ -557,6 +569,7 @@ export default function App() {
         sheet: true
       });
       downloadBlob(`${stripExtension(activeDesign.fileName)}-高清色号图.png`, blob);
+      notify("高清色号图已开始下载");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "高清图生成失败，请稍后重试。");
     } finally {
@@ -579,8 +592,63 @@ export default function App() {
     }
   };
 
+  const hasWorkspace = images.length > 0 || designs.length > 0;
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const kitRegisteredCount = kitPalette.filter((color) => (inventory.owned[color.code] ?? 0) > 0).length;
+
+  // 窄屏时检查器在图纸下方：切换标签后把它滚进视野；宽屏三栏常驻，不滚动。
+  const openInspector = (tab: InspectorTab) => {
+    setInspectorTab(tab);
+    if (typeof window !== "undefined" && window.matchMedia?.("(max-width: 1180px)").matches) {
+      window.requestAnimationFrame(() => document.getElementById("inspector")?.scrollIntoView({ block: "start" }));
+    }
+  };
+
+  const toggleRestrict = (enabled: boolean) => {
+    if (enabled && kitRegisteredCount === 0) {
+      // 首次开启库存模式：先把整套色卡登记为“有”，用户再在色卡里取消没有的颜色。
+      const owned = { ...inventory.owned };
+      for (const color of kitPalette) owned[color.code] = Math.max(owned[color.code] ?? 0, 1);
+      setInventory({ restrictEnabled: true, owned });
+      setPaletteOpen(true);
+      return;
+    }
+    setInventory((current) => ({ ...current, restrictEnabled: enabled }));
+  };
+
+  const runFlowStep = (index: number) => {
+    if (index === 0) {
+      fileInputRef.current?.click();
+    } else if (index === 1) {
+      openInspector("size");
+    } else if (index === 2) {
+      document.getElementById("preview-title")?.scrollIntoView({ block: "start" });
+    } else {
+      openInspector("beads");
+    }
+  };
+
+  const applyPreset = (id: string) =>
+    setSettings((s) => ({ ...s, ...applyStylePreset(id as StylePresetId, s as RecommendedSettings) }));
+  const settingsTarget = activeImage
+    ? `当前图片：${activeImage.fileName}，调整只影响这张图纸。`
+    : activeDesign
+      ? "本机草稿不会随设置重新生成；新上传的图片会使用这些设置。"
+      : "设置会用于接下来上传的图片。";
+
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main">跳到主要内容</a>
+      <input
+        ref={fileInputRef}
+        className="sr-only"
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        multiple
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => { void handleFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }}
+      />
       <header className="topbar">
         <div className="topbar-inner">
           <div className="brand">
@@ -591,12 +659,17 @@ export default function App() {
             </span>
           </div>
           <ol className="flow-steps" aria-label="制作流程">
-            {FLOW_STEPS.map((step, index) => (
-              <li key={step.href} data-state={index < flowStep ? "done" : index === flowStep ? "current" : "todo"}>
-                <a href={step.href} aria-current={index === flowStep ? "step" : undefined}>
+            {FLOW_STEPS.map((label, index) => (
+              <li key={label} data-state={index < flowStep ? "done" : index === flowStep ? "current" : "todo"}>
+                <button
+                  type="button"
+                  aria-current={index === flowStep ? "step" : undefined}
+                  disabled={index > 0 && !hasWorkspace}
+                  onClick={() => runFlowStep(index)}
+                >
                   <span className="flow-step-index">{index + 1}</span>
-                  {step.label}
-                </a>
+                  {label}
+                </button>
               </li>
             ))}
           </ol>
@@ -605,179 +678,226 @@ export default function App() {
             <span><strong>{totalBeads}</strong> 颗豆</span>
           </div>
         </div>
-        <p className="topbar-lede">
-          上传角色或照片，先按拼豆板针数像素化，再逐格匹配 MARD 色号；每张图纸可以独立设置尺寸、手工修改并导出分板打印图。图片只在本机浏览器处理。
-        </p>
       </header>
 
-      <nav className="mobile-nav" aria-label="手机端快捷导航">
-        <a href="#upload-title"><IconPlus />上传</a>
-        <a href={activeDesign ? "#pattern-editor" : "#preview-title"}>
-          <IconEdit />{activeDesign ? "编辑" : "图纸"}
-        </a>
-        <a href="#settings-title"><IconSettings />设置</a>
-        <a href="#download-pattern"><IconDownload />保存</a>
-      </nav>
-
-      <main className="workspace">
-        <aside className="sidebar">
-          <UploadPanel onFiles={handleFiles} isProcessing={isProcessing} />
-          <SettingsPanel
-            settings={settings}
-            onChange={setSettings}
-            onApplyPreset={(id) => setSettings((s) => ({ ...s, ...applyStylePreset(id as StylePresetId, s as RecommendedSettings) }))}
-            recommendation={recommendation}
-            smartSizeHint={smartSizeHint}
-            sourceName={activeImage?.fileName}
-            paletteKitName={activeKit.name}
-            sizeOptions={sizeOptions}
-            onSelectSize={selectSize}
-            aspectRatio={subjectAspectRatio}
-            generatedSize={activeDesign && activeImage?.id === activeDesign.id
-              ? { width: activeDesign.boardWidth, height: activeDesign.boardHeight } : null}
-            onApplyRecommendation={() => {
-              if (recommendation) {
-                setSettings((s) => ({ ...s, ...recommendation }));
-              }
-            }}
-          />
-          {error && <div className="error-box" role="alert">{error}</div>}
-        </aside>
-
-        <section className="main-column">
-          {isConverting && (
-            <div className="converting-banner" role="status">
-              <span className="bead-loader" aria-hidden="true"><i /><i /><i /><i /></span>
-              <strong>正在像素化并匹配色号…</strong>
-              {Object.keys(conversionProgress).length > 0 && (
-                <ul className="conversion-task-list">
-                  {Object.entries(conversionProgress).map(([id, task]) => (
-                    <li key={id} className="conversion-task">
-                      <span className="conversion-task-name" title={task.fileName}>{task.fileName}</span>
-                      <progress
-                        className="conversion-task-bar"
-                        value={task.percent}
-                        max={100}
-                        aria-label={`${task.fileName} 转换进度 ${task.percent}%`}
-                      />
-                      <span className="conversion-task-percent">{task.percent}%</span>
-                      <button
-                        type="button"
-                        className="conversion-cancel"
-                        onClick={() => cancelConversion(id)}
-                      >
-                        取消
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
+      {hasWorkspace ? (
+        <main className="workbench" id="main">
+          <aside className="rail" aria-labelledby="rail-title">
+            <div className="rail-head">
+              <h2 id="rail-title">我的图纸</h2>
+              <small>{designs.length} 张</small>
             </div>
-          )}
-          <DesignGallery
-            designs={designs}
-            activeId={activeDesign?.id}
-            palette={MARD_PALETTE}
-            draftIds={localDraftIdsRef.current}
-            progress={conversionProgress}
-            onSelect={setActiveId}
-            onRemove={removeDesign}
-          />
+            <UploadPanel onFiles={handleFiles} isProcessing={isProcessing} variant="compact" />
+            <DesignGallery
+              designs={designs}
+              activeId={activeDesign?.id}
+              palette={MARD_PALETTE}
+              draftIds={localDraftIdsRef.current}
+              progress={conversionProgress}
+              onSelect={setActiveId}
+              onRemove={removeDesign}
+            />
+            <p className="rail-hint">也可以把图片直接拖进窗口添加。</p>
+          </aside>
 
-          {activeDesign && activeOriginalUrl && (
-            <div className="preview-toolbar">
-              <button
-                type="button"
-                className="button small"
-                onClick={() => setCropImageId(activeDesign.id)}
-              >
-                <IconCrop /> 裁剪 / 智能去背景
-              </button>
-              <button type="button" className="button small" onClick={duplicateActiveImage} disabled={isConverting}>
-                <IconPlus /> 复制为另一尺寸
-              </button>
-              <small className="muted">框选一个主体 → 智能去背景 → 生成独立图纸；可对同一张总图重复操作拆出多个。</small>
-            </div>
-          )}
-
-          {activeDesign && (
-            <div className="editor-entry" role="status">
-              <div>
-                <strong>图纸已经可以编辑</strong>
-                <small>逐格改色、取色、擦除，支持撤销和恢复。</small>
+          <section className="stage" aria-label="图纸">
+            {error && (
+              <div className="error-box" role="alert">
+                <span>{error}</span>
+                <button type="button" className="link-button" onClick={() => setError(null)}>知道了</button>
               </div>
-              <a className="button primary" href="#pattern-editor"><IconEdit />编辑图纸</a>
-            </div>
-          )}
+            )}
+            {isConverting && (
+              <div className="converting-banner" role="status">
+                <span className="bead-loader" aria-hidden="true"><i /><i /><i /><i /></span>
+                <strong>正在像素化并匹配色号…</strong>
+                {Object.keys(conversionProgress).length > 0 && (
+                  <ul className="conversion-task-list">
+                    {Object.entries(conversionProgress).map(([id, task]) => (
+                      <li key={id} className="conversion-task">
+                        <span className="conversion-task-name" title={task.fileName}>{task.fileName}</span>
+                        <progress
+                          className="conversion-task-bar"
+                          value={task.percent}
+                          max={100}
+                          aria-label={`${task.fileName} 转换进度 ${task.percent}%`}
+                        />
+                        <span className="conversion-task-percent">{task.percent}%</span>
+                        <button type="button" className="conversion-cancel" onClick={() => cancelConversion(id)}>取消</button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
 
-          <DesignPreview
-            design={activeDesign}
-            palette={MARD_PALETTE}
-            showLabels={settings.showLabels}
-            originalUrl={activeOriginalUrl}
-            onDownload={activeDesign ? () => { void exportActivePng(); } : undefined}
-            isDownloading={isExportingPng}
-            onCellChange={activeDesign ? editActiveCell : undefined}
-            onMirror={activeDesign ? mirrorActiveDesign : undefined}
-            onUndo={activeDesign ? undoActiveEdit : undefined}
-            onRedo={activeDesign ? redoActiveEdit : undefined}
-            onReset={activeDesign ? resetActiveDesign : undefined}
-            onSaveDraft={activeDesign ? saveActiveDraft : undefined}
-            canUndo={Boolean(activeHistory?.past.length)}
-            canRedo={Boolean(activeHistory?.future.length)}
-            canReset={Boolean(activeGeneratedDesign && activeGeneratedDesign !== activeDesign)}
-          />
-
-          <div className="stats-grid">
-            <StatsTable
-              title="当前图纸用豆"
-              counts={activeDesign?.colorCounts ?? {}}
+            <DesignPreview
+              design={activeDesign}
               palette={MARD_PALETTE}
-              action={activeDesign && (
-                <div className="button-row">
-                  <button
-                    type="button"
-                    className="button small"
-                    onClick={() => { void exportActivePng(); }}
-                    disabled={isExportingPng}
-                  >
-                    {isExportingPng ? "生成中…" : "高清色号 PNG"}
+              showLabels={settings.showLabels}
+              originalUrl={activeOriginalUrl}
+              onDownload={activeDesign ? () => { void exportActivePng(); } : undefined}
+              onExportPdf={activeDesign ? exportActivePdf : undefined}
+              isDownloading={isExportingPng}
+              onCellChange={activeDesign ? editActiveCell : undefined}
+              onMirror={activeDesign ? mirrorActiveDesign : undefined}
+              onUndo={activeDesign ? undoActiveEdit : undefined}
+              onRedo={activeDesign ? redoActiveEdit : undefined}
+              onReset={activeDesign ? resetActiveDesign : undefined}
+              onSaveDraft={activeDesign ? saveActiveDraft : undefined}
+              canUndo={Boolean(activeHistory?.past.length)}
+              canRedo={Boolean(activeHistory?.future.length)}
+              canReset={Boolean(activeGeneratedDesign && activeGeneratedDesign !== activeDesign)}
+              headerActions={activeOriginalUrl && (
+                <>
+                  <button type="button" className="button small" onClick={() => activeDesign && setCropImageId(activeDesign.id)}>
+                    <IconCrop className="button-icon" />裁剪 / 去背景
                   </button>
-                  <button type="button" className="button small" onClick={exportActivePdf}>导出 PDF</button>
-                  <button type="button" className="button small" onClick={exportActiveCsv}>导出 CSV</button>
-                </div>
+                  <button type="button" className="button small" onClick={duplicateActiveImage} disabled={isConverting}>
+                    <IconPlus className="button-icon" />复制为另一尺寸
+                  </button>
+                </>
               )}
             />
-            <StatsTable
-              title="项目总用豆"
-              counts={projectTotals}
-              palette={MARD_PALETTE}
-              ownedCounts={inventory.owned}
-              shortfall={computeShortfall(projectTotals, inventory.owned)}
-              sourceFilter={sourceFilter}
-              sourceCount={filteredDesignCount}
-              onSourceFilterChange={setSourceFilter}
-              onOwnedChange={(code, count) =>
-                setInventory((inv) => ({ ...inv, owned: setOwnedCount(inv.owned, code, count) }))
-              }
-              action={filteredDesignCount > 0 && (
-                <button type="button" className="button small" onClick={exportProjectCsv}>导出采购 CSV</button>
-              )}
-            />
-          </div>
-        </section>
+          </section>
 
-        <PalettePanel
-          palette={kitPalette}
+          <Inspector
+            tab={inspectorTab}
+            onTabChange={setInspectorTab}
+            header={(
+              <div className="inspector-head">
+                <p className="settings-scope">{settingsTarget}</p>
+                <button type="button" className="link-button" onClick={() => setSettings(DEFAULT_SETTINGS)} title="恢复全部设置为默认值">
+                  <IconRotateCcw className="link-button-icon" />恢复默认
+                </button>
+                {recommendation && inspectorTab !== "beads" && (
+                  <RecommendationCard
+                    settings={settings}
+                    recommendation={recommendation}
+                    onApply={() => setSettings((s) => ({ ...s, ...recommendation }))}
+                  />
+                )}
+              </div>
+            )}
+          >
+            {inspectorTab === "size" && (
+              <SizeSettings
+                settings={settings}
+                onChange={setSettings}
+                smartSizeHint={smartSizeHint}
+                sizeOptions={sizeOptions}
+                onSelectSize={selectSize}
+                aspectRatio={subjectAspectRatio}
+                generatedSize={activeDesign && activeImage?.id === activeDesign.id
+                  ? { width: activeDesign.boardWidth, height: activeDesign.boardHeight } : null}
+              />
+            )}
+            {inspectorTab === "color" && (
+              <ColorSettings settings={settings} onChange={setSettings} paletteKitName={activeKit.name}>
+                <div className="kit-card">
+                  <label className="field">
+                    <span>我的色卡套装</span>
+                    <select aria-label="色卡套装" value={activeKit.id} onChange={(event) => setPaletteKitId(event.target.value)}>
+                      {PALETTE_KITS.map((kit) => <option key={kit.id} value={kit.id}>{kit.name}</option>)}
+                    </select>
+                    <small className="muted">{activeKit.description}所有图纸只从这套里选色。</small>
+                  </label>
+                  <label className="toggle">
+                    <input type="checkbox" checked={inventory.restrictEnabled} onChange={(event) => toggleRestrict(event.target.checked)} />
+                    <span>只用我手头有的颜色<small>{inventory.restrictEnabled ? `已登记 ${kitRegisteredCount} / ${kitPalette.length} 色` : "开启后在色卡里勾掉没有的颜色"}</small></span>
+                  </label>
+                  <button type="button" className="button small kit-manage" onClick={() => setPaletteOpen(true)}>
+                    <IconGrid className="button-icon" />查看色卡 / 管理库存
+                  </button>
+                </div>
+              </ColorSettings>
+            )}
+            {inspectorTab === "effects" && (
+              <EffectSettings settings={settings} onChange={setSettings} onApplyPreset={applyPreset} />
+            )}
+            {inspectorTab === "beads" && (
+              <div className="beads-tab">
+                <StatsTable
+                  title="当前图纸用豆"
+                  counts={activeDesign?.colorCounts ?? {}}
+                  palette={MARD_PALETTE}
+                  action={activeDesign && (
+                    <div className="button-row">
+                      <button type="button" className="button small" onClick={() => { void exportActivePng(); }} disabled={isExportingPng}>
+                        {isExportingPng ? "生成中…" : "高清色号 PNG"}
+                      </button>
+                      <button type="button" className="button small" onClick={exportActivePdf}>导出 PDF</button>
+                      <button type="button" className="button small" onClick={exportActiveCsv}>导出 CSV</button>
+                    </div>
+                  )}
+                />
+                <StatsTable
+                  title="项目总用豆"
+                  counts={projectTotals}
+                  palette={MARD_PALETTE}
+                  ownedCounts={inventory.owned}
+                  shortfall={computeShortfall(projectTotals, inventory.owned)}
+                  sourceFilter={sourceFilter}
+                  sourceCount={filteredDesignCount}
+                  onSourceFilterChange={setSourceFilter}
+                  onOwnedChange={(code, count) =>
+                    setInventory((inv) => ({ ...inv, owned: setOwnedCount(inv.owned, code, count) }))
+                  }
+                  action={filteredDesignCount > 0 && (
+                    <button type="button" className="button small" onClick={exportProjectCsv}>导出采购 CSV</button>
+                  )}
+                />
+              </div>
+            )}
+          </Inspector>
+        </main>
+      ) : (
+        <WelcomeScreen
+          onFiles={handleFiles}
+          isProcessing={isProcessing}
+          boardPins={sanitizeBoardPins(uploadSettings.boardPins)}
+          onBoardPinsChange={(pins) => setUploadSettings((current) => ({ ...current, boardPins: pins }))}
           kits={PALETTE_KITS}
           kitId={activeKit.id}
           onKitChange={setPaletteKitId}
-          restrictEnabled={inventory.restrictEnabled}
-          ownedCounts={inventory.owned}
-          currentDesignCodes={currentDesignCodes}
-          onChange={(next) => setInventory({ restrictEnabled: next.restrictEnabled, owned: next.ownedCounts })}
         />
-      </main>
+      )}
+
+      {hasWorkspace && (
+        <nav className="mobile-nav" aria-label="手机端快捷导航">
+          <button type="button" onClick={() => document.getElementById("preview-title")?.scrollIntoView({ block: "start" })}>
+            <IconEdit />图纸
+          </button>
+          {INSPECTOR_TABS.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              aria-current={inspectorTab === tab.id ? "true" : undefined}
+              onClick={() => openInspector(tab.id)}
+            >
+              {tab.id === "size" ? <IconSettings /> : tab.id === "color" ? <IconDroplet /> : tab.id === "beads" ? <IconGrid /> : <IconSliders />}
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+      )}
+
+      <DropOverlay onFiles={(files) => { void handleFiles(files); }} />
+
+      {paletteOpen && (
+        <Dialog title={`${activeKit.name} · 色卡与库存`} wide onClose={() => setPaletteOpen(false)}>
+          <PalettePanel
+            embedded
+            palette={kitPalette}
+            restrictEnabled={inventory.restrictEnabled}
+            ownedCounts={inventory.owned}
+            currentDesignCodes={currentDesignCodes}
+            onChange={(next) => setInventory({ restrictEnabled: next.restrictEnabled, owned: next.ownedCounts })}
+          />
+        </Dialog>
+      )}
+
+      <ToastRegion toasts={toasts} onDismiss={dismiss} />
 
       {cropImageId && (() => {
         const cropImage = images.find((image) => image.id === cropImageId);
@@ -802,12 +922,7 @@ export default function App() {
   );
 }
 
-const FLOW_STEPS = [
-  { label: "上传图片", href: "#upload-title" },
-  { label: "选择尺寸", href: "#settings-title" },
-  { label: "生成图纸", href: "#preview-title" },
-  { label: "编辑导出", href: "#download-pattern" }
-];
+const FLOW_STEPS = ["上传图片", "选择尺寸", "生成图纸", "编辑导出"];
 
 // 品牌标：3×3 拼豆格，中心空孔呼应真实拼豆。
 function BrandMark() {

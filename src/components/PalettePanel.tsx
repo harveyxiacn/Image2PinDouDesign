@@ -12,6 +12,8 @@ type PalettePanelProps = {
   kits?: PaletteKit[];
   kitId?: string;
   onKitChange?: (id: string) => void;
+  // 在对话框里使用时隐藏自身标题与折叠按钮（对话框已有标题）。
+  embedded?: boolean;
   onChange: (next: { restrictEnabled: boolean; ownedCounts: Record<string, number> }) => void;
 };
 
@@ -23,11 +25,13 @@ export function PalettePanel({
   kits,
   kitId,
   onKitChange,
+  embedded = false,
   onChange
 }: PalettePanelProps) {
   const activeKit = kits?.find((kit) => kit.id === kitId);
   const [query, setQuery] = useState("");
-  const [expanded, setExpanded] = useState(true);
+  const [expandedState, setExpanded] = useState(true);
+  const expanded = embedded || expandedState;
 
   const visible = useMemo(() => {
     const trimmed = query.trim().toLowerCase();
@@ -113,7 +117,7 @@ export function PalettePanel({
 
   return (
     <section className="panel palette-panel" aria-labelledby="palette-title">
-      <div className="palette-head">
+      <div className="palette-head" hidden={embedded}>
         <div className="palette-heading">
           <p className="eyebrow">Palette</p>
           <h2 id="palette-title">{activeKit ? activeKit.name : "MARD 色卡"}</h2>
