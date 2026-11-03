@@ -35,6 +35,38 @@ export function replaceDesignCell(
 
   return { ...design, matrix, colorCounts };
 }
+/**
+ * 批量改格（画笔 / 橡皮一笔拖动）：一次生成新图纸，便于整笔作为一步撤销。
+ * 越界或颜色不变的格子忽略；没有任何变化时返回原引用。
+ */
+export function replaceDesignCells(
+  design: BeadDesign,
+  cells: ReadonlyArray<{ x: number; y: number }>,
+  nextCode: string | null
+): BeadDesign {
+  let matrix: BeadDesign["matrix"] | null = null;
+  const colorCounts = { ...design.colorCounts };
+  const copiedRows = new Set<number>();
+  for (const { x, y } of cells) {
+    if (x < 0 || y < 0 || x >= design.boardWidth || y >= design.boardHeight) continue;
+    const previousCode = (matrix ?? design.matrix)[y]?.[x] ?? null;
+    if (previousCode === nextCode) continue;
+    matrix ??= design.matrix.slice();
+    if (!copiedRows.has(y)) {
+      matrix[y] = (matrix[y] ?? new Array<string | null>(design.boardWidth).fill(null)).slice();
+      copiedRows.add(y);
+    }
+    matrix[y][x] = nextCode;
+    if (previousCode) {
+      const remaining = (colorCounts[previousCode] ?? 1) - 1;
+      if (remaining > 0) colorCounts[previousCode] = remaining;
+      else delete colorCounts[previousCode];
+    }
+    if (nextCode) colorCounts[nextCode] = (colorCounts[nextCode] ?? 0) + 1;
+  }
+  return matrix ? { ...design, matrix, colorCounts } : design;
+}
+
 export function mirrorDesignHorizontally(design: BeadDesign): BeadDesign {
   return {
     ...design,

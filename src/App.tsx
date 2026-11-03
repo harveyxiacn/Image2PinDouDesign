@@ -6,14 +6,18 @@ import { Dialog } from "./components/Dialog";
 import { DropOverlay } from "./components/DropOverlay";
 import { INSPECTOR_TABS, Inspector, type InspectorTab } from "./components/Inspector";
 import { PalettePanel } from "./components/PalettePanel";
-import { ColorSettings, EffectSettings, RecommendationCard, SizeSettings, type UiSettings } from "./components/SettingsPanel";
+import { ColorSettings, EffectSettings, RecommendDiffList, RecommendationCard, SizeSettings, type UiSettings } from "./components/SettingsPanel";
+import { InventoryFitCard } from "./components/InventoryFitCard";
+import { SmartAdvisorCard } from "./components/SmartAdvisorCard";
+import { fitDesignToInventory } from "./domain/inventoryFit";
+import { adviseForSource } from "./domain/smartAdvisor";
 import { StatsTable } from "./components/StatsTable";
 import { ToastRegion, useToasts } from "./components/Toasts";
 import { UploadPanel } from "./components/UploadPanel";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { IconCrop, IconDroplet, IconEdit, IconGrid, IconPlus, IconRotateCcw, IconSettings, IconSliders } from "./components/icons";
 import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
-import { DEFAULT_SETTINGS, resolveBoardSize, toConversionSettings } from "./domain/settings";
+import { DEFAULT_SETTINGS, resolveBoardSize, resolveTilePins, toConversionSettings } from "./domain/settings";
 import { getDesignSizeOptions, getSmartSizeDescription, type DesignSizeOption } from "./domain/designSizing";
 import { autoCropToContent, cropPixelSource, rectFromFractions } from "./domain/crop";
 import { countsToCsv, downloadBlob, downloadTextFile, openPrintableSheet } from "./domain/exporters";
@@ -29,7 +33,7 @@ import { MARD_PALETTE } from "./domain/palette";
 import { PALETTE_KITS, getPaletteKit, loadPaletteKitId, paletteForKit, persistPaletteKitId, resolveAllowedCodes } from "./domain/paletteKits";
 import { getHighResolutionCellSize, renderDesignToBlob } from "./domain/rendering";
 import type { BeadDesign, PixelSource } from "./domain/types";
-import { mirrorDesignHorizontally, replaceDesignCell } from "./domain/workbench";
+import { mirrorDesignHorizontally, replaceDesignCell, replaceDesignCells } from "./domain/workbench";
 import type { ConversionRequest, ConversionResponse } from "./worker/conversion.worker";
 
 type UploadedImage = {
@@ -307,6 +311,11 @@ export default function App() {
   const editActiveCell = (x: number, y: number, code: string | null) => {
     if (!activeDesign) return;
     commitActiveDesign(replaceDesignCell(activeDesign, x, y, code));
+  };
+
+  const editActiveCells = (cells: Array<{ x: number; y: number }>, code: string | null) => {
+    if (!activeDesign) return;
+    commitActiveDesign(replaceDesignCells(activeDesign, cells, code));
   };
 
   const mirrorActiveDesign = () => {
@@ -593,6 +602,31 @@ export default function App() {
   };
 
   const hasWorkspace = images.length > 0 || designs.length > 0;
+
+  // 智能分析：按所选套装估算颜色组成、推荐色数与尺寸（基于当前图片，草稿没有原图则不分析）。
+  const tilePins = resolveTilePins(settings);
+  const advice = useMemo(() => activeImage
+    ? adviseForSource(activeImage.source, kitPalette, { autoFrame: settings.autoFrame, ignoreWhiteBg: settings.ignoreWhiteBg, boardPins: tilePins })
+    : null,
+  [activeImage?.source, kitPalette, settings.autoFrame, settings.ignoreWhiteBg, tilePins]);
+  const adviceSizeSettings = (current: UiSettings): Partial<UiSettings> => {
+    if (!advice?.size) return {};
+    return recommendationAnalysis?.kind === "pixel-art"
+      ? { boardPreset: "smart" }
+      : { boardPreset: "custom", customWidth: advice.size.width, customHeight: advice.size.height, fit: current.fit === "stretch" ? "contain" : current.fit };
+  };
+  const currentDesignSize = activeDesign && activeImage?.id === activeDesign.id
+    ? { width: activeDesign.boardWidth, height: activeDesign.boardHeight }
+    : null;
+
+  // 按库存调整：只在登记了库存、且当前图纸确实缺豆时计算替换方案。
+  const activeShortfall = activeDesign ? computeShortfall(activeDesign.colorCounts, inventory.owned) : {};
+  const activeShortageTotal = Object.values(activeShortfall).reduce((sum, count) => sum + count, 0);
+  const hasInventory = Object.values(inventory.owned).some((count) => count > 0);
+  const inventoryFit = useMemo(
+    () => activeDesign && hasInventory && activeShortageTotal > 0 ? fitDesignToInventory(activeDesign, inventory.owned, MARD_PALETTE) : null,
+    [activeDesign, activeShortageTotal, hasInventory, inventory.owned]
+  );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const kitRegisteredCount = kitPalette.filter((color) => (inventory.owned[color.code] ?? 0) > 0).length;
 
@@ -740,6 +774,7 @@ export default function App() {
               onExportPdf={activeDesign ? exportActivePdf : undefined}
               isDownloading={isExportingPng}
               onCellChange={activeDesign ? editActiveCell : undefined}
+              onCellsChange={activeDesign ? editActiveCells : undefined}
               onMirror={activeDesign ? mirrorActiveDesign : undefined}
               onUndo={activeDesign ? undoActiveEdit : undefined}
               onRedo={activeDesign ? redoActiveEdit : undefined}
@@ -770,7 +805,24 @@ export default function App() {
                 <button type="button" className="link-button" onClick={() => setSettings(DEFAULT_SETTINGS)} title="恢复全部设置为默认值">
                   <IconRotateCcw className="link-button-icon" />恢复默认
                 </button>
-                {recommendation && inspectorTab !== "beads" && (
+                {advice && inspectorTab !== "beads" ? (
+                  <SmartAdvisorCard
+                    advice={advice}
+                    palette={MARD_PALETTE}
+                    kitName={activeKit.name}
+                    currentMaxColors={settings.maxColors}
+                    currentSize={currentDesignSize}
+                    onApplyColors={() => setSettings((s) => ({ ...s, maxColors: advice.colors.recommended }))}
+                    onApplySize={() => setSettings((s) => ({ ...s, ...adviceSizeSettings(s) }))}
+                    onApplyAll={() => setSettings((s) => ({
+                      ...s,
+                      ...(recommendation ?? {}),
+                      maxColors: advice.colors.recommended,
+                      ...adviceSizeSettings(s)
+                    }))}
+                    details={recommendation && <RecommendDiffList settings={settings} recommendation={recommendation} />}
+                  />
+                ) : recommendation && inspectorTab !== "beads" && (
                   <RecommendationCard
                     settings={settings}
                     recommendation={recommendation}
@@ -817,6 +869,22 @@ export default function App() {
             )}
             {inspectorTab === "beads" && (
               <div className="beads-tab">
+                {inventoryFit ? (
+                  <InventoryFitCard
+                    fit={inventoryFit}
+                    palette={MARD_PALETTE}
+                    shortageTotal={activeShortageTotal}
+                    onApply={() => {
+                      const swapped = inventoryFit.substitutions.reduce((sum, item) => sum + item.count, 0);
+                      commitActiveDesign(inventoryFit.design);
+                      notify(`已用相近色替换 ${swapped} 颗，可按 Ctrl+Z 撤销`);
+                    }}
+                  />
+                ) : activeDesign && !hasInventory && (
+                  <p className="inventory-hint">
+                    在「颜色 → 查看色卡 / 管理库存」登记手上每种豆子的颗数后，这里会按库存检查缺口，并用相近色自动替换。
+                  </p>
+                )}
                 <StatsTable
                   title="当前图纸用豆"
                   counts={activeDesign?.colorCounts ?? {}}

@@ -1,3 +1,4 @@
+import { ciede2000 } from "./color";
 import { MARD_221_SEEDS, MARD_PALETTE } from "./palette";
 import type { PaletteColor } from "./types";
 
@@ -11,7 +12,52 @@ export type PaletteKit = {
   codes: readonly string[];
 };
 
+// 按色数精选：从标准 221 色里先放入黑、白，再反复挑“离已选颜色最远”的色号（CIEDE2000），
+// 让任意色数都尽量均匀覆盖色相与明度。结果是嵌套的（24 ⊂ 48 ⊂ … ⊂ 168）。
+// 注意：这是为“只想用 N 种颜色”准备的通用方案，不是某个官方 N 色套装的色号清单。
+const CURATED_SIZES = [24, 48, 72, 96, 120, 144, 168] as const;
+const CURATED_SEED_CODES = ["H2", "H7"];
+
+export function curatedColorOrder(palette = MARD_PALETTE.filter((color) => MARD_221_SEEDS.some((seed) => seed.code === color.code))): string[] {
+  const remaining = palette.slice();
+  const chosen: typeof palette = [];
+  const minDistance = new Map<string, number>();
+  const take = (index: number) => {
+    const [color] = remaining.splice(index, 1);
+    chosen.push(color);
+    for (const candidate of remaining) {
+      const distance = ciede2000(color.lab, candidate.lab);
+      minDistance.set(candidate.code, Math.min(minDistance.get(candidate.code) ?? Infinity, distance));
+    }
+  };
+  for (const code of CURATED_SEED_CODES) {
+    const index = remaining.findIndex((color) => color.code === code);
+    if (index >= 0) take(index);
+  }
+  while (remaining.length > 0) {
+    let best = 0;
+    for (let index = 1; index < remaining.length; index += 1) {
+      const distance = minDistance.get(remaining[index].code) ?? Infinity;
+      const bestDistance = minDistance.get(remaining[best].code) ?? Infinity;
+      // 色差相同取色卡顺序靠前者，保证结果稳定。
+      if (distance > bestDistance + 1e-9) best = index;
+    }
+    take(best);
+  }
+  return chosen.map((color) => color.code);
+}
+
+const CURATED_ORDER = curatedColorOrder();
+
+const CURATED_KITS: PaletteKit[] = CURATED_SIZES.map((size) => ({
+  id: `curated-${size}`,
+  name: `精选 ${size} 色`,
+  description: `从标准 221 色中按色差均匀挑出 ${size} 色（自动精选，不是官方套装清单）。`,
+  codes: CURATED_ORDER.slice(0, size)
+}));
+
 export const PALETTE_KITS: PaletteKit[] = [
+  ...CURATED_KITS,
   {
     id: "mard-221",
     name: "MARD 221 色",

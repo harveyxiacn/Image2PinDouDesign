@@ -324,6 +324,22 @@ type RecommendationCardProps = {
   onApply: () => void;
 };
 
+/** 推荐参数与当前设置的差异清单（供智能分析卡片折叠展示）。 */
+export function RecommendDiffList({ settings, recommendation }: { settings: UiSettings; recommendation: RecommendedSettings }) {
+  const diffs = buildRecommendDiffs(settings, recommendation);
+  if (diffs.length === 0) return <p className="muted recommend-ok">其他参数已符合推荐。</p>;
+  return (
+    <ul className="recommend-diffs">
+      {diffs.map((diff) => (
+        <li key={diff.label}>
+          <span>{diff.label}</span>
+          <b>{diff.detail}</b>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /** 智能推荐：只列与当前设置不同的项；全部一致时收起成一行确认。 */
 export function RecommendationCard({ settings, recommendation, onApply }: RecommendationCardProps) {
   const diffs = buildRecommendDiffs(settings, recommendation);

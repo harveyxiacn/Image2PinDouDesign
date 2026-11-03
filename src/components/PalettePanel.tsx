@@ -3,6 +3,7 @@ import { addOwnedForCodes, setOwnedCount } from "../domain/shortfall";
 import type { PaletteKit } from "../domain/paletteKits";
 import type { PaletteColor } from "../domain/types";
 import { IconChevronDown, IconSearch } from "./icons";
+import { Segmented } from "./Segmented";
 
 type PalettePanelProps = {
   palette: PaletteColor[];
@@ -30,6 +31,8 @@ export function PalettePanel({
 }: PalettePanelProps) {
   const activeKit = kits?.find((kit) => kit.id === kitId);
   const [query, setQuery] = useState("");
+  // 色块：点选有/没有；清单：逐色填写颗数（按颗数管理库存）。
+  const [view, setView] = useState<"grid" | "list">("grid");
   const [expandedState, setExpanded] = useState(true);
   const expanded = embedded || expandedState;
 
@@ -247,6 +250,40 @@ export function PalettePanel({
             </p>
           )}
 
+          <Segmented
+            label="色卡显示方式"
+            size="compact"
+            className="palette-view-switch"
+            value={view}
+            options={[
+              { value: "grid" as const, label: "色块" },
+              { value: "list" as const, label: "库存颗数" }
+            ]}
+            onChange={setView}
+          />
+
+          {view === "list" ? (
+            <div className="palette-stock-list" role="list" aria-label="库存颗数">
+              {visible.map((color) => (
+                <label key={color.code} role="listitem" className={`palette-stock-row ${(ownedCounts[color.code] ?? 0) > 0 ? "has-stock" : ""}`}>
+                  <span className="swatch" style={{ backgroundColor: color.hex }} />
+                  <span className="palette-stock-code">{color.code}</span>
+                  <span className="palette-stock-name">{color.nameZh}{currentDesignCodes?.has(color.code) ? " · 当前图纸已用" : ""}</span>
+                  <input
+                    className="owned-input"
+                    type="number"
+                    min={0}
+                    step={1}
+                    inputMode="numeric"
+                    value={ownedCounts[color.code] ?? 0}
+                    aria-label={`已有 ${color.code} ${color.nameZh} 颗数`}
+                    onChange={(event) => onChange({ restrictEnabled, ownedCounts: setOwnedCount(ownedCounts, color.code, Number(event.target.value)) })}
+                  />
+                </label>
+              ))}
+              {visible.length === 0 && <p className="muted">没有匹配的颜色。</p>}
+            </div>
+          ) : (
           <div className="palette-grid" role="listbox" aria-label="MARD 色卡颜色" aria-multiselectable={restrictEnabled}>
             {visible.map((color) => {
               const selected = !restrictEnabled || isOwned(color.code);
@@ -273,6 +310,7 @@ export function PalettePanel({
               <p className="muted">没有匹配的颜色。</p>
             )}
           </div>
+          )}
         </div>
       )}
     </section>

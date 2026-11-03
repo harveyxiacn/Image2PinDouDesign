@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { renderDesignToCanvas } from "../domain/rendering";
 import type { BeadDesign, PaletteColor } from "../domain/types";
 import { designFingerprint, getColorBuildProgress } from "../domain/workbench";
@@ -15,6 +15,8 @@ type DesignPreviewProps = {
   onDownload?: () => void;
   isDownloading?: boolean;
   onCellChange?: (x: number, y: number, code: string | null) => void;
+  // 画笔 / 橡皮拖动一笔改多格：整笔作为一步撤销。未提供时退回逐格 onCellChange。
+  onCellsChange?: (cells: Array<{ x: number; y: number }>, code: string | null) => void;
   onMirror?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
@@ -52,7 +54,8 @@ export function DesignPreview({
   canRedo = false,
   canReset = false,
   onExportPdf,
-  headerActions
+  headerActions,
+  onCellsChange
 }: DesignPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -72,6 +75,10 @@ export function DesignPreview({
   const stageRef = useRef<HTMLDivElement | null>(null);
   // 舞台视图：图纸（可编辑）/ 像素化 / 原图，同尺寸切换便于逐处对比。
   const [stageView, setStageView] = useState<StageView>("pattern");
+  const [brushSize, setBrushSize] = useState<1 | 2 | 3>(1);
+  // 进行中的一笔：记录经过的格子，抬笔时一次提交；点击事件紧跟在抬笔后，需要忽略一次。
+  const strokeRef = useRef<{ code: string | null; cells: Map<number, { x: number; y: number }>; last: { x: number; y: number } } | null>(null);
+  const suppressClickRef = useRef(false);
 
   const byCode = useMemo(() => new Map(palette.map((color) => [color.code, color])), [palette]);
   const designCodes = useMemo(() => Object.entries(design?.colorCounts ?? {})
@@ -279,8 +286,96 @@ export function DesignPreview({
     }
   };
 
+  const cellFromPoint = (clientX: number, clientY: number): { x: number; y: number } | null => {
+    const canvas = canvasRef.current;
+    if (!canvas || !design) return null;
+    const bounds = canvas.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return null;
+    const cellSize = renderCellSizeRef.current;
+    const gutterX = canvas.width - design.boardWidth * cellSize;
+    const gutterY = canvas.height - design.boardHeight * cellSize;
+    const x = Math.floor(((clientX - bounds.left) * canvas.width / bounds.width - gutterX) / cellSize);
+    const y = Math.floor(((clientY - bounds.top) * canvas.height / bounds.height - gutterY) / cellSize);
+    return x < 0 || y < 0 || x >= design.boardWidth || y >= design.boardHeight ? null : { x, y };
+  };
+
+  // 把一格（按笔刷大小展开成方块）加入当前笔画，并直接在画布上预览，抬笔后再整体重绘。
+  const addStrokeCell = (cell: { x: number; y: number }) => {
+    const stroke = strokeRef.current;
+    const canvas = canvasRef.current;
+    if (!stroke || !design || !canvas) return;
+    const context = canvas.getContext("2d");
+    const cellSize = renderCellSizeRef.current;
+    const gutterX = canvas.width - design.boardWidth * cellSize;
+    const gutterY = canvas.height - design.boardHeight * cellSize;
+    const offset = Math.floor((brushSize - 1) / 2);
+    for (let dy = 0; dy < brushSize; dy += 1) {
+      for (let dx = 0; dx < brushSize; dx += 1) {
+        const x = cell.x - offset + dx;
+        const y = cell.y - offset + dy;
+        if (x < 0 || y < 0 || x >= design.boardWidth || y >= design.boardHeight) continue;
+        const key = y * design.boardWidth + x;
+        if (stroke.cells.has(key)) continue;
+        stroke.cells.set(key, { x, y });
+        if (context) {
+          context.fillStyle = stroke.code ? byCode.get(stroke.code)?.hex ?? "#000" : "#f8fafc";
+          context.fillRect(gutterX + x * cellSize + 1, gutterY + y * cellSize + 1, cellSize - 2, cellSize - 2);
+        }
+      }
+    }
+  };
+
+  // 两次 pointermove 之间可能跨过多格：按直线补齐，快速拖动也不会断笔。
+  const addStrokeLine = (from: { x: number; y: number }, to: { x: number; y: number }) => {
+    const steps = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y));
+    for (let step = 1; step <= steps; step += 1) {
+      addStrokeCell({
+        x: Math.round(from.x + ((to.x - from.x) * step) / steps),
+        y: Math.round(from.y + ((to.y - from.y) * step) / steps)
+      });
+    }
+  };
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!design || (mode !== "paint" && mode !== "erase") || event.button !== 0) return;
+    const cell = cellFromPoint(event.clientX, event.clientY);
+    if (!cell) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    strokeRef.current = { code: mode === "paint" ? paintCode : null, cells: new Map(), last: cell };
+    setCursorCell(cell);
+    addStrokeCell(cell);
+  };
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const stroke = strokeRef.current;
+    if (!stroke) return;
+    const cell = cellFromPoint(event.clientX, event.clientY);
+    if (!cell || (cell.x === stroke.last.x && cell.y === stroke.last.y)) return;
+    addStrokeLine(stroke.last, cell);
+    stroke.last = cell;
+  };
+
+  const finishStroke = () => {
+    const stroke = strokeRef.current;
+    strokeRef.current = null;
+    if (!stroke || stroke.cells.size === 0) return;
+    suppressClickRef.current = true;
+    window.setTimeout(() => { suppressClickRef.current = false; }, 0);
+    const cells = [...stroke.cells.values()];
+    if (onCellsChange) {
+      onCellsChange(cells, stroke.code);
+    } else {
+      for (const { x, y } of cells) onCellChange?.(x, y, stroke.code);
+    }
+  };
+
   const handleCanvasClick = (event: ReactMouseEvent<HTMLCanvasElement>) => {
     if (!design || mode === "view") {
+      return;
+    }
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
       return;
     }
     const canvas = canvasRef.current;
@@ -468,11 +563,28 @@ export function DesignPreview({
                         ))}
                       </select>
                     </label>
-                    <small>{mode === "pick" ? "点图纸中的颜色后自动切回逐格改色。" : "点一个格子即可替换；每步都能撤销。"}</small>
+                    <small>{mode === "pick" ? "点图纸中的颜色后自动切回逐格改色。" : "点格子替换，按住拖动可连续涂色；一笔算一步撤销。"}</small>
                   </div>
                 )}
 
-                {mode === "erase" && <p className="workbench-hint">点一个格子清成空格；可随时撤销。</p>}
+                {mode === "erase" && <p className="workbench-hint">点格子清成空格，按住拖动可连续擦除；一笔算一步撤销。</p>}
+
+                {(mode === "paint" || mode === "erase") && (
+                  <div className="brush-size">
+                    <span>笔刷大小</span>
+                    <Segmented
+                      label="笔刷大小"
+                      size="compact"
+                      value={brushSize}
+                      options={[
+                        { value: 1 as const, label: "1 格" },
+                        { value: 2 as const, label: "2 × 2" },
+                        { value: 3 as const, label: "3 × 3" }
+                      ]}
+                      onChange={setBrushSize}
+                    />
+                  </div>
+                )}
 
                 {mode === "build" && (
                   <div className="build-assistant">
@@ -559,6 +671,10 @@ export function DesignPreview({
                   ref={canvasRef}
                   aria-label={`${design.fileName} 拼豆图纸`}
                   onClick={handleCanvasClick}
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={finishStroke}
+                  onPointerCancel={finishStroke}
                 />
                 {cursorBox && (
                   <div ref={cursorRef} className="grid-cursor" style={cursorBox} aria-hidden="true" />

@@ -114,7 +114,8 @@ export type BoardPinOption = {
 export const BOARD_PIN_OPTIONS: BoardPinOption[] = [
   { pins: 29, label: "29 针", hint: "小方板" },
   { pins: 50, label: "50 针", hint: "中方板" },
-  { pins: 52, label: "52 针", hint: "常用大板" }
+  { pins: 52, label: "52 针", hint: "常用大板" },
+  { pins: 104, label: "104 针", hint: "超大板（单块即 104 × 104）" }
 ];
 
 export const MIN_BOARD_PINS = 10;
