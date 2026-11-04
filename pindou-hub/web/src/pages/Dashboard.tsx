@@ -1,6 +1,6 @@
 // 焦点：“这周能拼什么 / 还要买多少”——进行中的图纸的备豆进度 + 一个大数字（要买的总颗数）和「去采购」。
 import { useMemo, useState } from "react";
-import { Bead, Icon, fmt, fmtTime, navigate } from "../components/ui";
+import { Bead, Icon, fmt, fmtTime, navigate, DiffNumber } from "../components/ui";
 import { useData } from "../lib/db";
 import { useSyncState } from "../lib/sync";
 import { demandByCode, isActive, readiness, shoppingList, stockByCode } from "../lib/inventory";
@@ -107,7 +107,7 @@ export default function Dashboard() {
           <span className="label">还要买</span>
           {buyTotal > 0 ? (
             <>
-              <div className="big">{fmt(buyTotal)}<span className="meta"> 颗</span></div>
+              <div className="big"><DiffNumber value={buyTotal} /><span className="meta"> 颗</span></div>
               <div className="meta">{buy.length} 个色号{shortCount ? `，其中 ${shortCount} 色缺货` : "，都是补货提醒"}</div>
               <button className="btn btn-iron" onClick={() => navigate("/shopping")}><Icon name="cart" />去采购</button>
             </>
@@ -122,7 +122,7 @@ export default function Dashboard() {
       </section>
 
       <div className="dash-strip" aria-label="库存概况">
-        <div><span className="label">豆子总数</span><b>{fmt(totalBeads)}</b></div>
+        <div><span className="label">豆子总数</span><b><DiffNumber value={totalBeads} /></b></div>
         <div><span className="label">有货色号</span><b>{inStock}</b></div>
         <div><span className="label">快用完</span><b style={{ color: low.length ? "var(--amber)" : undefined }}>{low.length}</b></div>
       </div>

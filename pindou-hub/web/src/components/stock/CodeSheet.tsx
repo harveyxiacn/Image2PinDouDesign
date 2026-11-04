@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Bead, Sheet, fmt, fmtTime, navigate, toast } from "../ui";
+import { Bead, Sheet, fmt, fmtTime, navigate, toast, DiffNumber } from "../ui";
 import { useData, putRecords } from "../../lib/db";
 import { colorOf } from "../../lib/palette";
 import { demandByCode, stockByCode, stocktakeTxn, isActive } from "../../lib/inventory";
@@ -59,7 +59,7 @@ export function CodeSheet({ code, onClose }: { code: string; onClose: () => void
       <div className="sk-big">
         <div>
           <div className="label">当前库存</div>
-          <div className="sk-big-num">{fmt(have)} <span className="meta">颗</span></div>
+          <div className="sk-big-num" aria-live="polite"><DiffNumber value={have} /> <span className="meta">颗</span></div>
         </div>
         <div className="stack" style={{ gap: 4, alignItems: "flex-start" }}>
           {level === "empty" ? <span className="chip chip-iron">没有了</span> : level === "low" ? <span className="chip chip-amber">偏少（低于 {fmt(floor)}）</span> : <span className="chip chip-leaf">够用</span>}

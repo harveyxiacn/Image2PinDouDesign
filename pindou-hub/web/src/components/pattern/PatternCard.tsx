@@ -33,7 +33,7 @@ export function ReadinessMeter({ pattern, stock }: { pattern: Pattern; stock: Co
 export default function PatternCard({ pattern, stock }: { pattern: Pattern; stock: Counts }) {
   const colors = Object.values(pattern.counts).filter((n) => n > 0).length;
   return (
-    <a className="panel pt-card" href={`#/pattern/${pattern.id}`}>
+    <a className="panel pt-card pressable" href={`#/pattern/${pattern.id}`}>
       <Thumb id={pattern.previewId} fallbackId={pattern.imageId} alt={pattern.name} />
       <div className="pt-card-body">
         <div className="row" style={{ flexWrap: "nowrap" }}>

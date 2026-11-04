@@ -1,5 +1,5 @@
-import { lazy, Suspense } from "react";
-import { Icon, ToastHost, useRoute } from "./components/ui";
+import { lazy, Suspense, useEffect, useRef } from "react";
+import { Icon, PageSkeleton, ToastHost, useRoute } from "./components/ui";
 import { useData } from "./lib/db";
 import { useSyncState } from "./lib/sync";
 import { isActive } from "./lib/inventory";
@@ -39,6 +39,27 @@ function Page() {
   }
 }
 
+const TITLES: Record<string, string> = {
+  "": "总览", add: "添加图纸", gallery: "图库", pattern: "图纸详情", inventory: "豆盒库存",
+  shopping: "采购清单", history: "记录", settings: "同步与设置"
+};
+
+/** 路由切换：更新标签页标题，并把焦点移到新页面的 h1（键盘/读屏用户知道已到新页面）。首次载入不抢焦点。 */
+function useRouteFocus(path: string, head: string | undefined) {
+  const first = useRef(true);
+  useEffect(() => {
+    document.title = `${TITLES[head ?? ""] ?? "拼豆仓"} · 拼豆仓`;
+    if (first.current) { first.current = false; return; }
+    let tries = 0;
+    const focusHeading = () => {
+      const h1 = document.querySelector<HTMLElement>("#main h1");
+      if (h1) { h1.tabIndex = -1; h1.focus({ preventScroll: true }); return; }
+      if (tries++ < 20) window.setTimeout(focusHeading, 50); // 懒加载页面还没渲染完
+    };
+    focusHeading();
+  }, [path, head]);
+}
+
 function SyncBadge() {
   const sync = useSyncState();
   const label = sync.phase === "unpaired" ? "仅本机" : sync.phase === "syncing" ? "同步中" : sync.phase === "error" ? "同步失败" : sync.phase === "offline" ? "离线" : "已同步";
@@ -58,8 +79,10 @@ export default function App() {
   const data = useData();
   const planned = data.patterns.filter(isActive).length;
   const path = route.path;
+  useRouteFocus(path, route.parts[0]);
   return (
     <div className="shell">
+      <a className="skip-link" href="#main" onClick={(e) => { e.preventDefault(); document.getElementById("main")?.focus(); }}>跳到主要内容</a>
       <nav className="rail" aria-label="主导航">
         <div className="brand">
           <svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="var(--ink)" /><circle cx="32" cy="32" r="20" fill="var(--iron)" /><circle cx="32" cy="32" r="8" fill="var(--ink)" /></svg>
@@ -76,12 +99,12 @@ export default function App() {
         <div className="rail-foot"><SyncBadge /></div>
       </nav>
 
-      <main className="main" id="main">
+      <main className="main" id="main" tabIndex={-1} style={{ outline: "none" }}>
         {data.ready ? (
-          <Suspense fallback={<div className="empty">载入中…</div>}>
-            <Page />
+          <Suspense fallback={<PageSkeleton />}>
+            <div className="page-enter" key={route.parts[0] ?? "home"}><Page /></div>
           </Suspense>
-        ) : <div className="empty">正在打开本地数据…</div>}
+        ) : <PageSkeleton />}
       </main>
 
       <nav className="tabbar" aria-label="主导航">

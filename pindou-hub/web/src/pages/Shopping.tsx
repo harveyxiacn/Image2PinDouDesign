@@ -1,6 +1,6 @@
 // 焦点：建议购买清单——能直接复制去下单，买回来后一键入库。
 import { useMemo, useState } from "react";
-import { Bead, Icon, Sheet, fmt, toast } from "../components/ui";
+import { Bead, Icon, Sheet, fmt, toast, DiffNumber } from "../components/ui";
 import { useData, putRecords } from "../lib/db";
 import { countsToCsv, demandByCode, isActive, shoppingList, stockByCode } from "../lib/inventory";
 import { colorOf } from "../lib/palette";
@@ -46,7 +46,7 @@ export default function Shopping() {
       <section className="panel shop-hero pegboard" aria-label="采购汇总">
         <div>
           <div className="label">建议购买</div>
-          <div className="big">{fmt(total)} <span className="meta">颗 · {items.length} 色</span></div>
+          <div className="big"><DiffNumber value={total} /> <span className="meta">颗 · {items.length} 色</span></div>
         </div>
         <span className="spacer" />
         <div className="row">

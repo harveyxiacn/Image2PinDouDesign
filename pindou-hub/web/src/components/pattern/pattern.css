@@ -67,3 +67,11 @@
 .gp-views img, .gp-pix { width: 100%; height: auto; border-radius: var(--r-ctl); background: var(--paper-sunk); }
 .gp-pix { image-rendering: pixelated; }
 @media (max-width: 820px) { .gp-views { grid-template-columns: 1fr; } }
+
+/* 豆探步骤逐条出现（参考 app-state-steps）：新完成的一步从左侧轻推入，图标先缩放再定住 */
+.pt-steps li { animation: step-in 260ms var(--ease) both; }
+.pt-steps li .pt-step-ic { animation: step-ic 300ms var(--ease) both; }
+.pt-steps li.running .pt-step-ic { animation: pulse 1s ease-in-out infinite; }
+@keyframes step-in { from { opacity: 0; transform: translateX(-6px); } }
+@keyframes step-ic { from { transform: scale(0.6); } 60% { transform: scale(1.12); } }
+@media (prefers-reduced-motion: reduce) { .pt-steps li, .pt-steps li .pt-step-ic { animation: none; } }

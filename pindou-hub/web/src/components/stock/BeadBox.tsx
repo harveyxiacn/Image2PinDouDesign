@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Bead, fmt } from "../ui";
+import { Bead, fmt, DiffNumber } from "../ui";
 import { levelOf, meterRatio } from "../../lib/stockview";
 import "./stock.css";
 
@@ -10,10 +10,10 @@ const Cell = memo(function Cell({ info, onOpen }: { info: CellInfo; onOpen: (cod
   const level = levelOf(have, floor);
   const short = need > Math.max(0, have);
   return (
-    <button type="button" className={`sk-cell${have <= 0 ? " is-empty" : ""}`} onClick={() => onOpen(code)}
+    <button type="button" className={`sk-cell pressable${have <= 0 ? " is-empty" : ""}`} onClick={() => onOpen(code)}
       aria-label={`${code}，库存 ${have} 颗${short ? `，计划还差 ${need - Math.max(0, have)}` : ""}`}>
       <span className="sk-cell-top"><Bead code={code} size={24} /><span className="code">{code}</span></span>
-      <span className="sk-qty num">{fmt(have)}</span>
+      <span className="sk-qty"><DiffNumber value={have} /></span>
       <span className={`meter ${level === "ok" ? "ok" : level === "low" ? "low" : "short"}`} aria-hidden="true"><i style={{ width: `${meterRatio(have, floor) * 100}%` }} /></span>
       {short ? <span className="sk-mark num">缺{fmt(need - Math.max(0, have))}</span> : null}
     </button>

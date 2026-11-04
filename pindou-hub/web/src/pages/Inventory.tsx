@@ -1,6 +1,6 @@
 // 焦点：豆盒（compartment box）网格——一眼看出每个色号还剩多少、计划里哪里缺。
 import { useMemo, useState } from "react";
-import { Icon, fmt } from "../components/ui";
+import { Icon, fmt, DiffNumber } from "../components/ui";
 import { useData } from "../lib/db";
 import { demandByCode, isActive, stockByCode, compareCodes } from "../lib/inventory";
 import { ALL_CODES, PALETTE_KITS, colorOf, getPaletteKit } from "../lib/palette";
@@ -56,7 +56,7 @@ export default function Inventory() {
       </div>
 
       <div className="inv-bar">
-        <div className="inv-summary"><span><b className="num">{fmt(totalBeads)}</b> 颗</span><span><b className="num">{inStock}</b> 色有货</span><span><b className="num">{lowCount}</b> 色偏少</span></div>
+        <div className="inv-summary"><span><b><DiffNumber value={totalBeads} /></b> 颗</span><span><b className="num">{inStock}</b> 色有货</span><span><b className="num">{lowCount}</b> 色偏少</span></div>
         <div className="row">
           <div className="inv-scroll"><div className="seg" role="group" aria-label="筛选">
             {FILTERS.map(([id, label]) => <button key={id} aria-pressed={filter === id} onClick={() => { setFilter(id); setSeries(""); }}>{label}</button>)}

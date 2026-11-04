@@ -1,5 +1,5 @@
 // 共用界面原语：图标、豆子色块、抽屉/弹层、提示条、哈希路由。各页面只用这些 + styles.css 中的类。
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { colorOf } from "../lib/palette";
 
 // ---------- 图标（1.6px 线性，24 栅格） ----------
@@ -61,24 +61,133 @@ export function BeadCode({ code, size = 22, showName = false }: { code: string; 
   );
 }
 
+// ---------- 动效偏好 ----------
+export function prefersReducedMotion(): boolean {
+  return typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+// ---------- 只让变化的字动（参考 uiux-prompt-playbook › app-gesture-diff） ----------
+// 新旧文本右对齐逐字符比较：不变的字符原地不动，变化的字符淡入位移（增加自下而上、减少自上而下），
+// 逐字错开 18ms、260ms。读屏读完整文本；减少动态时直接换字。
+export function DiffNumber({ value, format = fmt, className }: { value: number; format?: (n: number) => string; className?: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const prev = useRef<{ text: string; value: number } | null>(null);
+  const text = format(value);
+  useEffect(() => {
+    const el = ref.current;
+    const old = prev.current;
+    prev.current = { text, value };
+    if (!el || !old || old.text === text || prefersReducedMotion() || !el.animate) return;
+    const dir = value >= old.value ? 1 : -1;
+    const chars = Array.from(el.querySelectorAll<HTMLSpanElement>("[data-ch]"));
+    const pad = old.text.padStart(text.length, " ").slice(-text.length);
+    chars.forEach((span, i) => {
+      if (pad[i] === text[i]) return;
+      span.animate([{ opacity: 0, transform: `translateY(${dir * 0.45}em)` }, { opacity: 1, transform: "none" }],
+        { duration: 260, delay: Math.min(i, 6) * 18, easing: "cubic-bezier(0.23, 1, 0.32, 1)", fill: "backwards" });
+    });
+  }, [text, value]);
+  return (
+    <span ref={ref} className={`diffnum num${className ? ` ${className}` : ""}`}>
+      <span className="sr-only">{text}</span>
+      {Array.from(text).map((ch, i) => <span key={`${text.length}-${i}`} data-ch aria-hidden="true">{ch}</span>)}
+    </span>
+  );
+}
+
 // ---------- 抽屉 / 对话框 ----------
+// 桌面：居中对话框；手机（≤820px）：底部抽屉，按住把手/标题下拉超过 80px 或快速下甩即关闭，否则回弹。
+// 关闭先播放 180ms 退场再卸载；Esc 关闭；Tab 焦点困在抽屉内；关闭后焦点回到打开它的元素。
+// 输入框获得焦点时滚进可视区，避免被软键盘挡住。
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export function Sheet({ title, onClose, children, footer, wide }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
+  const backdrop = useRef<HTMLDivElement>(null);
+  const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const drag = useRef<{ y: number; t: number; dy: number; id: number } | null>(null);
+
+  const close = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    if (prefersReducedMotion()) { onCloseRef.current(); return; }
+    setClosing(true);
+    window.setTimeout(() => onCloseRef.current(), 180);
+  }, []);
+
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    ref.current?.focus();
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const node = ref.current;
+    node?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.stopPropagation(); close(); return; }
+      if (e.key !== "Tab" || !node) return;
+      const items = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.offsetParent !== null);
+      if (!items.length) return;
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === node)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    const onFocusIn = (e: FocusEvent) => {
+      const t = e.target as HTMLElement;
+      if (!/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+      // 软键盘弹出要一点时间，等可视区变化后再把输入框滚到中间
+      window.setTimeout(() => t.scrollIntoView({ block: "center", behavior: prefersReducedMotion() ? "auto" : "smooth" }), 280);
+    };
     document.addEventListener("keydown", onKey);
+    node?.addEventListener("focusin", onFocusIn);
     const overflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = overflow; previous?.focus?.(); };
-  }, [onClose]);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      node?.removeEventListener("focusin", onFocusIn);
+      document.body.style.overflow = overflow;
+      previous?.focus?.();
+    };
+  }, [close]);
+
+  const isSheet = () => typeof matchMedia !== "undefined" && matchMedia("(max-width: 820px)").matches;
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isSheet() || (e.target as HTMLElement).closest("button, a, input, select, textarea")) return;
+    drag.current = { y: e.clientY, t: performance.now(), dy: 0, id: e.pointerId };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    if (ref.current) ref.current.style.transition = "none";
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId || !ref.current) return;
+    d.dy = Math.max(0, e.clientY - d.y);
+    ref.current.style.transform = `translateY(${d.dy}px)`;
+    if (backdrop.current) backdrop.current.style.opacity = String(Math.max(0.35, 1 - d.dy / 420));
+  };
+  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId || !ref.current) return;
+    drag.current = null;
+    const velocity = d.dy / Math.max(1, performance.now() - d.t);
+    const sheet = ref.current;
+    sheet.style.transition = "transform 220ms cubic-bezier(0.23, 1, 0.32, 1)";
+    if (d.dy > 80 || (velocity > 0.6 && d.dy > 24)) {
+      closingRef.current = true;
+      sheet.style.transform = "translateY(100%)";
+      if (backdrop.current) backdrop.current.style.opacity = "0";
+      window.setTimeout(() => onCloseRef.current(), 200);
+    } else {
+      sheet.style.transform = "";
+      if (backdrop.current) backdrop.current.style.opacity = "";
+    }
+  };
+
   return (
-    <div className="sheet-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="sheet" role="dialog" aria-modal="true" tabIndex={-1} ref={ref} style={wide ? { width: "min(920px, 100%)" } : undefined}>
-        <div className="sheet-head">
+    <div ref={backdrop} className={`sheet-backdrop${closing ? " is-closing" : ""}`} onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
+      <div className={`sheet${closing ? " is-closing" : ""}`} role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : undefined} tabIndex={-1} ref={ref} style={wide ? { width: "min(920px, 100%)" } : undefined}>
+        <div className="sheet-head" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
+          <span className="sheet-grip" aria-hidden="true" />
           <h3 style={{ flex: 1 }}>{title}</h3>
-          <button className="btn btn-ghost btn-sm" onClick={onClose} aria-label="关闭"><Icon name="x" /></button>
+          <button className="btn btn-ghost btn-sm" onClick={close} aria-label="关闭"><Icon name="x" /></button>
         </div>
         <div className="sheet-body">{children}</div>
         {footer ? <div className="sheet-foot">{footer}</div> : null}
@@ -87,25 +196,43 @@ export function Sheet({ title, onClose, children, footer, wide }: { title: React
   );
 }
 
+// ---------- 骨架屏（懒加载页面占位；减少动态时不闪烁） ----------
+export function PageSkeleton() {
+  return (
+    <div className="skel-page" aria-busy="true" aria-label="载入中">
+      <div className="skel skel-title" />
+      <div className="skel skel-line" style={{ width: "42%" }} />
+      <div className="skel-grid">{Array.from({ length: 6 }, (_, i) => <div key={i} className="skel skel-card" />)}</div>
+    </div>
+  );
+}
+
 // ---------- 提示条（可带撤销） ----------
-type ToastItem = { id: number; text: string; action?: { label: string; run: () => void } };
+type ToastItem = { id: number; text: string; leaving?: boolean; action?: { label: string; run: () => void } };
 let toasts: ToastItem[] = [];
 const toastListeners = new Set<() => void>();
 let toastSeq = 0;
 export function toast(text: string, action?: ToastItem["action"]) {
   const id = ++toastSeq;
-  toasts = [...toasts, { id, text, action }];
+  // 最多同时 3 条，最旧的先让位
+  toasts = [...toasts.slice(-2), { id, text, action }];
   toastListeners.forEach((l) => l());
-  setTimeout(() => { toasts = toasts.filter((t) => t.id !== id); toastListeners.forEach((l) => l()); }, action ? 6000 : 3200);
+  setTimeout(() => dismissToast(id), action ? 6000 : 3200);
+}
+function dismissToast(id: number) {
+  if (!toasts.some((t) => t.id === id && !t.leaving)) return;
+  toasts = toasts.map((t) => (t.id === id ? { ...t, leaving: true } : t));
+  toastListeners.forEach((l) => l());
+  setTimeout(() => { toasts = toasts.filter((t) => t.id !== id); toastListeners.forEach((l) => l()); }, prefersReducedMotion() ? 0 : 160);
 }
 export function ToastHost() {
   const items = useSyncExternalStore((l) => { toastListeners.add(l); return () => toastListeners.delete(l); }, () => toasts);
   return (
     <div className="toast-host" role="status" aria-live="polite">
       {items.map((t) => (
-        <div className="toast" key={t.id}>
+        <div className={`toast${t.leaving ? " is-leaving" : ""}`} key={t.id}>
           <span>{t.text}</span>
-          {t.action ? <button onClick={() => { t.action!.run(); toasts = toasts.filter((x) => x.id !== t.id); toastListeners.forEach((l) => l()); }}>{t.action.label}</button> : null}
+          {t.action ? <button onClick={() => { t.action!.run(); dismissToast(t.id); }}>{t.action.label}</button> : null}
         </div>
       ))}
     </div>

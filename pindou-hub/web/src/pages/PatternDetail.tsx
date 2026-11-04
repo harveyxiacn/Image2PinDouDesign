@@ -4,7 +4,7 @@ import { putRecords, softDelete, useData } from "../lib/db";
 import { consumeTxns, countsToCsv, stockByCode, compareCodes } from "../lib/inventory";
 import { METHOD_LABEL, STATUS_LABEL, totalOf, type Counts, type Pattern, type PatternStatus } from "../lib/model";
 import { colorOf } from "../lib/palette";
-import { Icon, Sheet, fmt, fmtTime, navigate, toast, useBlobUrl } from "../components/ui";
+import { Icon, Sheet, fmt, fmtTime, navigate, toast, useBlobUrl, DiffNumber } from "../components/ui";
 import MatrixView from "../components/pattern/MatrixView";
 import DetailTable from "../components/pattern/DetailTable";
 import CountsEditor from "../components/pattern/CountsEditor";
@@ -144,7 +144,7 @@ export default function PatternDetail({ id }: { id: string }) {
           <div className="pd-stepper" role="group" aria-label="份数">
             <span className="meta">份数</span>
             <button className="btn btn-sm" onClick={() => void save({ copies: Math.max(1, copies - 1) })} disabled={copies <= 1} aria-label="减少一份">−</button>
-            <span className="num">{copies}</span>
+            <b style={{ minWidth: 24, textAlign: "center" }} aria-live="polite"><DiffNumber value={copies} format={String} /></b>
             <button className="btn btn-sm" onClick={() => void save({ copies: Math.min(99, copies + 1) })} aria-label="增加一份">+</button>
           </div>
           <span className="meta">{METHOD_LABEL[pattern.method]} · {fmt(total)} 颗 · {used} 色{pattern.width ? ` · ${pattern.width}×${pattern.height}` : ""} · 更新 {fmtTime(pattern.updatedAt)}</span>
