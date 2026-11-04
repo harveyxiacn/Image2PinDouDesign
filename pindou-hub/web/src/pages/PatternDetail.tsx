@@ -6,7 +6,7 @@ import { METHOD_LABEL, STATUS_LABEL, totalOf, type Counts, type Pattern, type Pa
 import { colorOf } from "../lib/palette";
 import { Icon, Sheet, fmt, fmtTime, navigate, toast, useBlobUrl, DiffNumber } from "../components/ui";
 import MatrixView from "../components/pattern/MatrixView";
-import ZoomPan from "../components/pattern/ZoomPan";
+import ZoomImage from "../components/pattern/ZoomImage";
 import DetailTable from "../components/pattern/DetailTable";
 import CountsEditor from "../components/pattern/CountsEditor";
 import { cleanCounts } from "../components/pattern/save";
@@ -163,9 +163,9 @@ export default function PatternDetail({ id }: { id: string }) {
           {current === "matrix" && pattern.matrix ? (
             <MatrixView matrix={pattern.matrix} width={pattern.width!} height={pattern.height!} focusCode={focus} />
           ) : current === "preview" ? (
-            previewUrl ? <ZoomPan label="预览图"><img src={previewUrl} alt="预览图" /></ZoomPan> : <div className="empty pegboard">图片同步中…</div>
+            previewUrl ? <ZoomImage src={previewUrl} alt="预览图" /> : <div className="empty pegboard">图片同步中…</div>
           ) : current === "source" ? (
-            sourceUrl ? <ZoomPan label="原图"><img src={sourceUrl} alt="原图" /></ZoomPan> : <div className="empty pegboard">图片同步中…</div>
+            sourceUrl ? <ZoomImage src={sourceUrl} alt="原图" /> : <div className="empty pegboard">图片同步中…</div>
           ) : <div className="empty pegboard"><h3>没有图片</h3><p>这张图纸是手动录入的</p></div>}
           {focus ? (
             <div className="row">

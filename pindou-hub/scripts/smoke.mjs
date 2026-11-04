@@ -109,6 +109,43 @@ async function clickText(text, selector = "button") {
   const ok = await evaluate(`(() => { const el = [...document.querySelectorAll(${JSON.stringify(selector)})].find(b => b.innerText.trim().startsWith(${JSON.stringify(text)}) && !b.disabled); if (!el) return false; el.scrollIntoView({block:"center"}); el.focus(); el.click(); return true; })()`);
   if (!ok) throw new Error(`button not found/enabled: ${text}`);
 }
+
+// ---- 缩放 / 核对 / 对比 辅助 ----
+const VK = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Escape: 27, Home: 36, End: 35 };
+async function pressKey(k, modifiers = 0) {
+  const vk = VK[k];
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: k, code: vk ? k : undefined, windowsVirtualKeyCode: vk, text: k.length === 1 ? k : undefined, modifiers });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: k, code: vk ? k : undefined, windowsVirtualKeyCode: vk, modifiers });
+}
+async function clickAt(x, y, count = 1) {
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  for (let i = 0; i < count; i++) {
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: i + 1 });
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: i + 1 });
+  }
+}
+const zscale = () => evaluate(`+document.querySelector('.pt-zoom-box').dataset.scale`);
+const zpct = () => evaluate(`document.querySelector('[data-testid=zoom-pct]').innerText`);
+const gridCenter = () => evaluate(`(() => { const b = document.querySelector('.pt-zoom-box'); b.scrollIntoView({block:'center'}); const r = document.querySelector('.pt-ov-lines').getBoundingClientRect(); const br = b.getBoundingClientRect(); return { x: Math.max(br.left + 10, Math.min(br.right - 10, r.left + r.width / 2)), y: Math.max(br.top + 10, Math.min(br.bottom - 10, r.top + r.height / 2)) }; })()`);
+const inspectorText = () => evaluate(`document.querySelector('[data-testid=cell-inspector]')?.innerText ?? ''`);
+async function zoomFit() { await clickText("适应", ".pt-zoom button").catch(() => {}); await sleep(250); }
+/** 缩放 4×并点选一个非空格子，返回核对面板文字 */
+async function zoomAndInspect() {
+  await zoomFit();
+  const p = await gridCenter();
+  await clickAt(p.x, p.y, 2); // 双击放大（以该点为中心）
+  await sleep(700);
+  let txt = "";
+  for (const [dx, dy] of [[0, 0], [30, 0], [-30, 0], [0, 30], [60, 40], [-60, -40], [90, 0], [0, -60]]) {
+    await clickAt(p.x + dx, p.y + dy);
+    await sleep(500);
+    txt = await inspectorText();
+    if (/[A-Z]+\d+/.test(txt.replace(/行 \d+ · 列 \d+/, ""))) break;
+    await sleep(350);
+  }
+  return txt.replace(/\n/g, " ");
+}
+
 async function step(name, fn) {
   const t = Date.now();
   try { const detail = await fn(); checks.push({ check: name, ok: true, ms: Date.now() - t, detail }); }
@@ -173,7 +210,7 @@ try {
   });
   // ---- 信任工具：色号高亮 / 复原预览 / 图上标注 ----
   await step("color highlight toggles on the analysis image", async () => {
-    const overlayInk = `(() => { const c = document.querySelector('canvas.pt-over'); if (!c) return -1; const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4 * 7) if (d[i] > 0) n++; return n; })()`;
+    const overlayInk = `(() => { const svg = document.querySelector('svg.pt-over'); if (!svg) return -1; return [...svg.children].map((c) => c.getAttribute('class') + ':' + (c.getAttribute('d')?.length ?? 0)).join('|'); })()`;
     const before = await evaluate(overlayInk);
     const picked = await evaluate(`(() => { const b = document.querySelector('.pt-counts .pt-pick'); if (!b) return null; b.scrollIntoView({block:'center'}); b.click(); return b.getAttribute('aria-label'); })()`);
     if (!picked) throw new Error("no pickable colour row (grid matrix missing?)");
@@ -199,6 +236,129 @@ try {
     const dims = await evaluate(`(() => { const c = document.querySelector('.pt-matrix canvas'); return c.width + 'x' + c.height; })()`);
     await clickText("原图", ".seg button");
     return `restored canvas ${dims}`;
+  });
+  // ---- 缩放组件 / 格子核对（桌面，真实识别结果） ----
+  await step("zoom: buttons change scale and readout; 1:1; fit", async () => {
+    await evaluate(`document.querySelector('.pt-zoom-box').scrollIntoView({block:'center'})`);
+    await sleep(400);
+    const p0 = await zpct(), s0 = await zscale();
+    await clickText("+", ".pt-zoom button"); await sleep(350);
+    const p1 = await zpct(), s1 = await zscale();
+    if (!(s1 > s0 * 1.2) || p0 === p1) throw new Error(`+ did not zoom: ${p0}/${s0} -> ${p1}/${s1}`);
+    await clickText("1:1", ".pt-zoom button"); await sleep(350);
+    const s2 = await zscale();
+    const want = await evaluate(`(() => { const b = document.querySelector('.pt-zoom-box'); const i = b.querySelector('img'); return i.naturalWidth / b.getBoundingClientRect().width; })()`);
+    const pct2 = await zpct();
+    if (Math.abs(s2 - want) > 0.03 * want + 0.02 || pct2.trim() !== "100%") throw new Error(`1:1 scale ${s2} want ${want} pct ${pct2}`);
+    const px = await evaluate(`document.querySelector('.pt-zoom-box').dataset.pixel`);
+    await clickText("适应", ".pt-zoom button"); await sleep(350);
+    const s3 = await zscale();
+    if (Math.abs(s3 - 1) > 0.01) throw new Error("fit did not restore 1");
+    const max = await evaluate(`(() => { const b = document.querySelector('.pt-zoom-box'); const i = b.querySelector('img'); return Math.min(96, Math.max(8, 24 * i.naturalWidth / b.getBoundingClientRect().width)); })()`);
+    return `pct ${p0} -> ${p1}; 1:1 scale ${s2.toFixed(2)} (pct ${pct2}, pixelated=${px}); fit ${s3}; max scale ~${max.toFixed(0)}`;
+  });
+  await step("zoom: double-click zooms in at the point and back to fit", async () => {
+    const p = await gridCenter();
+    await clickAt(p.x, p.y, 2); await sleep(500);
+    const s1 = await zscale();
+    if (Math.abs(s1 - 4) > 0.2) throw new Error("double click scale " + s1);
+    await clickAt(p.x, p.y, 2); await sleep(500);
+    const s2 = await zscale();
+    if (Math.abs(s2 - 1) > 0.01) throw new Error("second double click did not fit: " + s2);
+    return `1 -> ${s1.toFixed(2)} -> ${s2}`;
+  });
+  await step("zoom: wheel needs Ctrl (plain wheel never zooms)", async () => {
+    const p = await gridCenter();
+    await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX: 0, deltaY: -120 });
+    await sleep(300);
+    const s1 = await zscale();
+    const p2 = await gridCenter();
+    await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p2.x, y: p2.y, deltaX: 0, deltaY: -240, modifiers: 2 });
+    await sleep(300);
+    const s2 = await zscale();
+    if (Math.abs(s1 - 1) > 0.01) throw new Error("plain wheel zoomed: " + s1);
+    if (!(s2 > 1.2)) throw new Error("ctrl+wheel did not zoom: " + s2);
+    await zoomFit();
+    return `plain ${s1} · ctrl ${s2.toFixed(2)}`;
+  });
+  await step("zoom: keyboard + - 1 0 / arrows pan", async () => {
+    await evaluate(`document.querySelector('.pt-zoom-box').focus()`);
+    await pressKey("+"); await pressKey("+"); await sleep(400);
+    const a = await zscale();
+    if (!(a > 1.4)) throw new Error("+ key scale " + a);
+    await pressKey("1"); await sleep(400);
+    const one = await zpct();
+    if (one.trim() !== "100%") throw new Error("1 key did not give 100%: " + one);
+    const before = await evaluate(`document.querySelector('.pt-zoom-inner').style.transform`);
+    await pressKey("ArrowRight"); await sleep(400);
+    const after = await evaluate(`document.querySelector('.pt-zoom-inner').style.transform`);
+    if (before === after) throw new Error("arrow did not pan: " + before);
+    await pressKey("-"); await sleep(300);
+    await pressKey("0"); await sleep(400);
+    const f = await zscale();
+    if (Math.abs(f - 1) > 0.01) throw new Error("0 key did not fit: " + f);
+    return `+ + -> ${a.toFixed(2)}; 1 -> ${one}; arrow panned; 0 -> fit`;
+  });
+  await step("cell inspector: tap shows row/col, sampled colour, code, total; arrow keys move the cell", async () => {
+    const txt = await zoomAndInspect();
+    await shot("04d-zoomed-inspector");
+    if (!/行 \d+ · 列 \d+/.test(txt)) throw new Error("inspector not open: " + txt);
+    if (!/#[0-9a-f]{6}/i.test(txt)) throw new Error("no sampled hex: " + txt);
+    const hasCode = /\b[A-Z]{1,2}\d{1,2}\b/.test(txt);
+    if (!hasCode) throw new Error("no recognised code in inspector: " + txt);
+    if (!/\d+ 颗/.test(txt)) throw new Error("no total in inspector: " + txt);
+    const col = (t) => Number(t.match(/列 (\d+)/)[1]);
+    await evaluate(`document.querySelector('.pt-zoom-box').focus()`);
+    await pressKey("ArrowRight"); await sleep(400);
+    const t2 = await inspectorText();
+    if (col(t2) !== col(txt) + 1) throw new Error(`ArrowRight: col ${col(txt)} -> ${col(t2)}`);
+    await pressKey("Escape"); await sleep(300);
+    if (await inspectorText()) throw new Error("Esc did not close inspector");
+    const sc = await zscale();
+    if (sc < 3) throw new Error("first Esc must only close the inspector, scale is " + sc);
+    await zoomFit();
+    return txt.slice(0, 150);
+  });
+  await step("tap vs drag: dragging pans, does not open the inspector", async () => {
+    const p = await gridCenter();
+    await clickAt(p.x, p.y, 2); await sleep(500);
+    const t0 = await evaluate(`document.querySelector('.pt-zoom-inner').style.transform`);
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y });
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button: "left", buttons: 1, clickCount: 1 });
+    for (let i = 1; i <= 6; i++) await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x - i * 12, y: p.y, button: "left", buttons: 1 });
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x - 72, y: p.y, button: "left", buttons: 0, clickCount: 1 });
+    await sleep(400);
+    const t1 = await evaluate(`document.querySelector('.pt-zoom-inner').style.transform`);
+    const open = await inspectorText();
+    await zoomFit();
+    if (t0 === t1) throw new Error("drag did not pan");
+    if (open) throw new Error("drag opened the inspector");
+    return "dragged 72px: panned, inspector stayed closed";
+  });
+  await step("region select mode: dragging draws the region instead of panning", async () => {
+    await clickText("框选图纸区域");
+    const p = await gridCenter();
+    const t0 = await evaluate(`document.querySelector('.pt-zoom-inner').style.transform`);
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x - 80, y: p.y - 60 });
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x - 80, y: p.y - 60, button: "left", buttons: 1, clickCount: 1 });
+    for (let i = 1; i <= 6; i++) await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x - 80 + i * 25, y: p.y - 60 + i * 20, button: "left", buttons: 1 });
+    const drawing = await evaluate(`!!document.querySelector('.pt-ov-region')`);
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x + 70, y: p.y + 60, button: "left", buttons: 0, clickCount: 1 });
+    await sleep(300);
+    const t1 = await evaluate(`document.querySelector('.pt-zoom-inner').style.transform`);
+    const kept = await evaluate(`!!document.querySelector('.pt-ov-region')`);
+    await clickText("清除框选").catch(() => {});
+    await clickText("拖动框选中").catch(() => {});
+    if (!drawing || !kept) throw new Error(`region not drawn (drawing=${drawing} kept=${kept})`);
+    if (t0 !== t1) throw new Error("view moved while selecting");
+    return "region drawn, view unchanged";
+  });
+  // 为 HD 流程准备一张“糊图”：把当前预览图缩小 + 重压缩
+  const degradedPath = resolve(outDir, "degraded.jpg");
+  await step("make a degraded upload for the HD flow", async () => {
+    const b64 = await evaluate(`new Promise((res) => { const img = document.querySelector('.pt-stage img'); const c = document.createElement('canvas'); const k = 360 / img.naturalWidth; c.width = 360; c.height = Math.round(img.naturalHeight * k); const x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(img, 0, 0, c.width, c.height); c.toBlob((b) => { const f = new FileReader(); f.onload = () => res(String(f.result).split(',')[1]); f.readAsDataURL(b); }, 'image/jpeg', 0.35); })`);
+    writeFileSync(degradedPath, Buffer.from(b64, "base64"));
+    return `${Math.round(b64.length * 0.75 / 1024)} KB`;
   });
   await step("header info vs read chips (if the engine fills header)", async () => {
     const t = await evaluate(`document.querySelector('.pt-header')?.innerText ?? ''`);
@@ -232,6 +392,61 @@ try {
     await sleep(1200);
     await shot("07-generated-detail");
     return await evaluate("location.hash");
+  });
+
+  // ---- 高清化 UI：糊图上传 → 卡片 / 对比滑块 / 下载 / 开关（引擎没有放大时只验证卡片与开关） ----
+  await step("HD card: degraded upload, toggle persists, compare slider", async () => {
+    await evaluate(`localStorage.setItem("pindou.fakeHd", "1")`); // FAKE_HD_TEMP
+    await go("#/add?mode=recognize");
+    await clickText("换一张").catch(() => {});
+    await sleep(300);
+    await setFile(degradedPath);
+    await waitFor(`document.querySelector('[data-testid=enhance-card]')?.dataset.state === 'done' && [...document.querySelectorAll('button')].some(b => b.innerText.trim() === '重新识别' && !b.disabled)`, 240000, "hd card done + recognition finished");
+    await sleep(600);
+    await shot("21-hd-card");
+    const card = await evaluate(`document.querySelector('[data-testid=enhance-card]').innerText.replace(/\\n/g, ' ')`);
+    const applied = await evaluate(`document.querySelector('[data-testid=enhance-card]').dataset.applied === 'true'`);
+    const tl = await evaluate(`[...document.querySelectorAll('.pt-steps li')].map(l => l.innerText.replace(/\\n/g, ' / ')).join(' || ')`);
+    let note = "stub: engine did not enhance → compare slider not exercised";
+    if (applied) {
+      await waitFor(`document.querySelector('.pt-zoom-box img')`, 8000, "hd image");
+      await clickText("对比", ".pt-enh .seg button");
+      await waitFor(`document.querySelector('[role=slider][aria-label*=对比]')`, 5000, "compare slider");
+      await sleep(400);
+      const v0 = await evaluate(`+document.querySelector('[role=slider][aria-label*=对比]').getAttribute('aria-valuenow')`);
+      await evaluate(`document.querySelector('[role=slider][aria-label*=对比]').focus()`);
+      await pressKey("ArrowRight"); await pressKey("ArrowRight"); await pressKey("ArrowRight");
+      await sleep(200);
+      const v1 = await evaluate(`+document.querySelector('[role=slider][aria-label*=对比]').getAttribute('aria-valuenow')`);
+      await pressKey("ArrowLeft", 8); await sleep(200);
+      const v2 = await evaluate(`+document.querySelector('[role=slider][aria-label*=对比]').getAttribute('aria-valuenow')`);
+      const clip = await evaluate(`document.querySelector('.pt-cmp-top').style.clipPath`);
+      await shot("22-compare");
+      if (!(v1 > v0) || !(v2 < v1)) throw new Error(`slider keys: ${v0} -> ${v1} -> ${v2}`);
+      // 拖动手柄
+      const k = await evaluate(`(() => { const r = document.querySelector('[role=slider][aria-label*=对比]').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: k.x, y: k.y });
+      await send("Input.dispatchMouseEvent", { type: "mousePressed", x: k.x, y: k.y, button: "left", buttons: 1, clickCount: 1 });
+      for (let i = 1; i <= 5; i++) await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: k.x + i * 20, y: k.y, button: "left", buttons: 1 });
+      await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: k.x + 100, y: k.y, button: "left", buttons: 0, clickCount: 1 });
+      await sleep(250);
+      const v3 = await evaluate(`+document.querySelector('[role=slider][aria-label*=对比]').getAttribute('aria-valuenow')`);
+      if (!(v3 > v2 + 5)) throw new Error(`drag did not move slider: ${v2} -> ${v3}`);
+      const dl = await evaluate(`[...document.querySelectorAll('button')].some(b => b.innerText.includes('下载高清图'))`);
+      if (!dl) throw new Error("no download button");
+      note = `slider ${v0} -> ${v1} -> ${v2} -> drag ${v3}; clip ${clip}; download button present`;
+    }
+    // 开关：关 → 无高清、记住；再开
+    await clickText("关", ".pt-enh .seg button");
+    await waitFor(`document.querySelector('[data-testid=enhance-card]').dataset.state === 'off'`, 5000, "hd off");
+    const stored = await evaluate(`localStorage.getItem('pindou.hdMode')`);
+    if (stored !== "off") throw new Error("hd mode not persisted: " + stored);
+    if (await evaluate(`!!document.querySelector('.pt-cmp-line')`)) throw new Error("compare slider still shown when off");
+    await waitFor(`[...document.querySelectorAll('button')].some(b => b.innerText.trim() === '重新识别' && !b.disabled)`, 240000, "re-recognition after toggle");
+    await clickText("自动", ".pt-enh .seg button");
+    await waitFor(`document.querySelector('[data-testid=enhance-card]').dataset.state === 'done'`, 60000, "hd back on");
+    await waitFor(`[...document.querySelectorAll('button')].some(b => b.innerText.trim() === '重新识别' && !b.disabled)`, 240000, "re-recognition after toggle on");
+    return `${card.slice(0, 120)} · applied=${applied} · ${note} · timeline: ${tl.slice(0, 260)}`;
   });
 
   // ---- 不是图纸 ----
@@ -327,6 +542,57 @@ try {
     await step(`mobile ${hash}`, async () => { await go(hash); await shot(name); await noHorizontalScroll(hash); return "ok"; });
   }
 
+  await step("mobile 390: zoomed recognition preview, inspector, pinch, no overflow; dark + desktop-dark shots", async () => {
+    await evaluate(`localStorage.setItem("pindou.fakeHd", "1")`); // FAKE_HD_TEMP
+    await go("#/add?mode=recognize");
+    await clickText("换一张").catch(() => {});
+    await sleep(300);
+    await setFile(chartPath);
+    await waitFor(`[...document.querySelectorAll('button')].some(b => b.innerText.trim() === '重新识别' && !b.disabled) && [...document.querySelectorAll('button[type=submit]')].some(b => b.innerText.includes('保存到图库'))`, 240000, "recognition done (mobile)");
+    await sleep(800);
+    await evaluate(`document.querySelector('.pt-zoom-box').scrollIntoView({block:'center'})`);
+    await shot("m10-recognize-fit");
+    // 双指捏合（触摸）
+    const c = await evaluate(`(() => { const r = document.querySelector('.pt-zoom-box').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + Math.min(r.height, 400) / 2 }; })()`);
+    const pt = (dx) => [{ x: c.x - dx, y: c.y, id: 1 }, { x: c.x + dx, y: c.y, id: 2 }];
+    await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: pt(20) });
+    for (let d = 30; d <= 120; d += 10) await send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: pt(d) });
+    await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await sleep(500);
+    const sp = await zscale();
+    if (!(sp > 2)) throw new Error("touch pinch did not zoom: " + sp);
+    await zoomFit();
+    const txt = await zoomAndInspect();
+    await evaluate(`document.querySelector('.pt-zoom-box').scrollIntoView({block:'start'})`);
+    await sleep(300);
+    await shot("m11-zoomed-inspector");
+    await noHorizontalScroll("recognize zoomed + inspector");
+    // 触屏点按核对：一次轻点
+    const tap = await evaluate(`(() => { const r = document.querySelector('.pt-ov-lines').getBoundingClientRect(); const b = document.querySelector('.pt-zoom-box').getBoundingClientRect(); return { x: Math.min(b.right - 20, Math.max(b.left + 20, r.left + r.width / 2 + 25)), y: Math.min(b.bottom - 20, Math.max(b.top + 20, r.top + r.height / 2)) }; })()`);
+    await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: tap.x, y: tap.y, id: 1 }] });
+    await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await sleep(500);
+    const tapTxt = await inspectorText();
+    if (!/行 \d+/.test(tapTxt)) throw new Error("touch tap did not open inspector");
+    // 减少动态：缩放无过渡
+    await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+    await clickText("+", ".pt-zoom button"); await sleep(60);
+    const rm = await evaluate(`(() => { const b = document.querySelector('.pt-zoom-box'); return { smooth: b.dataset.smooth, td: getComputedStyle(b.querySelector('.pt-zoom-inner')).transitionDuration }; })()`);
+    await send("Emulation.setEmulatedMedia", { features: [] });
+    if (rm.smooth !== "false" && rm.td !== "0s") throw new Error("reduced motion still animates zoom: " + JSON.stringify(rm));
+    // 暗色
+    await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
+    await sleep(300);
+    await shot("m12-zoomed-dark");
+    await setViewport(1366, 900);
+    await sleep(600);
+    await evaluate(`document.querySelector('.pt-zoom-box').scrollIntoView({block:'center'})`);
+    await shot("23-zoomed-inspector-dark-desktop");
+    await noHorizontalScroll("recognize zoomed dark desktop");
+    await send("Emulation.setEmulatedMedia", { features: [] });
+    await setViewport(390, 844, true);
+    return `pinch ${sp.toFixed(2)} · ${txt.slice(0, 90)} · reduced-motion ${JSON.stringify(rm)}`;
+  });
   await step("mobile: pattern detail pinch-zooms the bead chart (touch)", async () => {
     await go(recognizedHash || "#/gallery");
     await waitFor(`document.querySelector('.pt-matrix-scroll canvas')`, 15000, "matrix canvas");
@@ -401,6 +667,7 @@ try {
   await step("dark mode batch + recognise", async () => { await go("#/add?mode=batch"); await shot("17-batch-dark"); return "ok"; });
   await step("dark mode inventory", async () => { await go("#/inventory"); await shot("15-inventory-dark"); return "ok"; });
   checks.push({ check: "token contrast (dark)", ok: true, detail: JSON.stringify(await evaluate(CONTRAST)) });
+  checks.push({ check: "console/page errors = 0", ok: errors.length === 0, detail: errors.slice(0, 5).map((e) => e.text).join(" | ") });
 } catch (e) {
   checks.push({ check: "smoke harness", ok: false, detail: String(e.stack ?? e) });
 } finally {

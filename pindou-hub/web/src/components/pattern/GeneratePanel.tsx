@@ -11,6 +11,7 @@ import { PALETTE } from "../../lib/palette";
 import { fmt, navigate, toast } from "../ui";
 import ImageDrop from "./ImageDrop";
 import MatrixView from "./MatrixView";
+import ZoomImage from "./ZoomImage";
 import CountsEditor from "./CountsEditor";
 import SaveForm, { type SaveValues } from "./SaveForm";
 import { createPattern } from "./save";
@@ -171,7 +172,7 @@ export default function GeneratePanel({ file, onFile, onClear }: { file: File | 
               <button className="btn btn-sm" onClick={download}>下载图纸 PNG</button>
             </div>
             <div className="gp-views">
-              <figure><figcaption className="label">原图</figcaption>{url ? <img src={url} alt="原图" /> : null}</figure>
+              <figure><figcaption className="label">原图</figcaption>{url ? <ZoomImage src={url} alt="原图" /> : null}</figure>
               {design.pixelated ? <figure><figcaption className="label">像素化</figcaption><PixelatedView source={design.pixelated} /></figure> : null}
               <figure className="gp-chart"><figcaption className="label">拼豆图纸</figcaption><MatrixView matrix={design.matrix} width={design.boardWidth} height={design.boardHeight} focusCode={focus} /></figure>
             </div>

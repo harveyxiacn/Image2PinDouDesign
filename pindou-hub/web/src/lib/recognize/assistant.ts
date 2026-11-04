@@ -2,9 +2,12 @@
 import { ciede2000, rgbToLab } from "@engine/color";
 import { MARD_PALETTE } from "@engine/palette";
 import { detectGrid, readGrid } from "./grid";
+import { refineLattice } from "./lattice";
 import { trimRulerBands } from "./ruler";
 import { assignBelowBands, cellCodeCandidates, chipStack, findChips, findStatedTotal, parseChipTexts, parseHeaderText, parseLegendWords } from "./legend";
 import type { HeaderInfo } from "./legend";
+import { enhanceImage, summarizeEnhance, assessQuality } from "../enhance";
+import type { EnhanceResult } from "../enhance";
 import type {
   AnalyzeOptions, AnalyzeResult, AssistantStep, ColorCluster, Counts, GridDetection, GridReading, LegendReading, PixelSource, Rect, StepStatus
 } from "./types";
@@ -29,13 +32,90 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   const signal = options.signal;
 
   const ocrOn = options.ocr !== false;
-  const hiSrc = options.ocrSource ?? src;
+  let hiSrc = options.ocrSource ?? src;
+  let enhanced: EnhanceResult | null = null;
+  let enhBase: PixelSource = src;
+  const enhanceSummary = () => (enhanced ? summarizeEnhance(enhBase, enhanced) : undefined);
 
   // 0) 抬头（尺寸 / 色数 / 总数）：英文识别模型读不出汉字，但“55x61”“1806”这类数字照样能读。
   // 先无先验地粗检一次网格，抬头条带取网格上方那一块（避免把标尺数字一起读进来）
   throwIfAborted(signal);
   let grid0: GridDetection | null = null;
   try { grid0 = detectGrid(src, options.region ?? null); } catch { grid0 = null; }
+  // 0a) 低清图（长边 ≤ 1100）上网格常常检测不到，或只锁住每 5 / 10 格一条的粗线：放大 ×3 再检测一次，
+  // 得到更细且与粗网格整倍数吻合的格子就采用；之后读格子颜色也在放大图上进行（坐标仍以原图为准）。
+  let readSrc: PixelSource = src;
+  let rf = 1;
+  const enhMode = options.enhance ?? "auto";
+  let upNote = "";
+  if (enhMode !== "off" && !options.region && Math.max(src.width, src.height) <= 1100) {
+    const sus = !grid0 || Math.min(grid0.cols, grid0.rows) <= 24 || grid0.score < 0.55;
+    if (sus) {
+      try {
+        const F = Math.max(3, Math.min(6, Math.ceil(1800 / Math.max(src.width, src.height))));
+        const up = await enhanceImage(src, { grid: null, scale: F, method: "sharp-upscale", signal });
+        const g1 = up.method === "none" ? null : detectGrid(up.image, null);
+        const k = up.image.width / src.width;
+        // 粗网格（≤24 格）多半是每 5 / 10 格一条的粗线：按边缘能量找回细格
+        const coarse = g1 && g1.score >= 0.45 ? g1 : grid0 ? { ...grid0, x0: grid0.x0 * k, y0: grid0.y0 * k, pitchX: grid0.pitchX * k, pitchY: grid0.pitchY * k } : null;
+        if (up.method !== "none" && coarse && Math.min(coarse.cols, coarse.rows) <= 24) {
+          const fine = refineLattice(up.image, coarse);
+          // 细格在原图上必须真的很小（< 9 像素）才算“低清”问题；否则就是一张格子本来就大的图
+          if (fine && fine.cols >= 8 && fine.rows >= 8 && fine.pitchX / k < 9 && fine.pitchY / k < 9) {
+            upNote = `（原图上只检测到 ${grid0?.cols ?? coarse.cols}×${grid0?.rows ?? coarse.rows} 的粗网格，按边缘细分）`;
+            grid0 = { ...fine, x0: fine.x0 / k, y0: fine.y0 / k, pitchX: fine.pitchX / k, pitchY: fine.pitchY / k };
+            readSrc = up.image; rf = k;
+          }
+        }
+        const ratioOk = (a: number, b: number) => { const r = a / b; return r >= 1.6 && Math.abs(r - Math.round(r)) <= 0.12 * r; };
+        if (rf === 1 && g1 && g1.cols >= 8 && g1.rows >= 8 && g1.score >= 0.5 && g1.pitchX / k >= 2.4 && g1.pitchY / k >= 2.4
+          && (!grid0 || (ratioOk(g1.cols, grid0.cols) && ratioOk(g1.rows, grid0.rows)))) {
+          upNote = grid0 ? `（原图上只检测到 ${grid0.cols}×${grid0.rows} 的粗网格）` : "（原图上没检测到网格）";
+          grid0 = { ...g1, x0: g1.x0 / k, y0: g1.y0 / k, pitchX: g1.pitchX / k, pitchY: g1.pitchY / k };
+          readSrc = up.image; rf = k;
+        }
+      } catch (err) { if ((err as Error)?.name === "AbortError") throw err; }
+    }
+  }
+  const readG = (g: GridDetection, o: Parameters<typeof readGrid>[2]): GridReading => {
+    if (rf === 1) return readGrid(src, g, o);
+    const gu = { ...g, x0: g.x0 * rf, y0: g.y0 * rf, pitchX: g.pitchX * rf, pitchY: g.pitchY * rf };
+    const r = readGrid(readSrc, gu, o);
+    r.grid = g;
+    return r;
+  };
+  // 0b) 高清化：图太小 / 太糊时先放大重建，再读抬头 / 图例 / 格内色号（坐标按 hiSrc.width / src.width 缩放）
+  if (enhMode !== "off" && ocrOn) {
+    const t0 = performance.now();
+    try {
+      const larger = !!options.ocrSource && options.ocrSource.width > src.width * 1.2;
+      const base = larger ? options.ocrSource! : src;
+      enhBase = base;
+      const f0 = base.width / src.width;
+      const gBase = grid0 && grid0.cols >= 8 && grid0.rows >= 8 && grid0.score >= 0.45
+        ? { ...grid0, x0: grid0.x0 * f0, y0: grid0.y0 * f0, pitchX: grid0.pitchX * f0, pitchY: grid0.pitchY * f0 } : null;
+      if (options.enhanced) enhanced = options.enhanced;
+      else {
+        const q = assessQuality(base, gBase);
+        // 格子 8–14 像素但边缘锐利的图（多数网上流传的图纸）放大没有收益，实测反而让图例 OCR 掉点：只在很低清 / 明显糊或方块时才放大
+        const worth = q.level === "very-low" || (q.level !== "good" && (q.blur > 0.5 || q.blockiness > 0.55));
+        if (enhMode === "force" || worth) {
+          enhanced = await enhanceImage(base, { grid: gBase, signal, scale: enhMode === "force" && q.level === "good" ? 2 : "auto" });
+        } else {
+          enhanced = { image: base, scale: 1, method: "none", quality: q, ms: Math.round(performance.now() - t0), detail: "图片已足够清晰，未放大" };
+        }
+      }
+      if (enhanced.method !== "none" && enhanced.scale > 1) {
+        hiSrc = enhanced.image;
+        step("enhance", "高清化", "ok", `${enhanced.quality.reasons.join("、") || "图片偏小"} → 放大 ×${Number(enhanced.scale.toFixed(1))}${enhanced.method === "chart-rebuild" ? " 按网格重建" : " 锐化"}，文字更清楚（${((performance.now() - t0) / 1000).toFixed(1)} 秒）`);
+      } else step("enhance", "高清化", "skip", "图片已足够清晰");
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") throw err;
+      enhanced = null;
+      step("enhance", "高清化", "skip", `高清化没有成功（${(err as Error)?.message ?? "未知错误"}），按原图识别`);
+    }
+  }
+
   let header: HeaderInfo | null = null;
   if (ocrOn && options.headerOcr !== false) {
     try {
@@ -61,6 +141,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   let grid: GridDetection | null = grid0;
   if (hasHint) {
     try { grid = detectGrid(src, options.region ?? null, hint); } catch { grid = grid0; }
+    if (rf > 1 && (!grid || grid.score < 0.5)) grid = grid0;
   }
   // 过小 / 置信太低的“网格”多半是插画里的巧合周期，没有尺寸先验时不采信
   if (grid && !hasHint && (grid.cols < 8 || grid.rows < 8 || grid.score < 0.45)) grid = null;
@@ -80,7 +161,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       : "";
     const trim = rulerTrim ? `，已去掉 ${rulerTrim} 圈标尺` : "";
     step("grid", "检测网格", grid.score >= 0.6 && !hdr.includes("不一致") ? "ok" : "warn",
-      `检测到 ${grid.cols}×${grid.rows} 网格（置信 ${grid.score.toFixed(2)}）${forced}${hdr}${trim}`);
+      `检测到 ${grid.cols}×${grid.rows} 网格（置信 ${grid.score.toFixed(2)}）${forced}${hdr}${trim}${rf > 1 ? `，放大 ×${rf} 后才看清格线${upNote}` : ""}`);
   } else {
     step("grid", "检测网格", "fail", "没有找到规则网格；可以框选图纸区域，或手动填写列数和行数");
   }
@@ -124,16 +205,18 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   {
     let r0: GridReading | null = null;
     if (grid && !legend && !header) {
-      try { r0 = readGrid(src, grid, { treatBackgroundAsEmpty: options.treatBackgroundAsEmpty ?? true }); } catch { r0 = null; }
+      try { r0 = readG(grid, { treatBackgroundAsEmpty: options.treatBackgroundAsEmpty ?? true }); } catch { r0 = null; }
     }
-    const plausible = !!r0 && (r0.inkChart || (r0.flatFrac ?? 0) >= 0.55 && (r0.clusters?.length ?? 999) <= 150);
+    // 低清放大后（rf > 1）格子被插值抹糊、JPEG 噪点又把颜色簇推到几百个，纯色占比 / 簇数都不可信；
+    // 但能走到这里说明细格线已经被边缘能量证实（格线上有边缘、半格处没有），这本身就是规整网格的证据
+    const plausible = !!r0 && (rf > 1 || r0.inkChart || (r0.flatFrac ?? 0) >= 0.55 && (r0.clusters?.length ?? 999) <= 150);
     // 只有 1–2 个“色号 + 数字”的零散文字（插画里的字、水印）不足以证明是图纸：没网格、没抬头时，图例至少要 3 色。
     const legendEvidence = !!legend && (!!grid || legend.items.length >= 3);
     const chartLike = !!header || legendEvidence || options.forceCols || options.forceRows || (grid && (r0 ? plausible : true));
     if (!chartLike) {
       const reason = "没有找到规则网格，也没有图例或抬头——这更像一张普通图片，可以用“生成图纸”把它转成拼豆图";
       step("chart", "判断是否图纸", "fail", reason);
-      return { steps, legend: null, grid: null, counts: {}, method: "none", confidence: 0, diff: [], source, isChart: false, notChartReason: reason, header: undefined };
+      return { steps, legend: null, grid: null, counts: {}, method: "none", confidence: 0, diff: [], source, isChart: false, notChartReason: reason, header: undefined, enhance: enhanceSummary() };
     }
   }
 
@@ -142,7 +225,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   let reading: GridReading | null = null;
   if (grid) {
     const legendCodes = legend ? legendCodeList(legend) : null;
-    reading = readGrid(src, grid, {
+    reading = readG(grid, {
       closedPalette: closedOf(legend),
       allowedCodes: options.allowedCodes ?? null,
       treatBackgroundAsEmpty: options.treatBackgroundAsEmpty ?? true,
@@ -174,7 +257,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     } else {
       const t1 = performance.now();
       try {
-        const r = await withDeadline(signal, CELL_BUDGET_MS, (sig) => readCellCodes(src, options.ocrSource ?? src, grid!, reading!, sig));
+        const r = await withDeadline(signal, CELL_BUDGET_MS, (sig) => readCellCodes(src, hiSrc, grid!, reading!, sig));
         // 有可信图例（≥3 色）时，图例就是这张图的色号全集：格内 OCR 读出图例之外的色号（如把 “A1” 读成 “P11”）一律不采用，
         // 否则会把一整簇颜色改名，再被“补全图例”当成漏读色号重复计数。
         if (legend && legend.items.length >= 3) {
@@ -185,7 +268,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
         const nRead = nVotes - r.recovered;
         if (nVotes > 0) {
           const before = reading;
-          const next = readGrid(src, grid, {
+          const next = readG(grid!, {
             allowedCodes: options.allowedCodes ?? null,
             treatBackgroundAsEmpty: options.treatBackgroundAsEmpty ?? true,
             legendCodes: legend ? legendCodeList(legend) : null,
@@ -366,7 +449,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   const paletteWarning = detectPaletteMismatch(legend, reading, cellCodeStats);
   if (paletteWarning) step("palette", "核对色卡", "warn", paletteWarning);
   return {
-    steps, legend, grid: reading, counts, method, confidence, diff, source, cellCodesRead, cellCodeStats,
+    steps, legend, grid: reading, counts, method, confidence, diff, source, cellCodesRead, cellCodeStats, enhance: enhanceSummary(),
     isChart: true, checks, header: header ?? undefined, paletteWarning: paletteWarning ?? undefined
   };
 }

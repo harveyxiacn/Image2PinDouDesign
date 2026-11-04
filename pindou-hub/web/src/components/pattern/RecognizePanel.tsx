@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyzePattern } from "../../lib/recognize/assistant";
 import type { AnalyzeResult, AssistantStep, Rect } from "../../lib/recognize/types";
+import { enhanceInWorker, type EnhanceResult } from "../../lib/enhance";
 import { hubInfo, aiVision } from "../../lib/sync";
 import { loadPixelSource, saveImage } from "../../lib/images";
 import { METHOD_LABEL, totalOf, type Counts, type PatternStatus } from "../../lib/model";
@@ -8,7 +9,8 @@ import { headerChecks } from "../../lib/batch";
 import { normalizeCode } from "../../lib/palette";
 import { DiffNumber, Icon, fmt, navigate, prefersReducedMotion, toast } from "../ui";
 import ImageDrop from "./ImageDrop";
-import AnalysisImage from "./AnalysisImage";
+import AnalysisImage, { type ImageView } from "./AnalysisImage";
+import EnhanceCard, { loadHdMode, saveHdMode, type EnhState, type HdMode } from "./EnhanceCard";
 import AssistantTimeline from "./AssistantTimeline";
 import CountsEditor, { type CheckMap, type DiffMap } from "./CountsEditor";
 import SaveForm, { type SaveValues } from "./SaveForm";
@@ -69,6 +71,18 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const [view, setView] = useState<"orig" | "restored">("orig");
   const [forceChart, setForceChart] = useState(false);
   const [showBg, setShowBg] = useState(true);
+  const [hdMode, setHdModeState] = useState<HdMode>(loadHdMode);
+  const [enh, setEnh] = useState<EnhanceResult | null>(null);
+  const [enhState, setEnhState] = useState<EnhState>(loadHdMode() === "off" ? "off" : "running");
+  const [hdView, setHdView] = useState<ImageView>("hd");
+  const [hdBlob, setHdBlob] = useState<Blob | null>(null);
+  const [hdUrl, setHdUrl] = useState<string | null>(null);
+  const [useHdSource, setUseHdSource] = useState(false);
+  const enhRef = useRef<EnhanceResult | null>(null);
+  const modeRef = useRef<HdMode>(hdMode);
+  modeRef.current = hdMode;
+  const enhTok = useRef(0);
+  const enhCancel = useRef<(() => void) | null>(null);
   const seedRef = useRef(seed);
   seedRef.current = seed;
   const abort = useRef<AbortController | null>(null);
@@ -90,6 +104,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
       const forceRows = Number(opts.rows) > 0 ? Math.round(Number(opts.rows)) : null;
       const res = await analyzePattern(px, {
         region: opts.region, ocr: opts.ocr || opts.cellCodes, legendOcr: opts.ocr, cellCodes: opts.cellCodes, treatBackgroundAsEmpty: opts.bgEmpty, forceCols, forceRows, signal: ctl.signal,
+        enhance: modeRef.current === "off" ? "off" : "auto", enhanced: modeRef.current === "off" ? null : enhRef.current,
         ocrSource: fullRef.current && fullRef.current.width > px.width ? fullRef.current : undefined,
         onProgress: (step) => setSteps((prev) => { const i = prev.findIndex((s) => s.id === step.id); return i < 0 ? [...prev, step] : prev.map((s, k) => (k === i ? step : s)); })
       });
@@ -102,10 +117,39 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
     }
   }, []);
 
+  /** 评估并（必要时）高清化；返回 false 表示已过期（又换了图 / 切了开关） */
+  const prepare = useCallback(async (px: Pixels, tok: number): Promise<boolean> => {
+    enhCancel.current?.();
+    enhRef.current = null; setEnh(null);
+    if (modeRef.current === "off") { setEnhState("off"); return true; }
+    setEnhState("running");
+    const job = enhanceInWorker(px, { scale: "auto" });
+    enhCancel.current = job.cancel;
+    try {
+      const r = await job.promise;
+      if (enhTok.current !== tok) return false;
+      enhRef.current = r; setEnh(r); setEnhState("done");
+      if (r.method !== "none" && r.scale > 1) setHdView("hd");
+    } catch {
+      if (enhTok.current !== tok) return false;
+      setEnhState("error");
+    }
+    return true;
+  }, []);
+
+  const setHdMode = (m: HdMode) => {
+    if (m === hdMode) return;
+    setHdModeState(m); modeRef.current = m; saveHdMode(m);
+    const px = pixelsRef.current;
+    if (!px || seedRef.current) return;
+    const tok = ++enhTok.current;
+    void prepare(px, tok).then((ok) => { if (ok) void run({ region, ocr, cellCodes, bgEmpty, cols, rows }); });
+  };
+
   // 选图后：显示、解码、自动识别一次
   useEffect(() => {
     abort.current?.abort();
-    setResult(null); setSteps([]); setRegion(null); setSelecting(false); setCols(""); setRows(""); setError(""); setPixels(null); pixelsRef.current = null; fullRef.current = null; setAi(null); setFocus(null); setView("orig"); setForceChart(false); setSavedOk(false);
+    setResult(null); setSteps([]); setRegion(null); setSelecting(false); setCols(""); setRows(""); setError(""); setPixels(null); pixelsRef.current = null; fullRef.current = null; setAi(null); setFocus(null); setView("orig"); setForceChart(false); setSavedOk(false); enhCancel.current?.(); enhRef.current = null; setEnh(null); setHdBlob(null); setUseHdSource(false); setHdView("hd"); const tok = ++enhTok.current; setEnhState(modeRef.current === "off" ? "off" : "running");
     if (!file) { setUrl(null); return; }
     const u = URL.createObjectURL(file);
     setUrl(u);
@@ -118,11 +162,41 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
       pixelsRef.current = px; setPixels(px);
       const sd = seedRef.current;
       if (sd) { setSteps(sd.result.steps); setResult(sd.result); setCounts({ ...sd.result.counts }); setForceChart(true); }
-      else void run({ region: null, ocr, cellCodes, bgEmpty, cols: "", rows: "" });
+      else {
+        const ok = await prepare(px, tok);
+        if (ok && alive) void run({ region: null, ocr, cellCodes, bgEmpty, cols: "", rows: "" });
+      }
     }).catch(() => alive && setError("这张图片无法解码，请换一张"));
-    return () => { alive = false; URL.revokeObjectURL(u); };
+    return () => { alive = false; enhCancel.current?.(); URL.revokeObjectURL(u); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file]);
+
+  const hdApplied = !!enh && enh.method !== "none" && enh.scale > 1 && hdMode === "auto";
+  useEffect(() => {
+    setHdBlob(null);
+    if (!hdApplied || !enh) return;
+    let alive = true;
+    const { width, height, data } = enh.image;
+    const c = document.createElement("canvas");
+    c.width = width; c.height = height;
+    c.getContext("2d")!.putImageData(new ImageData(data as unknown as ImageData["data"], width, height), 0, 0);
+    c.toBlob((b) => { if (alive && b) setHdBlob(b); }, "image/png");
+    return () => { alive = false; };
+  }, [enh, hdApplied]);
+  useEffect(() => {
+    if (!hdBlob) { setHdUrl(null); return; }
+    const u = URL.createObjectURL(hdBlob);
+    setHdUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [hdBlob]);
+  const downloadHd = () => {
+    if (!hdBlob) { toast("高清图还在生成，请稍等"); return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(hdBlob);
+    a.download = `${(file?.name || "图纸").replace(/\.[^.]+$/, "")}-高清.png`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  };
 
   const rerun = () => void run({ region, ocr, cellCodes, bgEmpty, cols, rows });
 
@@ -153,7 +227,8 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
     if (!file) return;
     setSaving(true);
     try {
-      const meta = await saveImage(file, file.name || values.name, "source");
+      const useHd = useHdSource && hdBlob;
+      const meta = useHd ? await saveImage(hdBlob, `${(file.name || values.name).replace(/\.[^.]+$/, "")}-高清.png`, "source") : await saveImage(file, file.name || values.name, "source");
       const heavy = !result || result.method === "none" || editedHeavily(result.counts, counts);
       const grid = !heavy ? result?.grid : null;
       const method = heavy ? "manual" : result!.method === "none" ? "manual" : result!.method;
@@ -193,7 +268,9 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
               <MatrixView matrix={matrix} width={result.grid.grid.cols} height={result.grid.grid.rows} focusCode={focus} />
               <p className="meta">按识别结果重新画出的拼豆图。对照原图看，哪里颜色不对就是识别错的地方。</p>
             </>
-          ) : url && pixels ? <AnalysisImage url={url} srcW={pixels.width} srcH={pixels.height} region={region} onRegion={setRegion} selecting={selecting} grid={notChart ? null : result?.grid?.grid ?? null} matrix={notChart ? null : matrix} focusCode={focus} bgMask={notChart ? null : result?.grid?.backgroundMask ?? null} showBg={showBg} /> : url ? <img src={url} alt="上传的图纸" /> : null}
+          ) : url && pixels ? <AnalysisImage url={url} srcW={pixels.width} srcH={pixels.height} region={region} onRegion={setRegion} selecting={selecting} grid={notChart ? null : result?.grid?.grid ?? null} matrix={notChart ? null : matrix} focusCode={focus} bgMask={notChart ? null : result?.grid?.backgroundMask ?? null} showBg={showBg}
+            pixels={pixels} reading={notChart ? null : result?.grid ?? null} checks={result?.checks} enhancedUrl={hdApplied ? hdUrl : null} view={hdView} /> : url ? <img src={url} alt="上传的图纸" /> : null}
+          {!seed ? <EnhanceCard mode={hdMode} onMode={setHdMode} state={enhState} result={enh} applied={hdApplied && !!hdUrl} view={hdView} onView={setHdView} onDownload={downloadHd} disabled={running} /> : null}
           {bgCount > 0 && !notChart && view === "orig" ? (
             <label className="pt-check"><input type="checkbox" checked={showBg} onChange={(e) => setShowBg(e.target.checked)} />显示去掉的背景（{fmt(bgCount)} 格，已套灰）</label>
           ) : null}
@@ -280,6 +357,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
 
         {result && !notChart ? (
           <div className="panel panel-pad">
+            {hdBlob ? <label className="pt-check" style={{ marginBottom: 8 }}><input type="checkbox" checked={useHdSource} onChange={(e) => setUseHdSource(e.target.checked)} />用高清版作为原图（图库里保存放大后的图）</label> : null}
             <SaveForm defaultName={seed?.name || (file.name || "").replace(/\.[^.]+$/, "") || "新图纸"} defaultTags={seed?.tags} defaultStatus={seed?.status} busy={saving} success={savedOk} disabled={!Object.keys(counts).length} onSave={save} />
           </div>
         ) : null}

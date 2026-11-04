@@ -1,5 +1,6 @@
 // 图纸识别（“豆探”助手）对外接口。UI 只依赖这里的类型和 assistant.ts 的 analyzePattern()。
 import type { PixelSource } from "@engine/types";
+import type { EnhanceResult, EnhanceSummary } from "../enhance";
 
 export type Counts = Record<string, number>;
 
@@ -111,6 +112,10 @@ export type AnalyzeOptions = {
   forceRows?: number | null;
   /** 同一张图的更高分辨率副本（坐标按 ocrSource.width / src.width 缩放），图例 OCR 用它更清楚 */
   ocrSource?: PixelSource;
+  /** 高清化：auto（默认，图太糊 / 太小时自动放大后再读颜色和文字）、off、force */
+  enhance?: "auto" | "off" | "force";
+  /** 界面已经算好的高清化结果（坐标按 image.width / src.width 缩放），传了就不再重复计算 */
+  enhanced?: EnhanceResult | null;
   onProgress?: (step: AssistantStep) => void;
   signal?: AbortSignal;
 };
@@ -141,6 +146,8 @@ export type AnalyzeResult = {
   header?: { cols: number | null; rows: number | null; colors: number | null; total: number | null };
   /** 色号体系可能不是 MARD（图例色块颜色与 MARD 色卡大面积不符）时的提示 */
   paletteWarning?: string;
+  /** 识别前是否做了高清化、怎么做的 */
+  enhance?: EnhanceSummary;
 };
 
 export type { PixelSource };

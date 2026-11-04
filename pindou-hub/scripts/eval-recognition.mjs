@@ -2,6 +2,8 @@
 // 识别引擎评测：遍历图纸文件夹（默认 pindou-hub/拼豆图/），逐张跑 analyzePattern（图例 + 格内色号 OCR 全开，
 // ocrSource = 原图），与 web/src/test/chart-truth.json 对照，打印表格与汇总，并把 JSON 写到 $TEMP/pindou-eval.json。
 // 用法（在 pindou-hub 目录）：node scripts/eval-recognition.mjs [目录] [--only 关键字] [--truth 路径] [--out 路径] [--no-ocr] [--summarize 旧结果.json]
+//       [--lowres F]  把每张图按面积平均缩到 F 倍（如 0.5 / 0.33）再以 JPEG 质量 60 重新编码，模拟“上传的是低清图”
+//       [--enhance off|auto|force]  高清化模式（默认 auto）
 // 图片和 truth 都不进仓库；本脚本经 vite 的 ssrLoadModule 直接加载 TS 源码（走同一套 @engine 别名）。
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -114,7 +116,7 @@ function table(results) {
   return [head, ...rows].map((r) => r.map((c, i) => pad(c, widths[i])).join("  ")).join("\n");
 }
 
-export async function evaluate(mods, { dir, truth, only, ocr = true, log = console.log }) {
+export async function evaluate(mods, { dir, truth, only, ocr = true, lowres = 0, enhance = "auto", log = console.log }) {
   const backend = mods.createNodeOcrBackend?.();
   if (backend && mods.setOcrBackend) mods.setOcrBackend(backend);
   const jpeg = createRequire(join(HUB, "package.json"))("jpeg-js");
@@ -126,15 +128,22 @@ export async function evaluate(mods, { dir, truth, only, ocr = true, log = conso
     const t0 = performance.now();
     try {
       const buf = readFileSync(file);
-      const full = extname(file).toLowerCase() === ".png"
+      const full0 = extname(file).toLowerCase() === ".png"
         ? mods.decodePng(buf)
         : (() => { const j = jpeg.decode(buf, { useTArray: true, formatAsRGBA: true }); return { width: j.width, height: j.height, data: new Uint8ClampedArray(j.data.buffer, j.data.byteOffset, j.data.length) }; })();
+      let full = full0;
+      if (lowres > 0 && lowres < 1) {
+        const small = mods.downscaleArea(full0, Math.max(8, Math.round(Math.max(full0.width, full0.height) * lowres)));
+        const enc = jpeg.encode({ width: small.width, height: small.height, data: Buffer.from(small.data.buffer, small.data.byteOffset, small.data.length) }, 60);
+        const j = jpeg.decode(enc.data, { useTArray: true, formatAsRGBA: true });
+        full = { width: j.width, height: j.height, data: new Uint8ClampedArray(j.data.buffer, j.data.byteOffset, j.data.length) };
+      }
       const src = Math.max(full.width, full.height) > 2400 ? mods.downscaleArea(full, 2400) : full;
       rec.width = full.width; rec.height = full.height;
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), PER_IMAGE_TIMEOUT_MS);
       let res;
-      try { res = await mods.analyzePattern(src, { ocr, ocrSource: src === full ? undefined : full, signal: ac.signal }); }
+      try { res = await mods.analyzePattern(src, { ocr, enhance, ocrSource: src === full ? undefined : full, signal: ac.signal }); }
       finally { clearTimeout(timer); }
       rec.ms = Math.round(performance.now() - t0);
       rec.cols = res.grid?.grid.cols ?? null;
@@ -156,6 +165,7 @@ export async function evaluate(mods, { dir, truth, only, ocr = true, log = conso
       rec.bgCells = res.grid?.backgroundCells ?? null;
       rec.bgAssigned = res.grid?.backgroundAssigned ?? null;
       rec.checks = res.checks ? `${res.checks.filter((c) => c.status === "ok").length}/${res.checks.filter((c) => c.legend !== null).length}` : null;
+      rec.enhance = res.enhance ? `${res.enhance.method} x${Number(res.enhance.scale.toFixed(2))} ${res.enhance.level}` : null;
       rec.steps = res.steps.map((s) => `${s.status} ${s.label}: ${s.detail}`);
     } catch (err) {
       rec.ms = Math.round(performance.now() - t0);
@@ -195,7 +205,7 @@ function pathToFileUrl(p) { return new URL(`file:///${p.replaceAll("\\", "/").re
 async function main() {
   const args = process.argv.slice(2);
   const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
-  const dir = resolve(args.find((a, i) => !a.startsWith("--") && !["--only", "--truth", "--out", "--summarize"].includes(args[i - 1])) ?? join(HUB, "拼豆图"));
+  const dir = resolve(args.find((a, i) => !a.startsWith("--") && !["--only", "--truth", "--out", "--summarize", "--lowres", "--enhance"].includes(args[i - 1])) ?? join(HUB, "拼豆图"));
   const truthPath = opt("--truth") ?? join(HUB, "web/src/test/chart-truth.json");
   const truth = loadTruth(truthPath);
   const out = opt("--out") ?? join(tmpdir(), "pindou-eval.json");
@@ -207,7 +217,7 @@ async function main() {
       results = JSON.parse(readFileSync(opt("--summarize"), "utf8"));
       for (const r of results) { r.truth = findTruth(truth, r.name); r.metrics = score(mods, r, r.truth); }
     } else if (args.includes("--single")) {
-      results = await evaluate(mods, { dir, truth, only: opt("--only"), ocr: !args.includes("--no-ocr") });
+      results = await evaluate(mods, { dir, truth, only: opt("--only"), ocr: !args.includes("--no-ocr"), lowres: Number(opt("--lowres") ?? 0), enhance: opt("--enhance") ?? "auto" });
     } else {
       // 每张图一个子进程：tesseract 的 wasm 在个别输入上会直接让 node 进程崩溃，隔离后只丢一张，其余照常
       results = [];
@@ -215,7 +225,7 @@ async function main() {
         const rel = relative(dir, file).replaceAll("\\", "/");
         if (opt("--only") && !rel.includes(opt("--only"))) continue;
         const tmp = join(tmpdir(), `pindou-eval-one-${process.pid}.json`);
-        const run = (extra) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), dir, "--single", "--only", rel, "--truth", truthPath, "--out", tmp, ...extra], { encoding: "utf8", timeout: 120_000 });
+        const run = (extra) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), dir, "--single", "--only", rel, "--truth", truthPath, "--out", tmp, ...(opt("--lowres") ? ["--lowres", opt("--lowres")] : []), ...(opt("--enhance") ? ["--enhance", opt("--enhance")] : []), ...extra], { encoding: "utf8", timeout: 120_000 });
         let r = run([]);
         let one = null;
         try { one = JSON.parse(readFileSync(tmp, "utf8")).find((x) => x.name === rel) ?? null; } catch { one = null; }
