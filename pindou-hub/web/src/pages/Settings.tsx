@@ -7,7 +7,7 @@ import { hubInfo, localPairInfo, pairWithHub, syncNow, unpair, useSyncState } fr
 import { PALETTE_KITS } from "../lib/palette";
 import type { CollectionName } from "../lib/model";
 import { parseBackup } from "../lib/stockview";
-import { downloadText } from "../components/stock/download";
+import { copyText, downloadText } from "../components/stock/download";
 import { readTheme, saveTheme, type ThemePref } from "../components/stock/theme";
 import "./Settings.css";
 
@@ -48,6 +48,18 @@ export default function Settings() {
   );
 }
 
+function CopyBtn({ text, label }: { text: string; label: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button type="button" className="btn btn-sm btn-ghost set-copy" aria-label={`复制${label}`}
+      onClick={async () => { const ok = await copyText(text); toast(ok ? `已复制${label}` : "复制失败，请手动选择文字"); if (ok) { setDone(true); window.setTimeout(() => setDone(false), 1500); } }}>
+      <Icon name={done ? "check" : "copy"} size={16} />{done ? "已复制" : "复制"}
+    </button>
+  );
+}
+
+const PHASE_TEXT: Record<string, string> = { idle: "已同步", syncing: "同步中…", error: "同步失败", offline: "设备离线", unpaired: "未连接" };
+
 function SyncSection({ local, info, qr, paired }: { local: Local; info: Info; qr: string; paired: boolean }) {
   const data = useData();
   const sync = useSyncState();
@@ -73,7 +85,7 @@ function SyncSection({ local, info, qr, paired }: { local: Local; info: Info; qr
             <strong>这台电脑就是 Hub</strong>
             <div><div className="label">配对码</div><div className="set-pair" aria-label={`配对码 ${local.pairCode.split("").join(" ")}`}>{local.pairCode}</div></div>
             <div className="meta">手机打开下面的地址（或扫码），输入配对码：</div>
-            <div>{local.addresses.map((a) => <code key={a.url} className="code set-addr">{a.url} <span className="meta">{a.name}</span></code>)}</div>
+            <div>{local.addresses.map((a) => <div key={a.url} className="row set-addr-row"><code className="code set-addr">{a.url} <span className="meta">{a.name}</span></code><CopyBtn text={a.url} label="Hub 地址" /></div>)}</div>
           </div>
         </div>
       ) : !paired ? (
@@ -90,9 +102,14 @@ function SyncSection({ local, info, qr, paired }: { local: Local; info: Info; qr
 
       {paired ? (
         <div className="panel panel-pad stack" style={{ marginTop: local ? 12 : 0 }}>
+          <div className={`set-status ${sync.phase}`} role="status" aria-live="polite">
+            <span className={`sync-dot ${sync.phase}`} aria-hidden="true" />
+            <div className="set-status-t"><strong>{PHASE_TEXT[sync.phase] ?? sync.phase}</strong>{sync.message && sync.phase !== "idle" ? <span className="meta">{sync.message}</span> : <span className="meta">上次同步 {fmtTime(sync.lastSyncAt || data.device.lastSyncAt)}</span>}</div>
+            {sync.phase === "error" || sync.phase === "offline" ? <button className="btn btn-sm btn-iron" onClick={() => void syncNow()}><Icon name="sync" />重试</button> : null}
+          </div>
           <div className="set-kv">
-            <span>已连接</span><span className="row"><span className={`sync-dot ${sync.phase}`} />{sync.hubName || info?.name || data.device.hubUrl}{sync.phase === "error" || sync.phase === "offline" ? <span className="chip chip-iron">{sync.message || sync.phase}</span> : null}</span>
-            <span>地址</span><span className="code">{data.device.hubUrl}</span>
+            <span>已连接</span><span>{sync.hubName || info?.name || data.device.hubUrl}</span>
+            <span>地址</span><span className="row set-addr-row"><span className="code set-addr">{data.device.hubUrl}</span><CopyBtn text={data.device.hubUrl} label="Hub 地址" /></span>
             <span>上次同步</span><span>{fmtTime(sync.lastSyncAt || data.device.lastSyncAt)}</span>
             <span>待上传</span><span className="num">{data.outbox} 条</span>
           </div>

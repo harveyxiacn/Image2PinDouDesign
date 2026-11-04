@@ -1,0 +1,39 @@
+/* 批量导入（前缀 bt-），仅使用设计令牌 */
+.bt-drop.compact { grid-auto-flow: row; padding: 14px 16px; }
+.bt-drop { cursor: default; }
+.bt-drop:hover { border-color: var(--rule-strong); background-color: transparent; }
+.bt-drop[data-over="true"] { border-color: var(--iron); background-color: var(--iron-wash); }
+.bt-pick { justify-content: center; flex-wrap: wrap; }
+.bt-head { align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.bt-sum { margin-top: 2px; }
+.bt-bar { margin: 0 12px; }
+.bt-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.bt-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--rule-soft); animation: bt-in 220ms var(--ease) both; }
+.bt-item[data-state="running"] { background: var(--paper-sunk); }
+.bt-item[data-saved="true"] .bt-name { color: var(--ink-3); }
+.bt-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.bt-title { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.bt-name { overflow-wrap: anywhere; font-weight: 600; }
+.bt-title .chip svg { vertical-align: -2px; }
+.bt-detail { overflow-wrap: anywhere; }
+.bt-why { color: var(--ink-2); }
+.bt-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.bt-tag { display: block; }
+.bt-tag .input { width: 112px; height: 32px; }
+.bt-foot { display: flex; align-items: center; gap: 10px 12px; padding: 12px; border-top: 1px solid var(--rule-soft); flex-wrap: wrap; }
+.bt-done { padding: 0 12px 12px; }
+.bt-item-bar { margin-top: 2px; }
+@media (max-width: 560px) {
+  .bt-item { grid-template-columns: minmax(0, 1fr); }
+  .bt-tools { justify-content: flex-start; }
+  .bt-tag { flex: 1 1 140px; }
+  .bt-tag .input { width: 100%; }
+  .bt-foot .btn-iron { flex: 1 1 100%; }
+}
+@media (pointer: coarse) {
+  .bt-tools .btn-sm, .bt-tag .input { min-height: 44px; }
+  .bt-x { min-width: 44px; }
+}
+@keyframes bt-in { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .bt-item { animation: none; } }
+.bt-done a { color: var(--iron-ink); font-weight: 500; }

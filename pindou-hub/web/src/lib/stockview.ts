@@ -1,6 +1,8 @@
 // 库存相关页面用的纯函数：粘贴解析、流水分组、采购文本、入库流水生成。不碰存储，便于测试。
 import type { Counts, Pattern, Txn, TxnKind } from "./model";
-import { uid } from "./model";
+import { totalOf, uid } from "./model";
+import type { PatternStatus } from "./model";
+import { compareCodes } from "./inventory";
 
 export type Normalizer = (input: string) => string | null;
 
@@ -80,7 +82,7 @@ export function matchesQuery(code: string, nameZh: string | undefined, query: st
 
 // ---------- 记录分组：按天 → 按批次 ----------
 export type LedgerGroup =
-  | { type: "txns"; key: string; at: number; kind: TxnKind | "mixed"; note: string; txns: Txn[]; delta: number; codes: number }
+  | { type: "txns"; key: string; at: number; kind: TxnKind | "mixed"; note: string; txns: Txn[]; delta: number; codes: number; undone?: boolean }
   | { type: "pattern"; key: string; at: number; pattern: Pattern };
 export type LedgerDay = { day: string; label: string; groups: LedgerGroup[] };
 
@@ -97,14 +99,15 @@ export function dayLabel(ms: number, now = Date.now()): string {
   return `${d.getMonth() + 1}月${d.getDate()}日 周${w}`;
 }
 
-export type LedgerFilter = { kinds?: Array<TxnKind | "pattern">; code?: string };
+/** reveal：刚撤销（已软删除）但仍要留在原位显示“已撤销 · 恢复”的流水 id。 */
+export type LedgerFilter = { kinds?: Array<TxnKind | "pattern">; code?: string; reveal?: Set<string> };
 
 export function groupLedger(txns: Txn[], patterns: Pattern[], filter: LedgerFilter = {}, now = Date.now()): LedgerDay[] {
   const kinds = filter.kinds && filter.kinds.length ? new Set(filter.kinds) : null;
   const code = filter.code?.trim().toUpperCase();
   const byKey = new Map<string, Txn[]>();
   for (const txn of txns) {
-    if (txn.deleted) continue;
+    if (txn.deleted && !filter.reveal?.has(txn.id)) continue;
     if (kinds && !kinds.has(txn.kind)) continue;
     // 批次按“批次号”聚合；无批次号的单条流水各自成组
     const key = txn.batchId ? `b:${txn.batchId}` : `t:${txn.id}`;
@@ -119,7 +122,8 @@ export function groupLedger(txns: Txn[], patterns: Pattern[], filter: LedgerFilt
     const note = list.find((t) => t.note)?.note ?? "";
     groups.push({
       type: "txns", key, at: Math.max(...list.map((t) => t.at)), kind: kindSet.size === 1 ? list[0].kind : "mixed",
-      note, txns: list, delta: list.reduce((a, t) => a + t.delta, 0), codes: new Set(list.map((t) => t.code)).size
+      note, txns: list, delta: list.reduce((a, t) => a + t.delta, 0), codes: new Set(list.map((t) => t.code)).size,
+      undone: list.every((t) => t.deleted) || undefined
     });
   }
   if (!code && (!kinds || kinds.has("pattern"))) {
@@ -175,4 +179,115 @@ export function shortCodes(demand: Counts, stock: Counts): Set<string> {
   const out = new Set<string>();
   for (const [code, need] of Object.entries(demand)) if (need > Math.max(0, stock[code] ?? 0)) out.add(code);
   return out;
+}
+
+
+// ---------- 合集（按标签分组） ----------
+export type Collection = {
+  /** 标签；"" 表示未分组 */
+  tag: string;
+  patterns: Pattern[];
+  count: number;
+  /** 整套所有图纸用豆合计（每份用量 × 份数） */
+  totalBeads: number;
+  /** 整套用到的不同色号数 */
+  colors: number;
+  /** 未完成的图纸整套做完时，库存不够的色号数 */
+  missingColors: number;
+  /** 上述缺口合计颗数 */
+  shortBeads: number;
+  /** 已在“计划做 / 制作中”的图纸数 */
+  plannedCount: number;
+  /** 库存覆盖整套需求的比例 0–1 */
+  coverage: number;
+};
+
+export const UNTAGGED = "";
+
+function patternWeight(p: Pattern): Counts {
+  const copies = Math.max(1, p.copies || 1);
+  const out: Counts = {};
+  for (const [code, n] of Object.entries(p.counts)) if (n > 0) out[code] = n * copies;
+  return out;
+}
+
+/** 按标签分合集。一张图纸有几个标签就出现在几个合集里；没有标签的归 "" 合集（includeUntagged 时放最后）。 */
+export function collectionsByTag(patterns: Pattern[], stock: Counts, includeUntagged = false): Collection[] {
+  const groups = new Map<string, Pattern[]>();
+  for (const p of patterns) {
+    if (p.deleted) continue;
+    const tags = p.tags.length ? p.tags : [UNTAGGED];
+    for (const t of tags) {
+      if (t === UNTAGGED && !includeUntagged) continue;
+      const list = groups.get(t);
+      if (list) list.push(p); else groups.set(t, [p]);
+    }
+  }
+  const out: Collection[] = [];
+  for (const [tag, list] of groups) {
+    const demand: Counts = {};
+    const all = new Set<string>();
+    let totalBeads = 0;
+    for (const p of list) {
+      const w = patternWeight(p);
+      totalBeads += Object.values(w).reduce((a, v) => a + v, 0);
+      for (const code of Object.keys(w)) all.add(code);
+      if (p.status === "done" || p.consumed) continue;
+      for (const [code, n] of Object.entries(w)) demand[code] = (demand[code] ?? 0) + n;
+    }
+    let missingColors = 0, shortBeads = 0, need = 0, covered = 0;
+    for (const [code, n] of Object.entries(demand)) {
+      const have = Math.max(0, stock[code] ?? 0);
+      need += n; covered += Math.min(have, n);
+      if (n > have) { missingColors++; shortBeads += n - have; }
+    }
+    out.push({
+      tag, patterns: list, count: list.length, totalBeads, colors: all.size, missingColors, shortBeads,
+      plannedCount: list.filter((p) => p.status === "planned" || p.status === "making").length,
+      coverage: need > 0 ? covered / need : 1
+    });
+  }
+  return out.sort((a, b) => (a.tag === UNTAGGED ? 1 : b.tag === UNTAGGED ? -1 : b.count - a.count || a.tag.localeCompare(b.tag, "zh")));
+}
+
+// ---------- 色号用量：需求 vs 库存 ----------
+export type UsageRow = { code: string; need: number; have: number; /** 缺口 */ short: number; /** 库存已覆盖的部分 */ covered: number };
+export type Usage = { rows: UsageRow[]; rest: { codes: number; need: number; short: number }; max: number; totalCodes: number };
+
+/** 需求最多的前 n 个色号，附库存与缺口；其余折叠成 rest。 */
+export function topUsage(demand: Counts, stock: Counts, n = 10): Usage {
+  const all: UsageRow[] = Object.entries(demand).filter(([, need]) => need > 0).map(([code, need]) => {
+    const have = Math.max(0, stock[code] ?? 0);
+    return { code, need, have, short: Math.max(0, need - have), covered: Math.min(need, have) };
+  }).sort((a, b) => b.need - a.need || compareCodes(a.code, b.code));
+  const rows = all.slice(0, Math.max(0, n));
+  const rest = all.slice(rows.length);
+  return {
+    rows, max: rows.reduce((m, r) => Math.max(m, r.need, r.have), 0), totalCodes: all.length,
+    rest: { codes: rest.length, need: rest.reduce((a, r) => a + r.need, 0), short: rest.reduce((a, r) => a + r.short, 0) }
+  };
+}
+
+// ---------- 批量编辑（纯函数，返回新对象；updatedAt 保证大于旧值） ----------
+function stamp(p: Pattern, now: number): number { return Math.max(now, p.updatedAt + 1); }
+export function withStatus(p: Pattern, status: PatternStatus, now = Date.now()): Pattern {
+  return p.status === status ? p : { ...p, status, updatedAt: stamp(p, now) };
+}
+export function withTag(p: Pattern, tag: string, now = Date.now()): Pattern {
+  const t = tag.trim();
+  return !t || p.tags.includes(t) ? p : { ...p, tags: [...p.tags, t], updatedAt: stamp(p, now) };
+}
+/** 顺序列表中 a、b 两项之间（含）的 id，Shift+点击范围选择用。 */
+export function rangeIds(order: string[], a: string, b: string): string[] {
+  const i = order.indexOf(a), j = order.indexOf(b);
+  if (i < 0 || j < 0) return j >= 0 ? [order[j]] : [];
+  return order.slice(Math.min(i, j), Math.max(i, j) + 1);
+}
+/** “只算某个标签”：返回要排除的图纸 id（不带该标签的）。 */
+export function excludeForTag(patterns: Pattern[], tag: string): Set<string> {
+  return new Set(tag ? patterns.filter((p) => !p.tags.includes(tag)).map((p) => p.id) : []);
+}
+/** 一个合集里要“整套加入计划”的图纸：还没在计划里、也没完成的。 */
+export function planCandidates(patterns: Pattern[]): Pattern[] {
+  return patterns.filter((p) => !p.deleted && p.status === "idea" && !p.consumed && totalOf(p.counts) > 0);
 }

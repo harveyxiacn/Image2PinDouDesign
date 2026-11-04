@@ -2,11 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { MARD_PALETTE } from "@engine/palette";
-import { analyzePattern } from "../lib/recognize/assistant";
+import { analyzePattern, buildChipPalette } from "../lib/recognize/assistant";
 import { detectGrid, readGrid } from "../lib/recognize/grid";
-import { chipStack, findChips, parseChipTexts, parseLegendText, parseLegendWords } from "../lib/recognize/legend";
+import type { Chip } from "../lib/recognize/legend";
+import { assignBelowBands, chipStack, findChips, normalizeCode, parseChipTexts, parseHeaderText, parseLegendText, parseLegendWords } from "../lib/recognize/legend";
 import { setOcrBackend, terminateOcr } from "../lib/recognize/ocr";
-import { buildChart, createNodeOcrBackend, decodePng, downscaleArea, driftColors, gradientImage, TEST_CODES } from "./fixtures";
+import { buildChart, buildRulerChart, createNodeOcrBackend, decodePng, downscaleArea, driftColors, gradientImage, illustrationImage, TEST_CODES } from "./fixtures";
 
 const VALID = new Set(MARD_PALETTE.map((c) => c.code));
 
@@ -112,6 +113,88 @@ describe("analyzePattern (无 OCR)", () => {
   });
 });
 
+describe("标尺剥离 / 抬头尺寸强制", () => {
+  it.each([
+    ["blue", false, 18],
+    ["white", true, 20],
+    ["blue", true, 26.5]
+  ] as const)("四周带数字标尺（%s 底，下/右标尺倒数=%s，格距 %s）：标尺不算格子", async (ruler, reversed, pitch) => {
+    const chart = buildRulerChart({ cols: 40, rows: 30, pitch, ruler, reversed, boldEvery: 10, emptyFrac: 0.15, seed: 4 });
+    const res = await analyzePattern(chart.src, { ocr: false, allowedCodes: TEST_CODES });
+    expect(res.grid?.grid.cols).toBe(40);
+    expect(res.grid?.grid.rows).toBe(30);
+    expect(res.counts).toEqual(chart.counts);
+    expect(res.steps.find((s) => s.id === "grid")?.detail).toContain("标尺");
+  });
+
+  it("没有标尺的图不会被误剥（边缘一整行同色 + 有字的豆子）", async () => {
+    const chart = buildChart({ cols: 36, rows: 24, pitch: 16, boldEvery: 6, textBlobs: true, solidBorder: true, emptyFrac: 0.1, seed: 8, titleBand: false, legendBand: false });
+    const res = await analyzePattern(chart.src, { ocr: false, allowedCodes: TEST_CODES });
+    expect(res.grid?.grid.cols).toBe(36);
+    expect(res.grid?.grid.rows).toBe(24);
+  });
+
+  it("抬头给出尺寸：线条很浅、图形只占一角时，把检测到的小块网格延伸到抬头尺寸", () => {
+    const chart = buildChart({ cols: 40, rows: 30, pitch: 16, lineColor: 248, beadRect: { c0: 12, r0: 8, c1: 27, r1: 21 }, emptyFrac: 0.1, seed: 5, titleBand: false, legendBand: false });
+    const auto = detectGrid(chart.src);
+    expect(auto && auto.cols * auto.rows).toBeLessThan(40 * 30 * 0.5); // 自动检测只找到有豆子的一块
+    const g = detectGrid(chart.src, null, { cols: 40, rows: 30 });
+    expect(g?.cols).toBe(40);
+    expect(g?.rows).toBe(30);
+    expect(Math.abs(g!.x0 - chart.x0)).toBeLessThan(2);
+    expect(Math.abs(g!.y0 - chart.y0)).toBeLessThan(2);
+  });
+});
+
+describe("闭集色板 / 图例色块几何", () => {
+  it("闭集：图例色板外的浅色幻影色号不会冒出来；白格没有字仍是空格", () => {
+    // 3 种豆子 + 一小撮浅粉色（3 格）：开放匹配会给它一个色卡里的浅粉色号，闭集只能落在色板里
+    const chart = buildChart({ cols: 30, rows: 20, pitch: 14, boldEvery: 5, codes: ["A4", "B5", "H7"], emptyFrac: 0.1, seed: 41, titleBand: false, legendBand: false });
+    const { data, width } = chart.src;
+    for (let cell = 3; cell <= 5; cell += 1) {
+      for (let y = chart.y0 + 3 * 14 + 1; y < chart.y0 + 4 * 14 - 1; y += 1) for (let x = chart.x0 + cell * 14 + 1; x < chart.x0 + (cell + 1) * 14 - 1; x += 1) { const i = (y * width + x) * 4; data[i] = 248; data[i + 1] = 214; data[i + 2] = 226; }
+    }
+    const g = detectGrid(chart.src)!;
+    const colors: Record<string, { r: number; g: number; b: number }> = {};
+    for (const c of ["A4", "B5", "H7"]) { const p = MARD_PALETTE.find((x) => x.code === c)!; colors[c] = p.rgb; }
+    const closed = readGrid(chart.src, g, { legendCodes: ["A4", "B5", "H7"], legendColors: colors, closedPalette: true });
+    const open = readGrid(chart.src, g, { legendCodes: ["A4", "B5", "H7"], legendColors: colors });
+    expect(Object.keys(open.counts).length).toBeGreaterThan(3); // 开放匹配：给浅粉色的 3 格另起一个色号
+    expect(Object.keys(closed.counts).sort()).toEqual(["A4", "B5", "H7"]);
+  });
+
+  it("buildChipPalette：文字色号与色块颜色吻合则采用，对不上按颜色找最近、且不重复占用色号", () => {
+    const rgbOf = (code: string) => MARD_PALETTE.find((c) => c.code === code)!.rgb;
+    const mk = (code: string) => ({ ...rgbOf(code) });
+    const chips = [mk("A4"), mk("B5"), mk("H7"), mk("D20")];
+    const perChip = new Map<unknown, { code: string | null; count: number | null }>([
+      [chips[0], { code: "A4", count: 12 }], // 吻合
+      [chips[1], { code: "C7", count: 30 }], // 文字读错（C7 与蓝绿色块差很远）→ 按颜色改回 B5，保留数量
+      [chips[2], { code: null, count: null }] // 没读出文字 → 按颜色 H7
+    ]);
+    const pal = buildChipPalette(chips, perChip);
+    expect(pal.map((p) => p.code)).toEqual(["A4", "B5", "H7", "D20"]);
+    expect(pal[1].count).toBe(30);
+    expect(pal[2].guessed).toBe(true);
+    expect(new Set(pal.map((p) => p.code)).size).toBe(pal.length);
+  });
+
+  it("数量印在色块下方：assignBelowBands 给每块算出下方条带，最后一排用图底，同排下面还有色块则用到下一排之前", () => {
+    const chip = (x: number, y: number): Chip => ({ x, y, width: 40, height: 30, r: 200, g: 100, b: 50 });
+    const chips = [chip(10, 10), chip(70, 10), chip(130, 10), chip(10, 100), chip(70, 100)];
+    assignBelowBands(chips, 160);
+    // 第一排下方到第二排之前 60px 空隙 → 封顶 0.85×30 ≈ 26
+    expect(chips[0].below).toBe(26);
+    expect(chips[2].below).toBe(26); // 第二排没有色块在它正下方，但仍有 130+ 的空隙（图底）
+    // 最后一排：图底 160 - 130 = 30 的空隙 ≥ 15 → min(28, 26)
+    expect(chips[3].below).toBe(26);
+    // 色块紧挨着下一排（数量印在色块里）时没有下方条带
+    const tight = [chip(10, 10), chip(10, 44)];
+    assignBelowBands(tight, 80);
+    expect(tight[0].below).toBeUndefined();
+  });
+});
+
 describe("parseLegendText", () => {
   it("括号 / 冒号 / 乘号写法", () => {
     const r = parseLegendText("A1(125) B2: 88 H7 ×320\nC7 x 45 F5=12", VALID);
@@ -202,6 +285,67 @@ describe("parseLegendWords", () => {
     const r = parseLegendWords([...inGrid, ...legend], VALID, { x: 100, y: 100, width: 200, height: 200 });
     expect(r.counts).toEqual({ H7: 320 });
   });
+});
+
+describe("色号归一化 / 抬头 / 表格图例 / 棋盘格 / 非图纸", () => {
+  it("normalizeCode：零填充色号归一化", () => {
+    expect(normalizeCode("H07")).toBe("H7");
+    expect(normalizeCode("b08")).toBe("B8");
+    expect(normalizeCode("A26")).toBe("A26");
+    expect(normalizeCode("ZG01")).toBe("ZG1");
+    expect(normalizeCode("H10")).toBe("H10");
+  });
+
+  it("图例里的零填充色号：H07 (502) → H7", () => {
+    const r = parseLegendText("A26 (871) B08 (6) H07 (502) H02 (18)", VALID);
+    expect(r.counts).toEqual({ A26: 871, B8: 6, H7: 502, H2: 18 });
+    const w = (text: string, x0: number, y0: number) => ({ text, bbox: { x0, y0, x1: x0 + 30, y1: y0 + 14 } });
+    const rw = parseLegendWords([w("H07", 10, 10), w("(502)", 50, 10), w("B08", 10, 40), w("(6)", 50, 40)], VALID);
+    expect(rw.counts).toEqual({ H7: 502, B8: 6 });
+  });
+
+  it("parseHeaderText：各种抬头写法", () => {
+    expect(parseHeaderText("尺寸:55x61 · mard · 9 色 · 1806 颗")).toEqual({ cols: 55, rows: 61, colors: 9, total: 1806 });
+    // 英文识别模型读不出汉字：只剩数字顺序
+    expect(parseHeaderText("RT:55x61 Amard «9M o 1806 W")).toEqual({ cols: 55, rows: 61, colors: 9, total: 1806 });
+    expect(parseHeaderText("156 × 138 格  ·  MARD 32 色  ·  11128 颗豆  ·  每板 52 针")).toEqual({ cols: 156, rows: 138, colors: 32, total: 11128 });
+    expect(parseHeaderText("总计 7024 颗 | 规格 116×88")).toMatchObject({ cols: 116, rows: 88, total: 7024 });
+    expect(parseHeaderText("规格: 54x76 · 总用豆数: 2285 · 总色卡数: 10")).toEqual({ cols: 54, rows: 76, colors: 10, total: 2285 });
+    expect(parseHeaderText("总豆数 2,904颗").total).toBe(2904);
+    expect(parseHeaderText("今天天气不错").cols).toBeNull();
+  });
+
+  it("表格图例（数量在色号左边）：颜色 | 数量 | 色号", () => {
+    const w = (text: string, x0: number, y0: number) => ({ text, bbox: { x0, y0, x1: x0 + 40, y1: y0 + 16 } });
+    const words = [
+      w("704", 240, 100), w("H01", 380, 100),
+      w("282", 240, 130), w("H02", 380, 130),
+      w("496", 240, 160), w("H13", 380, 160),
+      w("574", 240, 190), w("H15", 380, 190)
+    ];
+    const r = parseLegendWords(words, VALID);
+    expect(r.counts).toEqual({ H1: 704, H2: 282, H13: 496, H15: 574 });
+  });
+
+  it("棋盘格空格：不影响格距检测，且按空格计数", () => {
+    const chart = buildChart({ cols: 30, rows: 24, pitch: 18, lineWidth: 1, boldEvery: 10, checker: true, emptyFrac: 0.35, textBlobs: true, solidBorder: true, seed: 51 });
+    const g = detectGrid(chart.src);
+    expect(g).not.toBeNull();
+    expect(g!.cols).toBe(30);
+    expect(g!.rows).toBe(24);
+    const r = readGrid(chart.src, g!, { allowedCodes: TEST_CODES });
+    expect(r.counts).toEqual(chart.counts);
+  });
+
+  it("平滑插画：isChart=false、method none，不抛错", async () => {
+    const res = await analyzePattern(illustrationImage(600, 340), {});
+    expect(res.isChart).toBe(false);
+    expect(res.method).toBe("none");
+    expect(res.notChartReason).toBeTruthy();
+    const chart = buildChart({ cols: 30, rows: 20, pitch: 12.5, boldEvery: 5, seed: 61 });
+    const ok = await analyzePattern(chart.src, { allowedCodes: TEST_CODES });
+    expect(ok.isChart).toBe(true);
+  }, 30000);
 });
 
 describe("legend chips", () => {
@@ -348,7 +492,7 @@ describe.skipIf(!existsSync(SAMPLE))("格内色号 OCR（agumon 样张，关闭�
     const small = downscaleArea(full!, 2400);
     backend.log.length = 0;
     const t0 = performance.now();
-    const res = await analyzePattern(small, { legendOcr: false, ocrSource: full! });
+    const res = await analyzePattern(small, { legendOcr: false, headerOcr: false, ocrSource: full! });
     const ms = performance.now() - t0;
     const cell = res.steps.find((s) => s.id === "cellcode");
     // eslint-disable-next-line no-console

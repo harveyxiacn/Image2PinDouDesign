@@ -9,12 +9,12 @@ export function parseTags(text: string): string[] {
 }
 
 /** 保存前的确认表单：名称 / 标签 / 状态 / 份数。 */
-export default function SaveForm({ defaultName, busy, disabled, label = "保存到图库", onSave }: {
-  defaultName: string; busy?: boolean; disabled?: boolean; label?: string; onSave: (v: SaveValues) => void;
+export default function SaveForm({ defaultName, defaultTags = "", defaultStatus = "planned", busy, success, disabled, label = "保存到图库", onSave }: {
+  defaultName: string; defaultTags?: string; defaultStatus?: PatternStatus; busy?: boolean; success?: boolean; disabled?: boolean; label?: string; onSave: (v: SaveValues) => void;
 }) {
   const [name, setName] = useState(defaultName);
-  const [tags, setTags] = useState("");
-  const [status, setStatus] = useState<PatternStatus>("planned");
+  const [tags, setTags] = useState(defaultTags);
+  const [status, setStatus] = useState<PatternStatus>(defaultStatus);
   const [copies, setCopies] = useState(1);
   useEffect(() => { setName(defaultName); }, [defaultName]);
   return (
@@ -31,7 +31,10 @@ export default function SaveForm({ defaultName, busy, disabled, label = "保存�
         <span className="meta">“计划做”会计入采购清单</span>
       </div>
       <label className="field"><span>份数</span><input className="input num" type="number" min={1} max={99} value={copies} onChange={(e) => setCopies(Number(e.target.value) || 1)} style={{ maxWidth: 120 }} /></label>
-      <button className="btn btn-iron btn-block" type="submit" disabled={busy || disabled}>{busy ? "保存中…" : label}</button>
+      <button className="btn btn-iron btn-block pt-save" type="submit" data-success={success ? "true" : undefined} disabled={busy || success || disabled}>
+        {success ? <><svg className="pt-tick" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5 10 17 19 7" /></svg>已保存</> : busy ? "保存中…" : label}
+      </button>
+      <span className="sr-only" role="status">{success ? "已保存到图库" : ""}</span>
     </form>
   );
 }

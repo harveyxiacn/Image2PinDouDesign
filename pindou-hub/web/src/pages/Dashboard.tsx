@@ -4,11 +4,13 @@ import { Bead, Icon, fmt, fmtTime, navigate, DiffNumber } from "../components/ui
 import { useData } from "../lib/db";
 import { useSyncState } from "../lib/sync";
 import { demandByCode, isActive, readiness, shoppingList, stockByCode } from "../lib/inventory";
-import { levelOf, groupLedger } from "../lib/stockview";
+import { levelOf, groupLedger, collectionsByTag } from "../lib/stockview";
 import { METHOD_LABEL, totalOf } from "../lib/model";
 import { BatchEntry } from "../components/stock/BatchEntry";
 import { CodeSheet } from "../components/stock/CodeSheet";
 import { KitInit } from "../components/stock/KitInit";
+import { UsageChart } from "../components/dash/UsageChart";
+import { Collections } from "../components/dash/Collections";
 import "../components/stock/stock.css";
 import "./Dashboard.css";
 
@@ -24,6 +26,8 @@ export default function Dashboard() {
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
   const active = useMemo(() => data.patterns.filter(isActive), [data.patterns]);
   const buy = useMemo(() => shoppingList(stock, demandByCode(data.patterns, isActive), data.prefs, true), [stock, data.patterns, data.prefs]);
+  const demand = useMemo(() => demandByCode(data.patterns, isActive), [data.patterns]);
+  const collections = useMemo(() => collectionsByTag(data.patterns, stock), [data.patterns, stock]);
   const buyTotal = buy.reduce((a, r) => a + r.buy, 0);
   const shortCount = buy.filter((r) => r.reason === "shortfall").length;
   const low = useMemo(() => Object.keys(stock).map((code) => ({ code, have: stock[code], floor: data.prefs.minStock[code] ?? data.prefs.lowStock }))
@@ -127,7 +131,18 @@ export default function Dashboard() {
         <div><span className="label">快用完</span><b style={{ color: low.length ? "var(--amber)" : undefined }}>{low.length}</b></div>
       </div>
 
-      <div className="grid-2" style={{ alignItems: "start" }}>
+      <div className="dash-two">
+        <section className="panel" aria-labelledby="dash-col-h">
+          <div className="panel-head"><h3 id="dash-col-h">合集</h3><a className="meta" href="#/gallery?group=tag">按标签看图库</a></div>
+          <Collections items={collections} />
+        </section>
+        <section className="panel" aria-labelledby="dash-use-h">
+          <div className="panel-head"><h3 id="dash-use-h">色号用量</h3><span className="meta">计划需求 vs 库存 · 前 10 色</span></div>
+          <UsageChart demand={demand} stock={stock} onOpen={setOpen} />
+        </section>
+      </div>
+
+      <div className="grid-2" style={{ alignItems: "start", marginTop: 16 }}>
         <section className="panel">
           <div className="panel-head"><h3>快用完了</h3><a className="meta" href="#/inventory">豆盒库存</a></div>
           {low.length ? (

@@ -2,7 +2,9 @@
 import { ciede2000, rgbToLab } from "@engine/color";
 import { MARD_PALETTE } from "@engine/palette";
 import { detectGrid, readGrid } from "./grid";
-import { cellCodeCandidates, chipStack, findChips, findStatedTotal, parseChipTexts, parseLegendWords } from "./legend";
+import { trimRulerBands } from "./ruler";
+import { assignBelowBands, cellCodeCandidates, chipStack, findChips, findStatedTotal, parseChipTexts, parseHeaderText, parseLegendWords } from "./legend";
+import type { HeaderInfo } from "./legend";
 import type {
   AnalyzeOptions, AnalyzeResult, AssistantStep, ColorCluster, Counts, GridDetection, GridReading, LegendReading, PixelSource, Rect, StepStatus
 } from "./types";
@@ -26,19 +28,59 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   const source = { width: src.width, height: src.height };
   const signal = options.signal;
 
+  const ocrOn = options.ocr !== false;
+  const hiSrc = options.ocrSource ?? src;
+
+  // 0) 抬头（尺寸 / 色数 / 总数）：英文识别模型读不出汉字，但“55x61”“1806”这类数字照样能读。
+  // 先无先验地粗检一次网格，抬头条带取网格上方那一块（避免把标尺数字一起读进来）
+  throwIfAborted(signal);
+  let grid0: GridDetection | null = null;
+  try { grid0 = detectGrid(src, options.region ?? null); } catch { grid0 = null; }
+  let header: HeaderInfo | null = null;
+  if (ocrOn && options.headerOcr !== false) {
+    try {
+      const bottom = grid0 && grid0.y0 > 20 ? Math.floor(grid0.y0) : Math.round(src.height * 0.12);
+      header = await withDeadline(signal, 6000, (sig) => readHeader(src, hiSrc, sig, bottom));
+      const bits = [header.cols && header.rows ? `${header.cols}×${header.rows} 格` : null, header.colors ? `${header.colors} 色` : null, header.total ? `${fmt(header.total)} 颗` : null].filter(Boolean);
+      if (bits.length) step("header", "读取抬头", "ok", `抬头写着：${bits.join("，")}`);
+      else { step("header", "读取抬头", "skip", "没有读到抬头信息"); header = null; }
+    } catch (err) {
+      if (signal?.aborted && (err as Error)?.name === "AbortError" && !(err as { timeout?: boolean }).timeout) throw err;
+      header = null;
+      step("header", "读取抬头", "skip", `没有读到抬头信息（${(err as Error)?.message ?? "识别不可用"}）`);
+    }
+  }
+  const hint = {
+    cols: options.forceCols ?? header?.cols ?? null,
+    rows: options.forceRows ?? header?.rows ?? null
+  };
+  const hasHint = !!(hint.cols || hint.rows);
+
   // 1) 网格
   throwIfAborted(signal);
-  let grid: GridDetection | null = null;
-  try {
-    grid = detectGrid(src, options.region ?? null);
-  } catch {
-    grid = null;
+  let grid: GridDetection | null = grid0;
+  if (hasHint) {
+    try { grid = detectGrid(src, options.region ?? null, hint); } catch { grid = grid0; }
   }
+  // 过小 / 置信太低的“网格”多半是插画里的巧合周期，没有尺寸先验时不采信
+  if (grid && !hasHint && (grid.cols < 8 || grid.rows < 8 || grid.score < 0.45)) grid = null;
   grid = applyForce(grid, src, options);
+  let rulerTrim = 0;
+  if (grid && !(hint.cols && hint.rows && grid.cols === hint.cols && grid.rows === hint.rows)) {
+    // 标尺行列带着网格线时会被当成格子：按“整行 / 整列同色且只出现在最外圈”剥掉
+    const t0 = trimRulerBands(src, grid);
+    const t = trimRulers(src, t0.grid, options.treatBackgroundAsEmpty ?? true);
+    grid = t.grid;
+    rulerTrim = t0.trimmed + t.trimmed;
+  }
   if (grid) {
     const forced = options.forceCols || options.forceRows ? "（已按手动行列调整）" : "";
-    step("grid", "检测网格", grid.score >= 0.6 ? "ok" : "warn",
-      `检测到 ${grid.cols}×${grid.rows} 网格（置信 ${grid.score.toFixed(2)}）${forced}`);
+    const hdr = header?.cols && header.rows
+      ? (grid.cols === header.cols && grid.rows === header.rows ? "，与抬头尺寸一致" : `，抬头写的是 ${header.cols}×${header.rows}，与检测不一致`)
+      : "";
+    const trim = rulerTrim ? `，已去掉 ${rulerTrim} 圈标尺` : "";
+    step("grid", "检测网格", grid.score >= 0.6 && !hdr.includes("不一致") ? "ok" : "warn",
+      `检测到 ${grid.cols}×${grid.rows} 网格（置信 ${grid.score.toFixed(2)}）${forced}${hdr}${trim}`);
   } else {
     step("grid", "检测网格", "fail", "没有找到规则网格；可以框选图纸区域，或手动填写列数和行数");
   }
@@ -47,16 +89,18 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   // 2) 图例 OCR（总时限 OCR_BUDGET_MS，超时则放弃图例、继续用网格结果）
   throwIfAborted(signal);
   let legend: LegendReading | null = null;
-  if (options.ocr === false || options.legendOcr === false) {
+  if (!ocrOn || options.legendOcr === false) {
     step("legend", "读取图例", "skip", "已跳过图例识别");
   } else {
     const t0 = performance.now();
     try {
-      const parsed = await withDeadline(signal, OCR_BUDGET_MS, (sig) => readLegend(src, options.ocrSource ?? src, grid, sig));
+      const parsed = await withDeadline(signal, OCR_BUDGET_MS, (sig) => readLegend(src, hiSrc, grid, sig));
       if (parsed.items.length >= 2) {
         legend = parsed;
         const total = sum(parsed.counts);
-        step("legend", "读取图例", "ok", `读到图例 ${parsed.items.length} 色，合计 ${fmt(total)} 颗`
+        const pal = parsed.palette?.length ?? 0;
+        step("legend", "读取图例", parsed.items.length >= 2 ? "ok" : "warn", `读到图例 ${parsed.items.length} 色，合计 ${fmt(total)} 颗`
+          + (pal > parsed.items.length ? `（色块共 ${pal} 个，${pal - parsed.items.length} 个的数量没读清，按网格统计补上）` : "")
           + (parsed.statedTotal ? `（图上标注总数 ${fmt(parsed.statedTotal)}）` : "")
           + `，用时 ${((performance.now() - t0) / 1000).toFixed(1)} 秒`);
         if (parsed.statedTotal && Math.abs(parsed.statedTotal - total) / Math.max(total, 1) > 0.01) {
@@ -76,12 +120,30 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   }
   await tick();
 
+  // 2b) 是不是图纸：没有抬头、没有图例，也没有带文字的规整网格 → 当作普通图片，交给“生成图纸”
+  {
+    let r0: GridReading | null = null;
+    if (grid && !legend && !header) {
+      try { r0 = readGrid(src, grid, { treatBackgroundAsEmpty: options.treatBackgroundAsEmpty ?? true }); } catch { r0 = null; }
+    }
+    const plausible = !!r0 && (r0.inkChart || (r0.flatFrac ?? 0) >= 0.55 && (r0.clusters?.length ?? 999) <= 150);
+    // 只有 1–2 个“色号 + 数字”的零散文字（插画里的字、水印）不足以证明是图纸：没网格、没抬头时，图例至少要 3 色。
+    const legendEvidence = !!legend && (!!grid || legend.items.length >= 3);
+    const chartLike = !!header || legendEvidence || options.forceCols || options.forceRows || (grid && (r0 ? plausible : true));
+    if (!chartLike) {
+      const reason = "没有找到规则网格，也没有图例或抬头——这更像一张普通图片，可以用“生成图纸”把它转成拼豆图";
+      step("chart", "判断是否图纸", "fail", reason);
+      return { steps, legend: null, grid: null, counts: {}, method: "none", confidence: 0, diff: [], source, isChart: false, notChartReason: reason, header: undefined };
+    }
+  }
+
   // 3) 读色
   throwIfAborted(signal);
   let reading: GridReading | null = null;
   if (grid) {
-    const legendCodes = legend ? legend.items.map((i) => i.code) : null;
+    const legendCodes = legend ? legendCodeList(legend) : null;
     reading = readGrid(src, grid, {
+      closedPalette: closedOf(legend),
       allowedCodes: options.allowedCodes ?? null,
       treatBackgroundAsEmpty: options.treatBackgroundAsEmpty ?? true,
       legendCodes,
@@ -120,7 +182,8 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
           const next = readGrid(src, grid, {
             allowedCodes: options.allowedCodes ?? null,
             treatBackgroundAsEmpty: options.treatBackgroundAsEmpty ?? true,
-            legendCodes: legend ? legend.items.map((i) => i.code) : null,
+            legendCodes: legend ? legendCodeList(legend) : null,
+            closedPalette: closedOf(legend),
             legendColors: legend?.colors ?? null,
             cellVotes: r.votes
           });
@@ -164,19 +227,23 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   let method: AnalyzeResult["method"] = "none";
   let confidence = 0;
 
-  if (legend && reading) {
+  // 只有色块色板、没读到几个数量的“图例”只用来限定色板，用量仍按网格统计
+  const legendUsed = legend && legend.items.length >= 2 ? legend : null;
+  if (legendUsed && reading) {
     // 图例没读全（OCR 漏读色号）：网格里有、图例里没有的色号，用网格统计补上
     const added: string[] = [];
-    counts = { ...legend.counts }; // 图例是作者写的数字，优先采用
+    counts = { ...legendUsed.counts }; // 图例是作者写的数字，优先采用
     for (const [code, n] of Object.entries(reading.counts)) {
-      if (!(code in legend.counts) && n > 0) { counts[code] = n; added.push(code); }
+      // 只补“数量够大”的：JPEG 噪点 / 水印会产生一堆几颗的假色号
+      const inPalette = !!legendUsed.palette?.some((p) => p.code === code);
+      if (!(code in legendUsed.counts) && (inPalette || n >= Math.max(4, Math.round(0.004 * sum(reading.counts))))) { counts[code] = n; added.push(code); }
     }
     const lt = sum(counts);
     const gt = sum(reading.counts);
     const codes = new Set([...Object.keys(counts), ...Object.keys(reading.counts)]);
     let abs = 0;
     for (const code of [...codes].sort()) {
-      const l = legend.counts[code] ?? 0;
+      const l = legendUsed.counts[code] ?? 0;
       const g = reading.counts[code] ?? 0;
       diff.push({ code, legend: l, grid: g });
       abs += Math.abs(l - g);
@@ -192,19 +259,33 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
           ? `总数吻合（图例 ${fmt(lt)} / 网格 ${fmt(gt)}），网格统计与图例有 ${mismatch} 个色号不一致`
           : `图例与网格完全一致，共 ${fmt(lt)} 颗`);
     } else {
-      method = "legend";
-      confidence = 0.5 + 0.25 * agreement;
-      step("compare", "图例与网格对照", "warn",
-        `图例合计 ${fmt(lt)} 颗，网格数出 ${fmt(gt)} 颗，差异较大，有 ${mismatch} 个色号不一致；已采用图例数字`);
+      // 两边总数对不上：谁更可信？有总数（抬头 / 图上标注）就看谁更接近；没有就看网格是否“可信”
+      // （规整、平涂、平均色差小）——小图里图例数字 OCR 常读错位，而网格计数是确定性的
+      const target = header?.total ?? legendUsed.statedTotal ?? null;
+      const gridDe = reading.colors.reduce((s, c) => s + c.deltaE * c.count, 0) / Math.max(1, gt);
+      const gridTrusted = reading.grid.score >= 0.7 && (reading.flatFrac ?? 0) >= 0.7 && gridDe <= 4;
+      const useGrid = target ? Math.abs(gt - target) < Math.abs(lt - target) : gridTrusted;
+      if (useGrid) {
+        counts = { ...reading.counts };
+        method = agreement >= 0.5 ? "legend+grid" : "grid";
+        confidence = 0.55 + 0.2 * agreement + (target ? 0.1 : 0);
+        step("compare", "图例与网格对照", "warn",
+          `图例合计 ${fmt(lt)} 颗，网格数出 ${fmt(gt)} 颗，差异较大（${mismatch} 个色号不一致）；${target ? `按抬头 / 图上总数 ${fmt(target)} 判断` : "网格规整、颜色吻合度高"}，图例数字多半是识别错位，采用网格统计`);
+      } else {
+        method = "legend";
+        confidence = 0.5 + 0.25 * agreement;
+        step("compare", "图例与网格对照", "warn",
+          `图例合计 ${fmt(lt)} 颗，网格数出 ${fmt(gt)} 颗，差异较大，有 ${mismatch} 个色号不一致；已采用图例数字`);
+      }
     }
-    if (legend.statedTotal && Math.abs(legend.statedTotal - lt) / Math.max(lt, 1) <= 0.01) confidence += 0.05;
-    else if (legend.statedTotal) confidence -= 0.1;
-  } else if (legend) {
-    counts = { ...legend.counts };
+    if (legendUsed.statedTotal && Math.abs(legendUsed.statedTotal - lt) / Math.max(lt, 1) <= 0.01) confidence += 0.05;
+    else if (legendUsed.statedTotal) confidence -= 0.1;
+  } else if (legendUsed) {
+    counts = { ...legendUsed.counts };
     method = "legend";
     confidence = 0.6;
-    if (legend.statedTotal) {
-      confidence += Math.abs(legend.statedTotal - sum(counts)) / Math.max(sum(counts), 1) <= 0.01 ? 0.2 : -0.1;
+    if (legendUsed.statedTotal) {
+      confidence += Math.abs(legendUsed.statedTotal - sum(counts)) / Math.max(sum(counts), 1) <= 0.01 ? 0.2 : -0.1;
     }
     step("compare", "采用图例", grid ? "warn" : "ok", grid ? "网格没有读出有效格子，只能采用图例数字" : "没有找到网格，采用图例数字");
   } else if (reading) {
@@ -224,10 +305,35 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   }
 
   confidence = Math.max(0, Math.min(1, confidence));
-  return { steps, legend, grid: reading, counts, method, confidence, diff, source, cellCodesRead, cellCodeStats };
+    // 抬头总数核对 / 色数核对
+  if (header?.total && sum(counts) > 0) {
+    const ok = Math.abs(sum(counts) - header.total) / header.total <= 0.01;
+    step("header-check", "核对抬头总数", ok ? "ok" : "warn", ok
+      ? `最终用量 ${fmt(sum(counts))} 颗，与抬头 ${fmt(header.total)} 颗一致`
+      : `最终用量 ${fmt(sum(counts))} 颗，抬头写的是 ${fmt(header.total)} 颗，有出入`);
+    confidence = Math.max(0, Math.min(1, confidence + (ok ? 0.05 : -0.1)));
+  }
+  const paletteWarning = detectPaletteMismatch(legend, reading, cellCodeStats);
+  if (paletteWarning) step("palette", "核对色卡", "warn", paletteWarning);
+  return {
+    steps, legend, grid: reading, counts, method, confidence, diff, source, cellCodesRead, cellCodeStats,
+    isChart: true, header: header ?? undefined, paletteWarning: paletteWarning ?? undefined
+  };
 }
 
 // ── helpers ──
+
+/** 图例里所有色号（读到数量的 + 只有色块的）。 */
+function legendCodeList(legend: LegendReading): string[] {
+  return [...new Set([...legend.items.map((i) => i.code), ...(legend.palette ?? []).map((p) => p.code)])];
+}
+
+/** 色块基本找全了（≥ 3 个）时，格子只在图例色板里匹配。 */
+function closedOf(legend: LegendReading | null): boolean {
+  return !!legend?.palette && legend.palette.length >= 3;
+}
+
+export function trimRulersForTest(src: PixelSource, g: GridDetection) { const t0 = trimRulerBands(src, g); const t = trimRulers(src, t0.grid, true); return t.grid; }
 
 function gridRect(g: GridDetection): Rect {
   return { x: g.x0, y: g.y0, width: g.cols * g.pitchX, height: g.rows * g.pitchY };
@@ -280,8 +386,8 @@ function applyForce(grid: GridDetection | null, src: PixelSource, o: AnalyzeOpti
 
 // ── 图例读取 ──
 
-const OCR_BUDGET_MS = 25_000;
-const CELL_BUDGET_MS = 10_000;
+const OCR_BUDGET_MS = 12_000;
+const CELL_BUDGET_MS = 8_000;
 
 /** 给一次异步任务加总时限：超时 abort 内部 signal 并抛出带 timeout 标记的 AbortError。 */
 async function withDeadline<T>(outer: AbortSignal | undefined, ms: number, run: (s: AbortSignal) => Promise<T>): Promise<T> {
@@ -366,20 +472,63 @@ async function readLegend(src: PixelSource, hi: PixelSource, grid: GridDetection
   const crop = cropTight(main);
   if (crop) {
     throwIfAborted(signal);
-    const chips = findChips(crop.img, Math.max(12, Math.round(0.015 * hi.width)));
+    const chips = findChips(crop.img, Math.max(12, Math.round(0.015 * hi.width)), 0.9);
     if (chips.length >= 3) {
+      // 去掉尺寸明显不同的“色块”（水印 / 文字团）：以中位尺寸为准
+      const hs = chips.map((c) => c.height).sort((x, y) => x - y), ws2 = chips.map((c) => c.width).sort((x, y) => x - y);
+      const mh = hs[hs.length >> 1], mw = ws2[ws2.length >> 1];
+      for (let i = chips.length - 1; i >= 0; i -= 1) {
+        const c = chips[i];
+        if (c.height < 0.6 * mh || c.height > 1.6 * mh || c.width < 0.6 * mw || c.width > 1.6 * mw) chips.splice(i, 1);
+      }
+      // 数量印在色块下方的图例：给每个色块带上下方条带（直到下一排色块之前）
+      assignBelowBands(chips, crop.img.height);
       const heights = chips.map((c) => c.height).sort((a, b) => a - b);
-      // 目标：文字 x 高约 20–30px；色块高约是字高的 2.4 倍 → 放大到色块高 ≈ 65px
-      const scale = Math.min(4, Math.max(1, 65 / heights[heights.length >> 1]));
-      const stack = chipStack(crop.img, chips, scale);
-      const res = await ocrWords(stack.image, signal, { scale: 1, psm: "6" });
-      const rows = stack.rows.map((r) => ({
-        chip: r.chip,
-        text: res.words.filter((w) => { const cy = (w.bbox.y0 + w.bbox.y1) / 2; return cy >= r.y0 && cy < r.y1; })
-          .sort((a, b) => a.bbox.x0 - b.bbox.x0).map((w) => w.text).join(" ")
-      }));
-      const parsed = parseChipTexts(rows, VALID_CODES, (code) => MARD_PALETTE.find((c) => c.code === code)?.rgb ?? null);
-      result = { ...parsed, statedTotal: findStatedTotal(res.text) };
+      const medH = heights[heights.length >> 1];
+      // 小字图例一遍读不全：放大 ~110/高 与 ~150/高 各读一遍（最多 2 次），按色号合并
+      const merged = new Map<string, import("./types").LegendItem>();
+      const colors: Record<string, { r: number; g: number; b: number }> = {};
+      const perChip = new Map<import("./legend").Chip, { code: string | null; count: number | null }>();
+      let stated: number | null = null;
+      let raw = "";
+      for (const [target, bin] of [[110, false], [150, true]] as const) {
+        const scale = Math.min(4, Math.max(1, target / medH));
+        const stack = chipStack(crop.img, chips, scale, undefined, 0.5, bin);
+        const res = await ocrWords(stack.image, signal, { scale: 1, psm: "6" });
+        const rows = stack.rows.map((r) => ({
+          chip: r.chip,
+          text: wordsToLines(res.words.filter((w) => { const cy = (w.bbox.y0 + w.bbox.y1) / 2; return cy >= r.y0 && cy < r.y1; })).replace(/\n/g, " ")
+        }));
+        const parsed = parseChipTexts(rows, VALID_CODES, (code) => MARD_PALETTE.find((c) => c.code === code)?.rgb ?? null);
+        for (const it of parsed.items) if (!merged.has(it.code)) merged.set(it.code, it);
+        for (const [k, v] of Object.entries(parsed.colors)) if (!(k in colors)) colors[k] = v;
+        for (const pc of parsed.perChip) {
+          const cur = perChip.get(pc.chip);
+          if (!cur || (pc.code && !cur.code) || (pc.count !== null && cur.count === null)) perChip.set(pc.chip, { code: pc.code ?? cur?.code ?? null, count: pc.count ?? cur?.count ?? null });
+        }
+        stated = stated ?? findStatedTotal(res.text);
+        raw += parsed.rawText;
+        if (merged.size >= chips.length * 0.9) break; // 基本读全了
+      }
+      // 数量印在色块下方：单独把“色块下方一条”叠成一张图，只认数字（白名单），放大到字高约 36px
+      const withBelow = chips.filter((c) => (c.below ?? 0) >= 6);
+      if (withBelow.length >= 3) {
+        throwIfAborted(signal);
+        const below = await readCountsBelow(crop.img, withBelow, signal);
+        for (const [chip, n] of below) { const cur = perChip.get(chip); perChip.set(chip, { code: cur?.code ?? null, count: n }); }
+      }
+      const palette = buildChipPalette(chips, perChip);
+      const items: import("./types").LegendItem[] = [];
+      const counts: Counts = {};
+      for (const p of palette) {
+        if (p.count === null || p.count <= 0) continue;
+        items.push({ code: p.code, count: p.count, source: p.guessed ? "色块颜色+数量" : "色块文字" });
+        counts[p.code] = p.count;
+      }
+      for (const it of merged.values()) if (!(it.code in counts) && palette.some((p) => p.code === it.code)) { items.push(it); counts[it.code] = it.count; }
+      for (const p of palette) if (!(p.code in colors)) colors[p.code] = p.rgb;
+      // 色块很多、却只读到零星几个数量：多半是插画 / 拼图里的色块，不是图例
+      if (items.length >= Math.max(2, Math.ceil(0.25 * chips.length))) result = { items, counts, statedTotal: stated, rawText: raw.slice(0, 2000), colors, palette };
     }
     if (result.items.length < 2) {
       const side = Math.max(crop.img.width, crop.img.height);
@@ -399,6 +548,69 @@ async function readLegend(src: PixelSource, hi: PixelSource, grid: GridDetection
     }
   }
   return result;
+}
+
+
+/** 读色块正下方的数量（一行一块，数字白名单）。返回 色块 → 数量。 */
+async function readCountsBelow(img: PixelSource, chips: import("./legend").Chip[], signal: AbortSignal): Promise<Map<import("./legend").Chip, number>> {
+  const { ocrWords } = await import("./ocr");
+  const pseudo = chips.map((c, i) => {
+    const bg = c.bg ?? [255, 255, 255];
+    const x = Math.max(0, c.x - 2);
+    return { x, y: c.y + c.height + 1, width: Math.max(4, Math.min(img.width - x, c.width + 4)), height: Math.max(4, Math.min(img.height - (c.y + c.height + 1), (c.below ?? 0) - 1)), r: bg[0], g: bg[1], b: bg[2], bg, tag: i };
+  }).filter((c) => c.y < img.height - 4);
+  const out = new Map<import("./legend").Chip, number>();
+  if (pseudo.length < 3) return out;
+  const stack = chipStack(img, pseudo, 1, 36);
+  if (!stack.rows.length) return out;
+  const res = await ocrWords(stack.image, signal, { scale: 1, psm: "6", whitelist: "0123456789" });
+  for (const row of stack.rows) {
+    const text = res.words
+      .filter((w) => { const cy = (w.bbox.y0 + w.bbox.y1) / 2; return cy >= row.y0 && cy < row.y1; })
+      .sort((a, b) => a.bbox.x0 - b.bbox.x0).map((w) => w.text).join("");
+    const digits = text.replace(/[^0-9]/g, "");
+    if (!digits || digits.length > 5) continue;
+    const n = Number(digits);
+    const chip = chips[row.chip.tag ?? -1];
+    if (chip && n >= 1) out.set(chip, n);
+  }
+  return out;
+}
+
+/**
+ * 所有色块（含文字没读出来的）→ 闭集色板：读到色号的用读到的，没读到的按色块颜色找最近的、还没被占用的色卡色（ΔE ≤ 10）。
+ * 图纸上的颜色只会是这些色块里的颜色，所以格子只在色板里匹配，不会冒出一堆浅色 / 灰色幻影色号。
+ */
+export function buildChipPalette(
+  chips: Array<{ r: number; g: number; b: number }>,
+  perChip: Map<any, { code: string | null; count: number | null }>
+): NonNullable<LegendReading["palette"]> {
+  const pal = new Map(MARD_PALETTE.map((p) => [p.code, p]));
+  type Slot = { chip: { r: number; g: number; b: number }; rgb: { r: number; g: number; b: number }; lab: ReturnType<typeof rgbToLab>; ocr: string | null; dOcr: number; count: number | null; code: string | null; guessed: boolean };
+  const slots: Slot[] = chips.map((c) => {
+    const e = perChip.get(c);
+    const rgb = { r: c.r, g: c.g, b: c.b };
+    const lab = rgbToLab(rgb);
+    const ocr = e?.code && pal.has(e.code) ? e.code : null;
+    return { chip: c, rgb, lab, ocr, dOcr: ocr ? ciede2000(lab, pal.get(ocr)!.lab) : Infinity, count: e?.count ?? null, code: null, guessed: false };
+  });
+  const used = new Set<string>();
+  // ① 文字读出的色号且与色块颜色吻合（ΔE ≤ 5）：采用
+  for (const sl of slots) if (sl.ocr && sl.dOcr <= 5 && !used.has(sl.ocr)) { sl.code = sl.ocr; used.add(sl.ocr); }
+  // ② 其余按色块颜色找最近且未被占用的色卡色（ΔE ≤ 10），颜色越贴近的先分配
+  const rest = slots.filter((sl) => !sl.code);
+  const cand: Array<{ sl: Slot; code: string; d: number }> = [];
+  for (const sl of rest) for (const p of MARD_PALETTE) { const d = ciede2000(sl.lab, p.lab); if (d <= 10) cand.push({ sl, code: p.code, d }); }
+  cand.sort((x, y) => x.d - y.d);
+  for (const c of cand) {
+    if (c.sl.code || used.has(c.code)) continue;
+    c.sl.code = c.code; c.sl.guessed = true; used.add(c.code);
+  }
+  // ③ 颜色对不上但文字读出了色号（色块偏色严重）：退而采用文字
+  for (const sl of slots) if (!sl.code && sl.ocr && sl.dOcr <= 14 && !used.has(sl.ocr)) { sl.code = sl.ocr; used.add(sl.ocr); }
+  const out: NonNullable<LegendReading["palette"]> = [];
+  for (const sl of slots) if (sl.code) out.push({ code: sl.code, rgb: sl.rgb, count: sl.count, ...(sl.guessed ? { guessed: true } : {}) });
+  return out;
 }
 
 const DIGIT_PARTNER: Record<string, string[]> = {
@@ -429,7 +641,7 @@ function reconcileLegend(legend: LegendReading, reading: GridReading): number {
     if (best === null) {
       // 改一位也对不上：若该色号的图例色块颜色被网格精确匹配（ΔE≤2），以网格数为准（OCR 很可能读错了）
       const st = reading.colors.find((c) => c.code === item.code);
-      if (legend.colors?.[item.code] && st && st.deltaE <= 2) best = g;
+      if (legend.colors?.[item.code] && st && st.deltaE <= (legend.palette ? 5 : 2)) best = g;
     }
     if (best !== null) {
       item.count = best;
@@ -476,7 +688,11 @@ async function readCellCodes(
   const { ocrWords } = await import("./ocr");
   const f = hi.width / src.width;
   const clusters = reading.clusters!;
-  const eligible = clusters.filter((c) => c.inkCells >= Math.max(1, Math.ceil(c.count * 0.5)));
+  let eligible = clusters.filter((c) => c.inkCells >= Math.max(1, Math.ceil(c.count * 0.5)));
+  // 颜色簇太多（照片 / 噪点）说明不是规整的色号图：放弃；否则只取格子最多的前 60 个簇，并限制叠图总高度
+  if (eligible.length > 90) return { votes: {}, total: eligible.length, recovered: 0 };
+  eligible = [...eligible].sort((x, y) => y.count - x.count).slice(0, 60);
+  const perCluster = Math.max(1, Math.min(5, Math.floor(200 / Math.max(1, eligible.length))));
   const tally = new Map<number, Map<string, number>>();
   const picked = new Map<number, number>();
   const used = new Set<number>();
@@ -537,9 +753,9 @@ async function readCellCodes(
     return null;
   };
 
-  await runRound(eligible.map((c) => c.id), 5);
+  await runRound(eligible.map((c) => c.id), perCluster);
   const unresolved = eligible.filter((c) => decide(c.id) === null && c.count > (picked.get(c.id) ?? 0)).map((c) => c.id);
-  if (unresolved.length) await runRound(unresolved, 5);
+  if (unresolved.length) await runRound(unresolved.slice(0, 40), Math.min(5, perCluster + 2));
   const votes: Record<number, string> = {};
   for (const c of eligible) {
     const v = decide(c.id);
@@ -624,4 +840,170 @@ function calibrateVotes(clusters: ColorCluster[], votes: Record<number, string>)
     }
   }
   return changed;
+}
+
+// ── 抬头 / 标尺 / 色卡核对 ──
+
+function wordsToLines(words: Array<{ text: string; bbox: { x0: number; y0: number; x1: number; y1: number } }>): string {
+  const ws = [...words].sort((p, q) => (p.bbox.y0 + p.bbox.y1) - (q.bbox.y0 + q.bbox.y1));
+  const lines: typeof ws[] = [];
+  for (const w of ws) {
+    const cy = (w.bbox.y0 + w.bbox.y1) / 2, h = Math.max(1, w.bbox.y1 - w.bbox.y0);
+    const last = lines[lines.length - 1];
+    const lc = last ? (last[0].bbox.y0 + last[0].bbox.y1) / 2 : 0;
+    if (last && Math.abs(lc - cy) < 0.6 * h) last.push(w); else lines.push([w]);
+  }
+  return lines.map((l) => l.sort((p, q) => p.bbox.x0 - q.bbox.x0).map((w) => w.text).join(" ")).join("\n");
+}
+
+/** 读图片上方的抬头条带（到网格上沿为止，最多 320px），解析尺寸 / 色数 / 总数。小字所以放大到 3 倍，识别不出再换整块文字模式。 */
+async function readHeader(src: PixelSource, hi: PixelSource, signal: AbortSignal, bottom: number): Promise<HeaderInfo> {
+  const { ocrWords } = await import("./ocr");
+  const f = hi.width / src.width;
+  const hh = Math.max(24, Math.min(bottom, 320));
+  const rr = scaleRect({ x: 0, y: 0, width: src.width, height: hh }, f);
+  const raw = cropSource(hi, rr);
+  const box = contentBox(raw, 4);
+  const empty: HeaderInfo = { cols: null, rows: null, colors: null, total: null };
+  if (!box) return empty;
+  const img = cropSource(raw, box);
+  // 按行拆开：抬头常是“大标题 + 一行小字”，混在一起识别小字会被忽略；每行单独放大到字高约 30px 再读
+  const lines = splitTextLines(img);
+  let text = "";
+  let used = 0;
+  for (const ln of lines.filter((l) => l.height >= 10 && l.height <= 120 && l.width / l.height <= 60).slice(0, 4)) {
+    const lineImg = cropSource(img, ln);
+    let scale = Math.min(4, Math.max(1.5, 36 / ln.height));
+    if (ln.height * scale > 160) scale = Math.max(1, 160 / ln.height);
+    if (lineImg.width * scale > 5200) scale = Math.max(1, 5200 / lineImg.width);
+    const res = await ocrWords(lineImg, signal, { scale, psm: "7" });
+    text += res.text + "\n";
+    used += 1;
+    const info = parseHeaderText(text);
+    if (info.cols && info.rows && info.total) return info;
+  }
+  const info = parseHeaderText(text);
+  if (info.cols || info.total || info.colors || used === 0) return info;
+  // 兜底：整块稀疏文字
+  const side = Math.max(img.width, img.height);
+  const res = await ocrWords(img, signal, { scale: side < 1600 ? 2 : 1, psm: "11" });
+  return parseHeaderText(res.text + "\n" + wordsToLines(res.words));
+}
+
+/** 按横向投影把一块区域拆成文字行（与底色不同的像素行），返回各行外接矩形（含上下 3px 边距）。 */
+function splitTextLines(img: PixelSource): RectI[] {
+  const { width: w, height: h, data: d } = img;
+  const votes = new Map<number, number>();
+  for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 3) {
+    const i = (y * w + x) * 4;
+    const k = ((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4);
+    votes.set(k, (votes.get(k) ?? 0) + 1);
+  }
+  let bk = 0, bv = -1;
+  for (const [k, v] of votes) if (v > bv) { bv = v; bk = k; }
+  const br = ((bk >> 8) << 4) + 8, bg = (((bk >> 4) & 15) << 4) + 8, bb = ((bk & 15) << 4) + 8;
+  const rowInk: number[] = [];
+  for (let y = 0; y < h; y += 1) {
+    let n = 0;
+    for (let x = 0; x < w; x += 1) {
+      const i = (y * w + x) * 4;
+      if (Math.abs(d[i] - br) + Math.abs(d[i + 1] - bg) + Math.abs(d[i + 2] - bb) > 60) n += 1;
+    }
+    rowInk.push(n);
+  }
+  const out: RectI[] = [];
+  let start = -1, gap = 0;
+  for (let y = 0; y <= h; y += 1) {
+    const on = y < h && rowInk[y] >= 2;
+    if (on) { if (start < 0) start = y; gap = 0; }
+    else if (start >= 0) {
+      gap += 1;
+      if (gap > 3 || y === h) {
+        const end = y - gap;
+        if (end - start + 1 >= 6) {
+          const y0 = Math.max(0, start - 3), y1 = Math.min(h - 1, end + 3);
+          // 横向也裁到有字的范围：整行很宽（全图宽）时放大不动，字会太小；裁窄后才能放大到字高约 30px
+          let xa = w, xb = -1;
+          for (let y = start; y <= end; y += 1) for (let x = 0; x < w; x += 1) {
+            const i = (y * w + x) * 4;
+            if (Math.abs(d[i] - br) + Math.abs(d[i + 1] - bg) + Math.abs(d[i + 2] - bb) > 60) { if (x < xa) xa = x; if (x > xb) xb = x; }
+          }
+          if (xb - xa >= 12) { xa = Math.max(0, xa - 8); xb = Math.min(w - 1, xb + 8); out.push({ x: xa, y: y0, width: xb - xa + 1, height: y1 - y0 + 1 }); }
+        }
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 标尺（坐标数字）行列带网格线时会被检测成格子。判据：
+ *  ① 某颜色簇 ≥90% 的格子在最外两圈内（如蓝紫色标尺底色），最外一行 / 列 ≥75% 属于这类簇；
+ *  ② 最外一行 / 列几乎每格都有文字，却是背景色簇，而该背景色簇在内部基本无字（白底标尺 + 数字）。
+ */
+function trimRulers(src: PixelSource, grid0: GridDetection, treatEmpty: boolean): { grid: GridDetection; trimmed: number } {
+  let grid = grid0;
+  let trimmed = 0;
+  for (let iter = 0; iter < 4; iter += 1) {
+    if (grid.cols < 10 || grid.rows < 10) break;
+    const r = readGrid(src, grid, { treatBackgroundAsEmpty: treatEmpty, useInk: false });
+    const cl = r.clusters, cc = r.cellCluster, ink = r.cellInk;
+    if (!cl || !cc || !ink) break;
+    const { cols, rows } = grid;
+    const ring = (i: number) => { const x = i % cols, y = Math.floor(i / cols); return x < 2 || y < 2 || x >= cols - 2 || y >= rows - 2; };
+    const rulerLike = cl.map((c) => c.count >= 6 && c.cells.filter(ring).length / c.count >= 0.9);
+    // 背景簇内部的墨迹率
+    const innerInk = cl.map((c) => { const inner = c.cells.filter((i) => !ring(i)); return inner.length ? inner.filter((i) => ink[i]).length / inner.length : 1; });
+    const strip = (side: "t" | "b" | "l" | "r") => {
+      const idx: number[] = [];
+      if (side === "t") for (let x = 0; x < cols; x += 1) idx.push(x);
+      if (side === "b") for (let x = 0; x < cols; x += 1) idx.push((rows - 1) * cols + x);
+      if (side === "l") for (let y = 0; y < rows; y += 1) idx.push(y * cols);
+      if (side === "r") for (let y = 0; y < rows; y += 1) idx.push(y * cols + cols - 1);
+      return idx;
+    };
+    const isRuler = (side: "t" | "b" | "l" | "r") => {
+      // 去掉两端的角格（角上常是别的颜色）
+      const idx = strip(side).slice(1, -1);
+      const rl = idx.filter((i) => cc[i] >= 0 && rulerLike[cc[i]]).length / idx.length;
+      if (rl >= 0.75) return true;
+      const inkRate = idx.filter((i) => ink[i]).length / idx.length;
+      const bg = idx.filter((i) => cc[i] >= 0 && cl[cc[i]].empty && innerInk[cc[i]] < 0.15).length / idx.length;
+      return inkRate >= 0.7 && bg >= 0.8;
+    };
+    const t = isRuler("t"), b = isRuler("b"), l = isRuler("l"), rr = isRuler("r");
+    if (!t && !b && !l && !rr) break;
+    const g = { ...grid };
+    if (t) { g.y0 += g.pitchY; g.rows -= 1; trimmed += 1; }
+    if (b) { g.rows -= 1; trimmed += 1; }
+    if (l) { g.x0 += g.pitchX; g.cols -= 1; trimmed += 1; }
+    if (rr) { g.cols -= 1; trimmed += 1; }
+    grid = g;
+  }
+  return { grid, trimmed };
+}
+
+/** 色卡不是 MARD（或图片整体偏色）：图例色块 / 格内色号与 MARD 色值普遍相差很大。 */
+function detectPaletteMismatch(
+  legend: LegendReading | null, reading: GridReading | null, stats: AnalyzeResult["cellCodeStats"]
+): string | null {
+  const msg = "图纸上的颜色与 MARD 色卡相差很大，色号可能来自其他品牌（或图片偏色）；用量按图上写的色号统计，颜色仅供参考";
+  if (legend?.colors) {
+    const des: number[] = [];
+    for (const [code, rgb] of Object.entries(legend.colors)) {
+      const pal = MARD_PALETTE.find((p) => p.code === code);
+      if (pal) des.push(ciede2000(rgbToLab(rgb), pal.lab));
+    }
+    if (des.length >= 5) {
+      des.sort((x, y) => x - y);
+      if (des[des.length >> 1] > 15) return msg;
+    }
+  }
+  if (reading?.clusters && stats && stats.clusters >= 6) {
+    const decided = reading.clusters.filter((c) => !c.empty && c.code);
+    const disagree = decided.filter((c) => c.code !== c.colorCode).length;
+    if (decided.length >= 6 && disagree / decided.length >= 0.6) return msg;
+  }
+  return null;
 }

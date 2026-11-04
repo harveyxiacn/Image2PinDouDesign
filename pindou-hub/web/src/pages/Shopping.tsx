@@ -1,10 +1,10 @@
 // 焦点：建议购买清单——能直接复制去下单，买回来后一键入库。
-import { useMemo, useState } from "react";
-import { Bead, Icon, Sheet, fmt, toast, DiffNumber } from "../components/ui";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Bead, Icon, Sheet, fmt, toast, DiffNumber, prefersReducedMotion, useRoute } from "../components/ui";
 import { useData, putRecords } from "../lib/db";
-import { countsToCsv, demandByCode, isActive, shoppingList, stockByCode } from "../lib/inventory";
+import { countsToCsv, demandByCode, isActive, shoppingList, stockByCode, type ShoppingRow } from "../lib/inventory";
 import { colorOf } from "../lib/palette";
-import { shareText } from "../lib/stockview";
+import { excludeForTag, shareText } from "../lib/stockview";
 import { commitPurchase } from "../components/stock/actions";
 import { copyText, downloadText } from "../components/stock/download";
 import "./Shopping.css";
@@ -12,7 +12,13 @@ import "./Shopping.css";
 export default function Shopping() {
   const data = useData();
   const active = useMemo(() => data.patterns.filter(isActive), [data.patterns]);
-  const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  const route = useRoute();
+  const [onlyTag, setOnlyTag] = useState(route.query.get("tag") ?? "");
+  const [manual, setManual] = useState<Set<string>>(new Set());
+  useEffect(() => { setOnlyTag(route.query.get("tag") ?? ""); }, [route.query]);
+  const tagsInPlan = useMemo(() => Array.from(new Set(active.flatMap((p) => p.tags))).sort(), [active]);
+  // “只算某个标签”：不带该标签的计划图纸一律不计入；手动勾选在其基础上微调
+  const excluded = useMemo(() => (onlyTag ? new Set([...excludeForTag(active, onlyTag), ...manual]) : manual), [active, onlyTag, manual]);
   const [loss, setLoss] = useState(String(Math.round(data.prefs.lossRate * 1000) / 10));
   const [pack, setPack] = useState(String(data.prefs.packSize));
   const [includeLow, setIncludeLow] = useState(true);
@@ -26,7 +32,28 @@ export default function Shopping() {
   const items = rows.map((r) => ({ code: r.code, qty: qtyOf(r.code, r.buy) })).filter((r) => r.qty > 0);
   const total = items.reduce((a, r) => a + r.qty, 0);
 
-  const toggle = (id: string) => setExcluded((cur) => { const n = new Set(cur); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  // 买回来后：库存变了而从清单里消失的行，留 900ms 打上“已买到”再收起
+  const [ghosts, setGhosts] = useState<Array<{ row: ShoppingRow; at: number }>>([]);
+  const [say, setSay] = useState("");
+  const seen = useRef<{ rows: ShoppingRow[]; stock: Record<string, number> }>({ rows, stock });
+  useEffect(() => {
+    if (receive) return; // 入库抽屉开着时冻结清单，关掉后再播“已买到”
+    const before = seen.current;
+    seen.current = { rows, stock };
+    if (prefersReducedMotion()) return;
+    const now = new Set(rows.map((r) => r.code));
+    const gone = before.rows.map((r, at) => ({ row: r, at })).filter(({ row }) => !now.has(row.code) && (stock[row.code] ?? 0) > (before.stock[row.code] ?? 0));
+    if (!gone.length) return;
+    setGhosts(gone);
+    setSay(`${gone.length} 个色号已买到，从清单里移除`);
+    const t = window.setTimeout(() => setGhosts([]), 1000);
+    return () => window.clearTimeout(t);
+  }, [rows, stock, receive]);
+  const view: Array<{ row: ShoppingRow; done: boolean }> = (receive ? seen.current.rows : rows).map((row) => ({ row, done: false }));
+  for (const g of ghosts) view.splice(Math.min(g.at, view.length), 0, { row: g.row, done: true });
+
+  const toggle = (id: string) => setManual((cur) => { const n = new Set(cur); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const pickTag = (t: string) => { setOnlyTag(t); setManual(new Set()); setEdits({}); };
   const copy = async () => toast((await copyText(shareText(items))) ? "已复制采购文本" : "复制失败，请手动选择文字");
   const csv = () => {
     const out = rows.map((r) => ({ code: r.code, name: colorOf(r.code)?.nameZh ?? "", need: r.needWithLoss, stock: r.stock, shortfall: r.shortfall, buy: qtyOf(r.code, r.buy) }));
@@ -59,6 +86,12 @@ export default function Shopping() {
       <div className="shop-opts">
         <section className="panel panel-pad">
           <span className="label">计入哪些图纸</span>
+          {tagsInPlan.length ? (
+            <div className="shop-tags" role="group" aria-label="只算某个合集">
+              <button type="button" className="chip shop-tag" aria-pressed={!onlyTag} onClick={() => pickTag("")}>全部</button>
+              {tagsInPlan.map((t) => <button type="button" key={t} className="chip shop-tag" aria-pressed={onlyTag === t} onClick={() => pickTag(t)}>只算{t}</button>)}
+            </div>
+          ) : null}
           {active.length ? (
             <div className="shop-pats" style={{ marginTop: 6 }}>
               {active.map((p) => (
@@ -77,13 +110,18 @@ export default function Shopping() {
         </section>
       </div>
 
-      {rows.length ? (
+      {view.length ? (
         <section className="panel">
           <div className="table-wrap">
             <table className="table">
               <thead><tr><th>色号</th><th className="r">需要(含损耗)</th><th className="r">库存</th><th className="r">缺口</th><th className="r">建议购买</th><th>原因</th></tr></thead>
               <tbody>
-                {rows.map((r) => (
+                {view.map(({ row: r, done }) => done ? (
+                  <tr key={r.code} className="shop-done">
+                    <td><span className="bead-code"><Bead code={r.code} /><span className="code">{r.code}</span></span></td>
+                    <td colSpan={5}><span className="shop-done-tag"><Icon name="check" size={16} />已买到，已入库</span></td>
+                  </tr>
+                ) : (
                   <tr key={r.code}>
                     <td><span className="bead-code"><Bead code={r.code} /><span className="code">{r.code}</span></span></td>
                     <td className="r">{r.needWithLoss ? fmt(r.needWithLoss) : "—"}</td>
@@ -103,23 +141,43 @@ export default function Shopping() {
         <div className="panel empty pegboard"><h3>还没有要做的图纸</h3><p>把图纸标为“计划做”，这里会列出要买什么。</p><a className="btn" href="#/gallery">去图库</a></div>
       )}
 
-      {receive ? <ReceiveSheet items={items} onClose={() => setReceive(false)} onDone={() => setEdits({})} /> : null}
+      <div className="sr-only" role="status" aria-live="polite">{say}</div>
+      {receive ? <ReceiveSheet items={items} onClose={() => setReceive(false)} onDone={() => setEdits({})} remaining={Math.max(0, rows.length)} /> : null}
     </div>
   );
 }
 
-function ReceiveSheet({ items, onClose, onDone }: { items: Array<{ code: string; qty: number }>; onClose: () => void; onDone: () => void }) {
+function ReceiveSheet({ items, onClose, onDone, remaining }: { items: Array<{ code: string; qty: number }>; onClose: () => void; onDone: () => void; remaining: number }) {
   const [rows, setRows] = useState(items.map((i) => ({ ...i, on: true, q: String(i.qty) })));
   const [total, setTotal] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<Array<{ code: string; qty: number }> | null>(null);
   const chosen = rows.filter((r) => r.on).map((r) => ({ code: r.code, qty: Math.round(Number(r.q)) || 0 })).filter((r) => r.qty > 0);
   const sum = chosen.reduce((a, r) => a + r.qty, 0);
+  const doneBtn = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (result) doneBtn.current?.focus(); }, [result]);
+
+  if (result) {
+    const beads = result.reduce((a, r) => a + r.qty, 0);
+    return (
+      <Sheet title="已入库" onClose={onClose} footer={<button ref={doneBtn} className="btn btn-iron" onClick={onClose}>完成</button>}>
+        <div className="shop-sum" role="status">
+          <span className="shop-sum-ic"><Icon name="check" size={28} /></span>
+          <h3>入库 {result.length} 色 · {fmt(beads)} 颗</h3>
+          <p className="meta">{remaining ? `采购清单还剩 ${remaining} 个色号没买齐。` : "采购清单已清空，可以开工了。"} 操作可以在底部提示里撤销。</p>
+          <div className="shop-chips" style={{ justifyContent: "center" }}>
+            {result.map((r) => <span className="shop-chip" key={r.code}><Bead code={r.code} size={16} /><span className="code">{r.code}</span><span className="sk-pos">+{fmt(r.qty)}</span></span>)}
+          </div>
+        </div>
+      </Sheet>
+    );
+  }
   return (
     <Sheet title="买回来了 → 入库" onClose={onClose} footer={
       <>
         <button className="btn" onClick={onClose}>取消</button>
-        <button className="btn btn-iron" disabled={!chosen.length || busy} onClick={async () => { setBusy(true); try { await commitPurchase(chosen, { note, totalPrice: Number(total) || undefined }); onDone(); onClose(); } finally { setBusy(false); } }}>
+        <button className="btn btn-iron" disabled={!chosen.length || busy} onClick={async () => { setBusy(true); try { await commitPurchase(chosen, { note, totalPrice: Number(total) || undefined }); onDone(); setResult(chosen); } finally { setBusy(false); } }}>
           入库 {chosen.length} 色 · {fmt(sum)} 颗
         </button>
       </>

@@ -35,6 +35,8 @@ export type GridReading = {
   emptyCells: number;
   /** 背景色（被视为空格的颜色）#rrggbb，没有则 null */
   backgroundHex: string | null;
+  /** 内部颜色足够纯（平涂）的格子占比：真图纸 ≥ 0.8，插画 / 照片很低 */
+  flatFrac?: number;
   /** 图纸是否在每个有色格里印了色号（≥ 一半以上的颜色簇里，格内都有明显的文字墨迹） */
   inkChart?: boolean;
   /** 每格是否有文字墨迹（行优先，cols×rows），仅供格内色号 OCR 使用 */
@@ -74,6 +76,8 @@ export type LegendReading = {
   rawText: string;
   /** 图例色块实际渲染色（色号 → RGB），读得到时才有；用于校准格子颜色匹配 */
   colors?: Record<string, { r: number; g: number; b: number }>;
+  /** 图例里所有色块（含没读出数量的）：色号 + 色块实际渲染色，构成闭集色板；count 为 null 表示数量没读到 */
+  palette?: Array<{ code: string; rgb: { r: number; g: number; b: number }; count: number | null; /** 色号是按颜色最近邻猜的（文字没读出） */ guessed?: boolean }>;
 };
 
 export type StepStatus = "ok" | "warn" | "fail" | "skip";
@@ -90,6 +94,8 @@ export type AnalyzeOptions = {
   allowedCodes?: string[] | null;
   /** 是否读取格内印的色号（默认 true；ocr:false 时一并关闭） */
   cellCodes?: boolean;
+  /** 是否读取抬头（尺寸 / 色数 / 总数，默认 true；ocr:false 时一并关闭） */
+  headerOcr?: boolean;
   /** 是否读取图例（默认 true；ocr:false 时一并关闭） */
   legendOcr?: boolean;
   /** 手动覆盖列数 / 行数（自动检测错时用户可改） */
@@ -117,6 +123,14 @@ export type AnalyzeResult = {
   /** 图例与网格逐色比对（两者都有时） */
   diff: Array<{ code: string; legend: number; grid: number }>;
   source: { width: number; height: number };
+  /** 这张图像不像拼豆图纸（普通插画/照片）时为 false，界面会建议改用“生成图纸” */
+  isChart?: boolean;
+  /** isChart 为 false 时的简短原因（中文） */
+  notChartReason?: string;
+  /** 图上标注的信息（如“尺寸:55x61 · 9 色 · 1806 颗”），读不到的字段为 null */
+  header?: { cols: number | null; rows: number | null; colors: number | null; total: number | null };
+  /** 色号体系可能不是 MARD（图例色块颜色与 MARD 色卡大面积不符）时的提示 */
+  paletteWarning?: string;
 };
 
 export type { PixelSource };

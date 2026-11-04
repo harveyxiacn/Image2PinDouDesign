@@ -1,11 +1,12 @@
 // 焦点：按天、按批次分组的流水账——一眼看清每次入库 / 消耗 / 盘点，并能整批撤销。
 import "../components/stock/stock.css";
 import { useMemo, useState } from "react";
+import { colorOf } from "../lib/palette";
 import { Bead, Icon, fmt, fmtTime, useRoute } from "../components/ui";
 import { toast } from "../components/ui";
 import { useData, putRecords, softDelete } from "../lib/db";
 import { countsToCsv } from "../lib/inventory";
-import { METHOD_LABEL, totalOf, type TxnKind } from "../lib/model";
+import { METHOD_LABEL, totalOf, type Txn, type TxnKind } from "../lib/model";
 import { groupLedger, limitGroups, txnsToCsvRows, type LedgerGroup } from "../lib/stockview";
 import { downloadText } from "../components/stock/download";
 import "./History.css";
@@ -25,19 +26,33 @@ export default function History() {
   const [kind, setKind] = useState<KindFilter>("all");
   const [code, setCode] = useState(route.query.get("code") ?? "");
   const [limit, setLimit] = useState(PAGE);
+  // 刚撤销的流水：留在原位显示“已撤销 · 恢复”，不让下面的内容上跳
+  const [revealed, setRevealed] = useState<Map<string, Txn>>(new Map());
+  const [say, setSay] = useState("");
 
   const days = useMemo(() => {
     const kinds: Array<TxnKind | "pattern"> | undefined = kind === "all" ? undefined : kind === "adjust" ? ["adjust", "stocktake"] : [kind];
-    return groupLedger(data.txns, data.patterns, { kinds, code });
-  }, [data.txns, data.patterns, kind, code]);
+    // 界面快照里没有已删除的流水，刚撤销的在这里补回来，只用来占位
+    const withGhosts = revealed.size ? [...data.txns, ...[...revealed.values()].map((t) => ({ ...t, deleted: true }))] : data.txns;
+    return groupLedger(withGhosts, data.patterns, { kinds, code, reveal: new Set(revealed.keys()) });
+  }, [data.txns, data.patterns, kind, code, revealed]);
   const view = useMemo(() => limitGroups(days, limit), [days, limit]);
 
   const undo = (g: Extract<LedgerGroup, { type: "txns" }>) => {
     const label = g.note || KIND_LABEL[g.kind];
     if (!window.confirm(`撤销这一组记录？\n${label}（${g.txns.length} 条）\n库存会回到记录之前的数量。`)) return;
     const originals = g.txns;
+    setRevealed((cur) => new Map([...cur, ...originals.map((t) => [t.id, t] as const)]));
     void softDelete("txns", originals.map((t) => t.id));
-    toast(`已撤销 ${originals.length} 条记录`, { label: "恢复", run: () => { const at = Date.now(); void putRecords("txns", originals.map((t) => ({ ...t, deleted: undefined, updatedAt: at + 1 }))); } });
+    setSay(`已撤销 ${originals.length} 条记录，可在原位置恢复`);
+    toast(`已撤销 ${originals.length} 条记录`, { label: "恢复", run: () => restore(originals) });
+  };
+  const restore = (originals: Txn[]) => {
+    const at = Date.now();
+    void putRecords("txns", originals.map((t) => ({ ...t, deleted: undefined, updatedAt: at + 1 }))).then(() => {
+      setRevealed((cur) => { const n = new Map(cur); originals.forEach((t) => n.delete(t.id)); return n; });
+      setSay(`已恢复 ${originals.length} 条记录`);
+    });
   };
   const exportCsv = () => downloadText("拼豆库存流水.csv", countsToCsv(txnsToCsvRows(data.txns), [["time", "时间"], ["code", "色号"], ["delta", "数量"], ["kind", "类型"], ["unitPrice", "单价"], ["note", "备注"], ["batch", "批次"]]), "text/csv;charset=utf-8");
 
@@ -55,6 +70,7 @@ export default function History() {
         <input className="input" style={{ width: 140 }} type="search" placeholder="按色号筛选" aria-label="按色号筛选" value={code} onChange={(e) => { setCode(e.target.value); setLimit(PAGE); }} />
       </div>
 
+      <div className="sr-only" role="status" aria-live="polite">{say}</div>
       {!view.total ? (
         <div className="panel empty pegboard">
           <h3>{data.txns.length || data.patterns.length ? "没有符合条件的记录" : "还没有记录"}</h3>
@@ -64,7 +80,7 @@ export default function History() {
         <div>
           {view.days.map((day) => (
             <section key={day.day}>
-              <div className="hist-day">{day.label}</div>
+              <h2 className="hist-day">{day.label}<span>{day.groups.length} 组</span></h2>
               <div className="panel">
                 {day.groups.map((g) => g.type === "pattern" ? (
                   <div className="hist-group" key={g.key}>
@@ -74,7 +90,7 @@ export default function History() {
                       <div className="meta">{METHOD_LABEL[g.pattern.method]} · {Object.keys(g.pattern.counts).length} 色 · {fmt(totalOf(g.pattern.counts))} 颗</div>
                     </div>
                   </div>
-                ) : <TxnGroup key={g.key} g={g} onUndo={() => undo(g)} />)}
+                ) : <TxnGroup key={g.key} g={g} onUndo={() => undo(g)} onRestore={() => restore(g.txns)} />)}
               </div>
             </section>
           ))}
@@ -89,10 +105,22 @@ export default function History() {
   );
 }
 
-function TxnGroup({ g, onUndo }: { g: Extract<LedgerGroup, { type: "txns" }>; onUndo: () => void }) {
-  const [all, setAll] = useState(false);
-  const chips = all ? g.txns : g.txns.slice(0, 8);
+function TxnGroup({ g, onUndo, onRestore }: { g: Extract<LedgerGroup, { type: "txns" }>; onUndo: () => void; onRestore: () => void }) {
+  const [open, setOpen] = useState(false);
+  if (g.undone) {
+    return (
+      <div className="hist-group hist-undone">
+        <span className="hist-bar" />
+        <div className="hist-main hist-undone-row">
+          <span className="meta">已撤销：{g.note || KIND_LABEL[g.kind]} · {g.txns.length} 条 · 库存已回退</span>
+          <button className="btn btn-sm" onClick={onRestore}>恢复</button>
+        </div>
+      </div>
+    );
+  }
+  const preview = g.txns.slice(0, 6);
   const price = g.txns.reduce((a, t) => a + (t.unitPrice ? t.unitPrice * t.delta : 0), 0);
+  const panelId = `hist-d-${g.key}`;
   return (
     <div className="hist-group">
       <span className={`hist-bar ${g.kind}`} />
@@ -105,12 +133,27 @@ function TxnGroup({ g, onUndo }: { g: Extract<LedgerGroup, { type: "txns" }>; on
           <button className="btn btn-ghost btn-sm" onClick={onUndo} aria-label="撤销这一组"><Icon name="trash" />撤销</button>
         </div>
         {g.note ? <div className="hist-note">{g.note}</div> : null}
-        <div className="hist-chips">
-          {chips.map((t) => (
-            <span className="hist-chip" key={t.id}><Bead code={t.code} size={16} /><span className="code">{t.code}</span><span className={t.delta > 0 ? "sk-pos" : "sk-neg"}>{t.delta > 0 ? "+" : "−"}{fmt(Math.abs(t.delta))}</span></span>
-          ))}
-          {g.txns.length > 8 ? <button className="btn btn-ghost btn-sm" onClick={() => setAll(!all)}>{all ? "收起" : `另 ${g.txns.length - 8} 条`}</button> : null}
-        </div>
+        {g.txns.length > 1 || g.txns.some((t) => t.unitPrice) ? (
+          <button className="hist-expand" aria-expanded={open} aria-controls={panelId} onClick={() => setOpen(!open)}>
+            <span className="hist-chips" aria-hidden={open}>
+              {preview.map((t) => <span className="hist-chip" key={t.id}><Bead code={t.code} size={16} /><span className="code">{t.code}</span><span className={t.delta > 0 ? "sk-pos" : "sk-neg"}>{t.delta > 0 ? "+" : "−"}{fmt(Math.abs(t.delta))}</span></span>)}
+            </span>
+            <span className="hist-more"><span className="hist-caret" aria-hidden="true"><Icon name="chevron" size={14} /></span>{open ? "收起明细" : g.txns.length > preview.length ? `展开全部 ${g.txns.length} 条` : "展开明细"}</span>
+          </button>
+        ) : (
+          <div className="hist-chips">{preview.map((t) => <span className="hist-chip" key={t.id}><Bead code={t.code} size={16} /><span className="code">{t.code}</span><span className={t.delta > 0 ? "sk-pos" : "sk-neg"}>{t.delta > 0 ? "+" : "−"}{fmt(Math.abs(t.delta))}</span></span>)}</div>
+        )}
+        {open ? (
+          <ul id={panelId} className="hist-detail">
+            {g.txns.map((t) => (
+              <li key={t.id}>
+                <Bead code={t.code} size={18} /><span className="code hist-dc">{t.code}</span><span className="meta hist-dn">{colorOf(t.code)?.nameZh}</span>
+                {t.unitPrice ? <span className="meta num">¥{(t.unitPrice * t.delta).toFixed(2)}</span> : null}
+                <span className={`num hist-dq ${t.delta > 0 ? "sk-pos" : "sk-neg"}`}>{t.delta > 0 ? "+" : "−"}{fmt(Math.abs(t.delta))}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </div>
     </div>
   );

@@ -11,7 +11,10 @@ export type OcrBackend = {
   terminate?: () => Promise<void>;
 };
 let backend: OcrBackend | null = null;
-export function setOcrBackend(b: OcrBackend | null): void { backend = b; }
+// 同时挂在 globalThis 上：测试 / 脚本经不同的模块加载器（vite ssr）可能得到两份本模块，全局变量让它们共用同一个后端
+const G = globalThis as unknown as { __phOcrBackend?: OcrBackend | null };
+export function setOcrBackend(b: OcrBackend | null): void { backend = b; G.__phOcrBackend = b; }
+const activeBackend = (): OcrBackend | null => backend ?? G.__phOcrBackend ?? null;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let workerPromise: Promise<any> | null = null;
@@ -51,7 +54,8 @@ async function getWorker(): Promise<any> {
 }
 
 export async function terminateOcr(): Promise<void> {
-  if (backend) { try { await backend.terminate?.(); } catch { /* 忽略 */ } return; }
+  const be = activeBackend();
+  if (be) { try { await be.terminate?.(); } catch { /* 忽略 */ } return; }
   const p = workerPromise;
   workerPromise = null;
   if (!p) return;
@@ -119,10 +123,13 @@ export async function ocrWords(
   opts: { scale?: number; psm?: string; whitelist?: string } = {}
 ): Promise<OcrResult> {
   if (signal?.aborted) throw abortError();
-  if (backend) return backend.recognize(source, signal, opts);
+  const be = activeBackend();
+  if (be) return be.recognize(source, signal, opts);
   const maxSide = Math.max(source.width, source.height);
   // 小图放大 2 倍，图例小字更容易识别；过大的图不再放大
   const scale = opts.scale ?? (maxSide < 1600 ? 2 : 1);
+  const outW = source.width * scale, outH = source.height * scale;
+  if (outW < 4 || outH < 4 || outW > 16000 || outH > 32000) throw new Error(`图像尺寸不适合识别 ${Math.round(outW)}x${Math.round(outH)}`);
   const { canvas } = toCanvas(source, scale);
   const worker = await getWorker();
   if (signal?.aborted) throw abortError();

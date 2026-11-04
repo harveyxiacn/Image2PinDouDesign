@@ -1,0 +1,28 @@
+/* 色号用量图：uc- 前缀 */
+.uc { padding: 4px 0 12px; }
+.uc-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding: 4px 16px 8px; font-size: var(--t-small); color: var(--ink-2); }
+.uc-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.uc-sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.uc-sw.ok, .uc-bar i.ok { background: var(--leaf); }
+.uc-sw.short, .uc-bar i.short { background: var(--iron); }
+.uc-list { list-style: none; margin: 0; padding: 0 8px; }
+.uc-row {
+  display: grid; grid-template-columns: 64px minmax(0, 1fr) 84px; align-items: center; gap: 10px; width: 100%; min-height: 44px;
+  padding: 4px 8px; border: 0; border-radius: var(--r-ctl); background: transparent; text-align: left; cursor: pointer;
+}
+.uc-row:hover { background: var(--rule-soft); }
+.uc-code { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: var(--t-small); }
+.uc-track { position: relative; height: 14px; display: block; border-left: 1px solid var(--rule-strong); }
+.uc-bar { display: flex; gap: 2px; height: 100%; min-width: 3px; overflow: hidden; border-radius: 0 4px 4px 0; transform-origin: left; animation: uc-grow 320ms var(--ease) both; }
+.uc-bar i { display: block; height: 100%; min-width: 0; }
+.uc-num { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.25; font-size: var(--t-small); }
+.uc-num b { font-weight: 600; color: var(--ink); }
+.uc-st { display: inline-flex; align-items: center; gap: 3px; font-weight: 500; }
+.uc-st.short { color: var(--iron-ink); }
+.uc-st.ok { color: var(--leaf); }
+.uc-rest { padding: 4px 16px 0; }
+.uc-table { margin: 8px 16px 0; font-size: var(--t-small); }
+.uc-table summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; color: var(--ink-2); }
+@keyframes uc-grow { from { transform: scaleX(0); } to { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .uc-bar { animation: none; } }
+@media (max-width: 420px) { .uc-row { grid-template-columns: 56px minmax(0, 1fr) 76px; gap: 8px; } }

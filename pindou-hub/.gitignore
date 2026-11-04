@@ -8,3 +8,6 @@ android/build/
 android/.gradle/
 android/local.properties
 android/app/src/main/assets/public/
+
+# 用户自己的参考图纸（第三方作品，只在本地用于调试识别，不上传）
+拼豆图/

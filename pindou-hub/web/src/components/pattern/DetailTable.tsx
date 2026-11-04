@@ -26,7 +26,7 @@ export default function DetailTable({ counts, copies, stock, focusCode, onPick }
           <tbody>
             {rows.map(({ c, need, have, gap }) => (
               <tr key={c} data-click="true" data-focus={focusCode === c} onClick={() => onPick(c)}>
-                <td><BeadCode code={c} showName /></td>
+                <td><button type="button" className="pt-pick" aria-pressed={focusCode === c} aria-label={`${focusCode === c ? "取消高亮" : "高亮"} ${c}`} onClick={(e) => { e.stopPropagation(); onPick(c); }}><BeadCode code={c} showName /></button></td>
                 <td className="r num">{fmt(counts[c])}</td>
                 {multi ? <td className="r num">{fmt(need)}</td> : null}
                 <td className="r num">{fmt(have)}</td>

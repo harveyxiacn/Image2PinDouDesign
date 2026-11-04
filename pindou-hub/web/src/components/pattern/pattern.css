@@ -45,7 +45,8 @@
 /* 拼豆图查看器 */
 .pt-matrix { position: relative; }
 .pt-matrix-tools { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
-.pt-matrix-scroll { overflow: auto; max-height: 70vh; border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--paper-sunk); overscroll-behavior: contain; }
+.pt-matrix-scroll { overflow: auto; max-height: 70vh; border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--paper-sunk); overscroll-behavior: contain; touch-action: none; cursor: grab; }
+.pt-matrix-scroll:active { cursor: grabbing; }
 .pt-matrix-scroll canvas { display: block; }
 
 /* 缩略图 / 卡片 */
@@ -75,3 +76,45 @@
 @keyframes step-in { from { opacity: 0; transform: translateX(-6px); } }
 @keyframes step-ic { from { transform: scale(0.6); } 60% { transform: scale(1.12); } }
 @media (prefers-reduced-motion: reduce) { .pt-steps li, .pt-steps li .pt-step-ic { animation: none; } }
+
+
+/* 细进度条（确定进度）：用 transform 过渡 */
+.pt-progress { height: 4px; border-radius: 2px; background: var(--rule-soft); overflow: hidden; }
+.pt-progress i { display: block; height: 100%; background: var(--iron); transform-origin: left center; transition: transform 260ms var(--ease); }
+.pt-progress-steps { margin-bottom: 8px; }
+@media (prefers-reduced-motion: reduce) { .pt-progress i { transition: none; } }
+
+/* 点色号高亮：按钮占满单元格第一列，键盘可达，触屏 ≥44px */
+.pt-pick { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 4px 2px; margin: -4px -2px; color: inherit; font: inherit; cursor: pointer; border-radius: var(--r-ctl); text-align: left; }
+.pt-pick:hover { background: var(--rule-soft); }
+.pt-pick[aria-pressed="true"] { background: var(--iron-wash); }
+@media (pointer: coarse) { .pt-pick { min-height: 44px; } }
+.pt-diff-chip { margin-left: 6px; }
+
+/* 结果行依次浮现：--i 为行序号，每行 24ms，最多 12 行（总共 ≤ 290ms） */
+.pt-counts tr[data-in] { animation: row-in 280ms var(--ease) both; animation-delay: calc(var(--i, 0) * 24ms); }
+@keyframes row-in { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { .pt-counts tr[data-in] { animation: none; } }
+
+/* 图上标注核对 */
+.pt-header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 12px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--paper-sunk); }
+.pt-header-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* 不是图纸 */
+.pt-notchart { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px 14px; align-items: start; }
+.pt-notchart > .row { grid-column: 1 / -1; }
+.pt-notchart-ic { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; background: var(--amber-wash); color: var(--amber); }
+
+/* 保存成功：按钮里的对勾描边画出来 */
+.pt-save[data-success="true"] { background: var(--leaf); border-color: var(--leaf); color: var(--paper); opacity: 1; }
+.pt-save .pt-tick { margin-right: 6px; vertical-align: -3px; }
+.pt-tick path { stroke-dasharray: 24; stroke-dashoffset: 24; animation: tick-draw 320ms var(--ease) 60ms forwards; }
+@keyframes tick-draw { to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) { .pt-tick path { animation: none; stroke-dashoffset: 0; } }
+
+/* 通用缩放平移容器（图片） */
+.pt-zoom-box { position: relative; overflow: hidden; touch-action: none; border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--paper-sunk); cursor: default; line-height: 0; }
+.pt-zoom-box[data-zoomed="true"] { cursor: grab; }
+.pt-zoom-box[data-zoomed="true"]:active { cursor: grabbing; }
+.pt-zoom-inner { transform-origin: center center; will-change: transform; }
+.pt-zoom-inner img { width: 100%; height: auto; display: block; user-select: none; -webkit-user-drag: none; }

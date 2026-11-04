@@ -5,3 +5,57 @@
 .ga-tile { overflow: hidden; display: flex; flex-direction: column; }
 .ga-tile .row { padding: 10px 12px; }
 .ga-empty { padding: 56px 16px; border: 1px dashed var(--rule-strong); border-radius: var(--r-panel); }
+
+/* 分组视图 */
+.ga-sec { margin-bottom: 24px; }
+.ga-sec-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; position: sticky; top: 0; z-index: 2; padding: 6px 0; background: var(--paper); }
+.ga-sec-head h2 { font-size: var(--t-h3); }
+.ga-hint { margin: -6px 0 12px; }
+
+/* 多选 */
+.ga-item { position: relative; border-radius: var(--r-panel); }
+.ga-item > .pt-card { height: 100%; -webkit-touch-callout: none; }
+.ga-selecting .ga-item > .pt-card { user-select: none; -webkit-user-select: none; }
+.ga-check {
+  position: absolute; top: 4px; left: 4px; z-index: 1; width: 44px; height: 44px; display: grid; place-items: center; cursor: pointer;
+  opacity: 0; transition: opacity 120ms var(--ease);
+}
+.ga-check input { width: 22px; height: 22px; margin: 0; accent-color: var(--iron); cursor: pointer; background: var(--paper-lift); }
+.ga-item:hover .ga-check, .ga-item:focus-within .ga-check, .ga-item.is-selecting .ga-check, .ga-item.is-selected .ga-check { opacity: 1; }
+@media (pointer: coarse) { .ga-item:not(.is-selecting) .ga-check { display: none; } }
+.ga-item.is-selected > .pt-card { box-shadow: 0 0 0 2px var(--iron); background: var(--iron-wash); }
+.ga-bulk {
+  position: fixed; z-index: 40; left: 50%; bottom: 16px; transform: translateX(-50%); width: min(720px, calc(100% - 32px));
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border-radius: var(--r-panel);
+  background: var(--paper-lift); border: 1px solid var(--rule-strong);
+  animation: ga-bulk-in 200ms var(--ease) both;
+}
+.ga-bulk-n { padding: 0 6px; white-space: nowrap; }
+.ga-bulk .btn { min-height: 44px; }
+.ga-bulk .ga-del { color: var(--iron-ink); }
+.ga-tagpick { border: 0; cursor: pointer; height: 32px; padding: 0 12px; }
+.ga-tagpick[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+@media (max-width: 820px) {
+  .ga-bulk { bottom: calc(76px + var(--safe-bottom)); }
+
+}
+/* 多选条出现时，撤销提示抬到它上面 */
+body:has(.ga-bulk) .toast-host { bottom: calc(92px + var(--safe-bottom)); }
+@media (max-width: 820px) { body:has(.ga-bulk) .toast-host { bottom: calc(190px + var(--safe-bottom)); } }
+.ga-selecting { padding-bottom: 96px; }
+@keyframes ga-bulk-in { from { opacity: 0; transform: translate(-50%, 12px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@media (prefers-reduced-motion: reduce) { .ga-bulk { animation: none; } }
+.ga-check::before { content: ""; position: absolute; width: 30px; height: 30px; border-radius: 8px; background: var(--paper-lift); border: 1px solid var(--rule-strong); }
+.ga-check input { position: relative; }
+.ga-bulk-acts { display: flex; gap: 8px; flex-wrap: wrap; order: 3; }
+.ga-bulk .spacer + .btn { order: 2; }
+@media (max-width: 820px) {
+  .ga-bulk .spacer { display: block; flex: 1; height: auto; flex-basis: 0; }
+  .ga-bulk-acts { width: 100%; flex-wrap: nowrap; }
+  .ga-bulk-acts .btn { flex: 1; padding: 0 4px; white-space: nowrap; }
+}
+@media (max-width: 560px) {
+  .ga-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .ga-item .pt-card-body { padding: 8px; gap: 6px; }
+  .ga-item .pt-card-stats { gap: 8px; flex-wrap: wrap; }
+}

@@ -9,6 +9,7 @@ import { BeadBox, type CellInfo } from "../components/stock/BeadBox";
 import { CodeSheet } from "../components/stock/CodeSheet";
 import { BatchEntry } from "../components/stock/BatchEntry";
 import { KitInit } from "../components/stock/KitInit";
+import { useStockFlash } from "../components/stock/useStockFlash";
 import "./Inventory.css";
 
 type Filter = "recorded" | "instock" | "low" | "need" | "kit";
@@ -26,6 +27,7 @@ export default function Inventory() {
 
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
   const demand = useMemo(() => demandByCode(data.patterns, isActive), [data.patterns]);
+  const flashes = useStockFlash(stock);
   const { minStock, lowStock } = data.prefs;
 
   const cells: CellInfo[] = useMemo(() => {
@@ -76,7 +78,7 @@ export default function Inventory() {
         </div>
       </div>
 
-      {shown.length ? <BeadBox cells={shown} onOpen={setOpen} /> : (
+      {shown.length ? <BeadBox cells={shown} onOpen={setOpen} flashes={flashes} /> : (
         <div className="panel empty pegboard">
           {!hasAny && filter !== "kit" ? (
             <>

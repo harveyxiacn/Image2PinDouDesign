@@ -36,6 +36,12 @@ export type ChartOpts = {
   titleBand?: boolean;
   legendBand?: boolean;
   seed?: number;
+  /** 空格画成浅灰 / 白的棋盘格（半格大小的方块，我嘞个豆等软件的画法） */
+  checker?: boolean;
+  /** 网格线颜色灰度（默认细线 160）；很浅（如 244）时只有彩色块之间才有强边缘 */
+  lineColor?: number;
+  /** 只有这个格子范围内才有豆子，其余全是空格（用来模拟“图形只占图纸一角”） */
+  beadRect?: { c0: number; r0: number; c1: number; r1: number };
 };
 
 export type Chart = {
@@ -84,12 +90,20 @@ export function buildChart(o: ChartOpts): Chart {
     const row: Array<string | null> = [];
     for (let cx = 0; cx < o.cols; cx += 1) {
       const border = cx === 0 || cy === 0 || cx === o.cols - 1 || cy === o.rows - 1;
-      const empty = !(o.solidBorder && border) && rnd() < (o.emptyFrac ?? 0.1);
+      const outside = !!o.beadRect && (cx < o.beadRect.c0 || cx > o.beadRect.c1 || cy < o.beadRect.r0 || cy > o.beadRect.r1);
+      const empty = outside || (!(o.solidBorder && border) && rnd() < (o.emptyFrac ?? 0.1));
       const code = empty ? null : codes[Math.floor(rnd() * codes.length)];
       row.push(code);
       if (code) counts[code] = (counts[code] ?? 0) + 1;
       const xa = x0 + Math.round(cx * o.pitch), xb = x0 + Math.round((cx + 1) * o.pitch);
       const ya = y0 + Math.round(cy * o.pitch), yb = y0 + Math.round((cy + 1) * o.pitch);
+      if (!code && o.checker) {
+        const half = o.pitch / 2;
+        for (let y = ya; y < yb; y += 1) for (let x = xa; x < xb; x += 1) {
+          const v = (Math.floor((x - x0) / half) + Math.floor((y - y0) / half)) % 2 === 0 ? 255 : 226;
+          fill(x, y, x + 1, y + 1, v, v, v);
+        }
+      }
       if (code) {
         const [r, g, b] = render[code];
         fill(xa, ya, xb, yb, r, g, b);
@@ -105,14 +119,14 @@ export function buildChart(o: ChartOpts): Chart {
     for (let k = 0; k <= o.cols; k += 1) {
       const bold = o.boldEvery && k % o.boldEvery === 0;
       const w = bold ? lw + 1 : lw;
-      const c = bold ? 70 : 160;
+      const c = bold ? 70 : (o.lineColor ?? 160);
       const x = x0 + Math.round(k * o.pitch - w / 2);
       fill(x, y0, x + w, y0 + gh, c, c, c);
     }
     for (let k = 0; k <= o.rows; k += 1) {
       const bold = o.boldEvery && k % o.boldEvery === 0;
       const w = bold ? lw + 1 : lw;
-      const c = bold ? 70 : 160;
+      const c = bold ? 70 : (o.lineColor ?? 160);
       const y = y0 + Math.round(k * o.pitch - w / 2);
       fill(x0, y, x0 + gw, y + w, c, c, c);
     }
@@ -296,12 +310,15 @@ export function createNodeOcrBackend() {
       const source = input as PixelSource; // node 下只会传 PixelSource（没有 canvas）
       const scale = opts.scale ?? 1;
       const img = upscaleBilinear(source, scale);
+      // tesseract 对极端长宽比 / 过大图会在 worker 线程里抛未捕获错误，直接拒绝
+      if (img.width < 4 || img.height < 4 || img.width > 12000 || img.height > 30000 || img.height / img.width > 120) throw new Error(`图像尺寸不适合识别 ${img.width}x${img.height}`);
       if (!worker) {
         const mod = await import("tesseract.js");
         const langPath = fileURLToPath(new URL("../../public/ocr/", import.meta.url));
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        worker = await (mod as any).createWorker("eng", 1, { langPath, gzip: true, cachePath: mkdtempSync(join(tmpdir(), "ph-ocr-")), logger: () => {} });
+        worker = await (mod as any).createWorker("eng", 1, { langPath, gzip: true, cachePath: mkdtempSync(join(tmpdir(), "ph-ocr-")), logger: () => {}, errorHandler: () => {} });
       }
+      if (process.env.PH_OCR_TRACE) console.log(`OCR ${img.width}x${img.height} psm=${opts.psm ?? "11"} wl=${!!opts.whitelist}`);
       const t0 = performance.now();
       await worker.setParameters({ tessedit_pageseg_mode: opts.psm ?? "11", user_defined_dpi: "300", tessedit_char_whitelist: opts.whitelist ?? "" });
       const res = await worker.recognize(encodePng(img), {}, { blocks: true, text: true });
@@ -323,4 +340,104 @@ export function driftColors(src: PixelSource, gain: [number, number, number], of
   const o = new Uint8ClampedArray(src.data);
   for (let i = 0; i < o.length; i += 4) for (let c = 0; c < 3; c += 1) o[i + c] = o[i + c] * gain[c] + offset[c];
   return { width: src.width, height: src.height, data: o };
+}
+
+/** 平滑插画：渐变底 + 几个带柔和边缘的色块，没有周期结构（用来测“不是图纸”）。 */
+export function illustrationImage(w: number, h: number): PixelSource {
+  const data = new Uint8ClampedArray(w * h * 4);
+  const discs = [[0.3, 0.4, 0.22, [230, 120, 120]], [0.65, 0.45, 0.18, [90, 140, 220]], [0.5, 0.75, 0.15, [240, 210, 90]]] as const;
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const i = (y * w + x) * 4;
+      let r = 235 - (y / h) * 30, g = 238 - (x / w) * 20, b = 245;
+      for (const [cx, cy, rad, col] of discs) {
+        const d = Math.hypot(x / w - cx, (y / h - cy) * (h / w)) / rad;
+        const t = Math.max(0, Math.min(1, (1.0 - d) * 6)); // 边缘 ~1/6 半径宽的柔和过渡
+        r = r * (1 - t) + col[0] * t; g = g * (1 - t) + col[1] * t; b = b * (1 - t) + col[2] * t;
+      }
+      data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 255;
+    }
+  }
+  return { width: w, height: h, data };
+}
+
+// ───────────── 带标尺（坐标数字带）的合成图纸 ─────────────
+
+const FONT_3X5: Record<string, string> = {
+  "0": "111101101101111", "1": "010110010010111", "2": "111001111100111", "3": "111001111001111", "4": "101101111001001",
+  "5": "111100111001111", "6": "111100111101111", "7": "111001001001001", "8": "111101111101111", "9": "111101111001111"
+};
+
+export type RulerChartOpts = ChartOpts & {
+  /** blue：蓝紫色底白字；white：白（浅灰）底深色字 */
+  ruler: "blue" | "white";
+  /** 下 / 右标尺从大数往小数（比奇堡居民那类）；上 / 左仍从 1 开始 */
+  reversed?: boolean;
+};
+
+/** 画一个数字串（3x5 点阵放大 sc 倍），居中于 (cx, cy)。 */
+function drawNumber(data: Uint8ClampedArray, width: number, height: number, text: string, cx: number, cy: number, sc: number, rgb: [number, number, number]) {
+  const w = text.length * 4 * sc - sc;
+  let x = Math.round(cx - w / 2);
+  const y = Math.round(cy - (5 * sc) / 2);
+  for (const ch of text) {
+    const bits = FONT_3X5[ch];
+    for (let i = 0; i < 15; i += 1) {
+      if (bits[i] !== "1") continue;
+      const px = x + (i % 3) * sc, py = y + Math.floor(i / 3) * sc;
+      for (let yy = 0; yy < sc; yy += 1) for (let xx = 0; xx < sc; xx += 1) {
+        const X = px + xx, Y = py + yy;
+        if (X < 0 || Y < 0 || X >= width || Y >= height) continue;
+        const k = (Y * width + X) * 4;
+        data[k] = rgb[0]; data[k + 1] = rgb[1]; data[k + 2] = rgb[2];
+      }
+    }
+    x += 4 * sc;
+  }
+}
+
+/** 在 buildChart 的图纸四周各加一圈整格宽的标尺（带网格线、格内数字），返回的 matrix / counts / cols / rows 仍是“不含标尺”的真值。 */
+export function buildRulerChart(o: RulerChartOpts): Chart {
+  const pitch = o.pitch;
+  const pad = Math.ceil(pitch) + 12;
+  const base = buildChart({ ...o, titleBand: o.titleBand ?? false, legendBand: o.legendBand ?? false, margin: { left: pad, top: pad + 40, right: pad, bottom: pad + 70 } });
+  const { width, height, data } = base.src;
+  const fill = (x0: number, y0: number, x1: number, y1: number, rgb: [number, number, number]) => {
+    for (let y = Math.max(0, Math.round(y0)); y < Math.min(height, Math.round(y1)); y += 1) {
+      for (let x = Math.max(0, Math.round(x0)); x < Math.min(width, Math.round(x1)); x += 1) {
+        const i = (y * width + x) * 4;
+        data[i] = rgb[0]; data[i + 1] = rgb[1]; data[i + 2] = rgb[2];
+      }
+    }
+  };
+  const bg: [number, number, number] = o.ruler === "blue" ? [133, 140, 209] : [244, 244, 244];
+  const fg: [number, number, number] = o.ruler === "blue" ? [255, 255, 255] : [70, 70, 70];
+  const line: [number, number, number] = o.ruler === "blue" ? [60, 66, 140] : [160, 160, 160];
+  const { x0, y0, gridWidth: gw, gridHeight: gh } = base;
+  const sc = pitch >= 26 ? 2 : 1;
+  const num = (k: number, n: number, down: boolean) => String(down ? n - k : k + 1);
+  // 上 / 下标尺（整行，含四个角）
+  for (const side of ["t", "b"] as const) {
+    const ya = side === "t" ? y0 - pitch : y0 + gh;
+    fill(x0 - pitch, ya, x0 + gw + pitch, ya + pitch, bg);
+    for (let k = 0; k < o.cols; k += 1) {
+      const cx = x0 + (k + 0.5) * pitch;
+      drawNumber(data, width, height, num(k, o.cols, side === "b" && !!o.reversed), cx, ya + pitch / 2, sc, fg);
+    }
+    for (let k = -1; k <= o.cols + 1; k += 1) fill(x0 + k * pitch, ya, x0 + k * pitch + 1, ya + pitch, line);
+    fill(x0 - pitch, ya, x0 + gw + pitch, ya + 1, line);
+    fill(x0 - pitch, ya + pitch - 1, x0 + gw + pitch, ya + pitch, line);
+  }
+  for (const side of ["l", "r"] as const) {
+    const xa = side === "l" ? x0 - pitch : x0 + gw;
+    fill(xa, y0, xa + pitch, y0 + gh, bg);
+    for (let k = 0; k < o.rows; k += 1) {
+      const cy = y0 + (k + 0.5) * pitch;
+      drawNumber(data, width, height, num(k, o.rows, side === "r" && !!o.reversed), xa + pitch / 2, cy, sc, fg);
+    }
+    for (let k = 0; k <= o.rows; k += 1) fill(xa, y0 + k * pitch, xa + pitch, y0 + k * pitch + 1, line);
+    fill(xa, y0, xa + 1, y0 + gh, line);
+    fill(xa + pitch - 1, y0, xa + pitch, y0 + gh, line);
+  }
+  return base;
 }

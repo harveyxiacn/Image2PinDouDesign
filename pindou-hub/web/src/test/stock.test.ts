@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Pattern, Txn } from "../lib/model";
-import { dayLabel, groupLedger, limitGroups, levelOf, matchesQuery, parseBackup, parseBatchText, purchaseTxns, seriesOf, shareText } from "../lib/stockview";
+import { collectionsByTag, excludeForTag, planCandidates, rangeIds, topUsage, withStatus, withTag, dayLabel, groupLedger, limitGroups, levelOf, matchesQuery, parseBackup, parseBatchText, purchaseTxns, seriesOf, shareText } from "../lib/stockview";
 
 const known = new Set(["A1", "B3", "H7", "ZG3", "C29"]);
 const norm = (s: string) => { const t = s.normalize("NFKC").toUpperCase().replace(/\s+/g, ""); return known.has(t) ? t : null; };
@@ -95,5 +95,85 @@ describe("misc helpers", () => {
     expect(parseBackup(JSON.stringify([rec]))).toHaveLength(1);
     expect(parseBackup(JSON.stringify({ records: [rec, { bad: 1 }] }))).toHaveLength(1);
     expect(parseBackup("nope")).toBeNull();
+  });
+});
+
+
+const pat = (id: string, tags: string[], counts: Record<string, number>, over: Partial<Pattern> = {}): Pattern => ({
+  id, name: id, kind: "manual", method: "manual", counts, status: "idea", copies: 1, tags, notes: "", createdAt: 1, updatedAt: 1, ...over
+});
+
+describe("collections by tag", () => {
+  const ps = [
+    pat("a", ["游戏王"], { A1: 1000, B3: 500 }),
+    pat("b", ["游戏王", "高达"], { A1: 500 }, { status: "planned", copies: 2 }),
+    pat("c", ["高达"], { C29: 300 }, { status: "done" }),
+    pat("d", [], { H7: 100 }),
+    pat("x", ["游戏王"], { A1: 99999 }, { deleted: true })
+  ];
+  const stock = { A1: 1200, B3: 100 };
+  it("sums beads, colors and shortages per tag", () => {
+    const cols = collectionsByTag(ps, stock);
+    expect(cols.map((c) => c.tag).sort()).toEqual(["游戏王", "高达"].sort());
+    const g = cols.find((c) => c.tag === "游戏王")!;
+    expect(g.count).toBe(2);
+    expect(g.totalBeads).toBe(1500 + 1000);
+    expect(g.colors).toBe(2);
+    // A1 需要 1000+1000=2000 > 1200，B3 需要 500 > 100
+    expect(g.missingColors).toBe(2);
+    expect(g.shortBeads).toBe(800 + 400);
+    expect(g.plannedCount).toBe(1);
+  });
+  it("ignores finished patterns for shortage and can include untagged last", () => {
+    const cols = collectionsByTag(ps, stock, true);
+    const gd = cols.find((c) => c.tag === "高达")!;
+    expect(gd.missingColors).toBe(0); // b 的 A1 够用；c 已完成，缺的 C29 不算
+    expect(cols[cols.length - 1].tag).toBe("");
+  });
+  it("lists plan candidates and tag exclusions", () => {
+    expect(planCandidates(ps).map((p) => p.id)).toEqual(["a", "d"]);
+    expect([...excludeForTag(ps.filter((p) => !p.deleted), "高达")].sort()).toEqual(["a", "d"]);
+    expect(excludeForTag(ps, "").size).toBe(0);
+  });
+});
+
+describe("topUsage", () => {
+  it("ranks by demand, computes shortage and folds the rest", () => {
+    const u = topUsage({ A1: 500, B3: 3000, C29: 100, H7: 0 }, { A1: 800, B3: 1000, C29: 50 }, 2);
+    expect(u.rows.map((r) => r.code)).toEqual(["B3", "A1"]);
+    expect(u.rows[0]).toMatchObject({ need: 3000, have: 1000, short: 2000, covered: 1000 });
+    expect(u.rows[1]).toMatchObject({ short: 0, covered: 500 });
+    expect(u.rest).toEqual({ codes: 1, need: 100, short: 50 });
+    expect(u.max).toBe(3000);
+    expect(u.totalCodes).toBe(3);
+  });
+  it("handles empty demand and negative stock", () => {
+    expect(topUsage({}, {}, 5).rows).toHaveLength(0);
+    expect(topUsage({ A1: 10 }, { A1: -5 }).rows[0]).toMatchObject({ have: 0, short: 10 });
+  });
+});
+
+describe("bulk helpers", () => {
+  it("withStatus / withTag are idempotent and bump updatedAt", () => {
+    const p = pat("a", ["x"], { A1: 1 }, { updatedAt: 10 });
+    expect(withStatus(p, "idea")).toBe(p);
+    expect(withStatus(p, "planned", 5).updatedAt).toBe(11);
+    expect(withTag(p, "x")).toBe(p);
+    expect(withTag(p, " y ", 100).tags).toEqual(["x", "y"]);
+    expect(withTag(p, "  ")).toBe(p);
+  });
+  it("rangeIds spans both directions", () => {
+    const order = ["a", "b", "c", "d"];
+    expect(rangeIds(order, "b", "d")).toEqual(["b", "c", "d"]);
+    expect(rangeIds(order, "c", "a")).toEqual(["a", "b", "c"]);
+    expect(rangeIds(order, "zz", "b")).toEqual(["b"]);
+  });
+  it("groupLedger can reveal undone batches in place", () => {
+    const t1 = txn({ id: "u1", batchId: "bb", deleted: true, at: 1_700_000_100_000 });
+    const t2 = txn({ id: "u2", at: 1_700_000_000_000 });
+    expect(groupLedger([t1, t2], [], {}, 1_700_000_200_000).flatMap((d) => d.groups)).toHaveLength(1);
+    const gs = groupLedger([t1, t2], [], { reveal: new Set(["u1"]) }, 1_700_000_200_000).flatMap((d) => d.groups);
+    expect(gs).toHaveLength(2);
+    expect(gs[0]).toMatchObject({ type: "txns", undone: true });
   });
 });

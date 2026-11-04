@@ -1,0 +1,175 @@
+// 焦点元素：队列清单——每一张的状态一眼可见（等待 / 识别中 / 完成 / 不是图纸 / 失败）。
+import { useEffect, useMemo, useRef, useState } from "react";
+import { announceFor, itemProgress, summarize, isImageFile, type BatchItem } from "../../lib/batch";
+import { METHOD_LABEL, totalOf, type PatternStatus } from "../../lib/model";
+import { Icon, fmt, toast, DiffNumber } from "../ui";
+import Progress from "./Progress";
+import { batchStore, cancelRemaining, enqueue, retryItem, saveItem, useBatch } from "./batchRunner";
+import "./batch.css";
+
+const isNative = () => /capacitor/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "") || !!(globalThis as { Capacitor?: unknown }).Capacitor;
+
+function StatusChip({ it }: { it: BatchItem }) {
+  if (it.savedId) return <span className="chip chip-leaf"><Icon name="check" size={12} />已保存</span>;
+  switch (it.state) {
+    case "waiting": return <span className="chip">等待</span>;
+    case "running": return <span className="chip chip-amber">识别中</span>;
+    case "done": return it.review ? <span className="chip chip-amber"><Icon name="alert" size={12} />需要检查</span> : <span className="chip chip-leaf"><Icon name="check" size={12} />完成</span>;
+    case "notchart": return <span className="chip">不是图纸</span>;
+    case "failed": return <span className="chip chip-iron">失败</span>;
+    case "cancelled": return <span className="chip">已取消</span>;
+  }
+}
+
+export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: BatchItem) => void; onGenerate: (file: File) => void }) {
+  const items = useBatch();
+  const sum = useMemo(() => summarize(items), [items]);
+  const files = useRef<HTMLInputElement>(null);
+  const folder = useRef<HTMLInputElement>(null);
+  const [plan, setPlan] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [over, setOver] = useState(false);
+  const [live, setLive] = useState("");
+  const prev = useRef(new Map<string, string>());
+  const status: PatternStatus = plan ? "planned" : "idea";
+
+  // 每张识别结束时播报一句（live region）
+  useEffect(() => {
+    const now = new Map<string, string>();
+    for (const it of items) {
+      now.set(it.id, it.state);
+      const before = prev.current.get(it.id);
+      if (before === "running" && it.state !== "running" && it.state !== "waiting") setLive(announceFor(it));
+    }
+    prev.current = now;
+  }, [items]);
+
+  const take = (list: FileList | File[] | null | undefined) => {
+    const all = Array.from(list ?? []);
+    const imgs = all.filter(isImageFile);
+    if (!imgs.length) { if (all.length) toast("没有找到图片文件"); return; }
+    enqueue(imgs);
+    if (imgs.length < all.length) toast(`已忽略 ${all.length - imgs.length} 个非图片文件`);
+  };
+
+  const saveAll = async () => {
+    setSaving(true);
+    let n = 0;
+    try {
+      for (const it of batchStore.get()) {
+        if (it.state === "done" && !it.review && !it.savedId) { if (await saveItem(it, status)) n++; }
+      }
+      toast(n ? `已保存 ${n} 张到图库` : "没有可保存的");
+    } catch (e) { toast(e instanceof Error ? e.message : "保存失败"); }
+    finally { setSaving(false); }
+  };
+  const saveOne = async (it: BatchItem) => {
+    try { await saveItem(it, status); toast(`已保存“${it.name}”`); } catch (e) { toast(e instanceof Error ? e.message : "保存失败"); }
+  };
+
+  const empty = items.length === 0;
+  const native = isNative();
+
+  return (
+    <div className="bt-wrap stack">
+      <div
+        className={`pt-drop pegboard bt-drop${empty ? "" : " compact"}`} data-over={over}
+        onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
+        onDrop={(e) => { e.preventDefault(); setOver(false); take(e.dataTransfer.files); }}
+      >
+        <span className="pt-drop-icon"><Icon name="upload" /></span>
+        <div>
+          <h3>{empty ? "一次选很多张图纸" : "继续添加"}</h3>
+          {empty ? <p className="meta">逐张自动识别，识别完可一起保存到图库。{native ? "" : "选整个文件夹时，文件夹名会作为标签。"}</p> : null}
+        </div>
+        <div className="row bt-pick">
+          <button type="button" className="btn btn-primary" onClick={() => files.current?.click()}><Icon name="plus" />选择多张图片</button>
+          {!native ? <button type="button" className="btn" onClick={() => folder.current?.click()}><Icon name="gallery" />选择文件夹</button> : null}
+        </div>
+        <input ref={files} type="file" accept="image/*" multiple hidden aria-label="选择多张图片" onChange={(e) => { take(e.target.files); e.target.value = ""; }} />
+        {!native ? (
+          <input ref={folder} type="file" hidden aria-label="选择文件夹"
+            {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+            onChange={(e) => { take(e.target.files); e.target.value = ""; }} />
+        ) : null}
+      </div>
+
+      {!empty ? (
+        <section className="panel" aria-label="批量识别队列">
+          <div className="panel-head bt-head">
+            <div>
+              <h3>队列 <span className="meta num">{sum.total - sum.waiting - sum.running}/{sum.total}</span></h3>
+              <p className="meta bt-sum">
+                {[sum.done ? `${sum.done} 张完成` : "", sum.review ? `${sum.review} 张需要检查` : "", sum.notchart ? `${sum.notchart} 张不是图纸` : "", sum.failed ? `${sum.failed} 张失败` : "", sum.cancelled ? `${sum.cancelled} 张已取消` : ""].filter(Boolean).join(" · ") || "准备开始…"}
+              </p>
+            </div>
+            <div className="row">
+              {sum.active ? <button type="button" className="btn btn-sm" onClick={cancelRemaining}>取消剩余</button> : null}
+              <button type="button" className="btn btn-sm btn-ghost" onClick={() => batchStore.dispatch({ type: "clear" })} disabled={sum.total === sum.waiting + sum.running}>清空已处理</button>
+            </div>
+          </div>
+          <Progress value={sum.active ? sum.progress : 1} label="批量识别进度" className="bt-bar" />
+
+          <ul className="bt-list">
+            {items.map((it) => (
+              <li key={it.id} className="bt-item" data-state={it.state} data-review={it.review} data-saved={!!it.savedId}>
+                <div className="bt-main">
+                  <div className="bt-title"><b className="bt-name">{it.name}</b><StatusChip it={it} /></div>
+                  <div className="bt-detail meta">
+                    {it.state === "running" ? <>{it.steps.length ? `${it.steps[it.steps.length - 1].label}…` : "正在载入…"}</> : null}
+                    {it.state === "done" && it.result ? (
+                      <>
+                        <span className="chip">{METHOD_LABEL[it.result.method === "none" ? "manual" : it.result.method]}</span>{" "}
+                        <b className="num">{fmt(totalOf(it.result.counts))}</b> 颗 · <span className="num">{Object.keys(it.result.counts).length}</span> 色 · 可信度 <span className="num">{Math.round(it.result.confidence * 100)}%</span>
+                        {it.review ? <span className="bt-why"> · {it.reasons.join("；")}</span> : null}
+                      </>
+                    ) : null}
+                    {it.state === "notchart" ? <>{it.error || "没有找到拼豆格子或色号图例"}</> : null}
+                    {it.state === "failed" ? <>{it.error}</> : null}
+                    {it.state === "waiting" ? <>排队中</> : null}
+                    {it.state === "cancelled" ? <>未识别</> : null}
+                  </div>
+                  {it.state === "running" ? <Progress value={itemProgress(it)} label={`${it.name} 识别进度`} className="bt-item-bar" /> : null}
+                </div>
+                <div className="bt-tools">
+                  <label className="bt-tag">
+                    <span className="sr-only">{it.name} 的标签</span>
+                    <input className="input" value={it.tag} placeholder="标签" onChange={(e) => batchStore.dispatch({ type: "tag", id: it.id, tag: e.target.value })} disabled={!!it.savedId} />
+                  </label>
+                  {it.state === "done" && !it.savedId ? (
+                    <>
+                      {it.review ? <button type="button" className="btn btn-sm btn-iron" onClick={() => onReview(it)}>检查</button> : <button type="button" className="btn btn-sm" onClick={() => onReview(it)}>查看</button>}
+                      {it.review ? <button type="button" className="btn btn-sm btn-ghost" onClick={() => void saveOne(it)}>仍然保存</button> : <button type="button" className="btn btn-sm" onClick={() => void saveOne(it)}>保存</button>}
+                    </>
+                  ) : null}
+                  {it.state === "notchart" ? (
+                    <>
+                      <button type="button" className="btn btn-sm btn-iron" onClick={() => onGenerate(it.file)}><Icon name="wand" />用它生成图纸</button>
+                      <button type="button" className="btn btn-sm btn-ghost" onClick={() => onReview(it)}>仍按图纸识别</button>
+                    </>
+                  ) : null}
+                  {it.state === "failed" || it.state === "cancelled" ? <button type="button" className="btn btn-sm" onClick={() => retryItem(it.id)}>重试</button> : null}
+                  {!it.savedId && it.state !== "running" ? <button type="button" className="btn btn-sm btn-ghost bt-x" aria-label={`移除 ${it.name}`} onClick={() => batchStore.dispatch({ type: "remove", id: it.id })}><Icon name="x" /></button> : null}
+                  {it.savedId ? <a className="btn btn-sm btn-ghost" href={`#/pattern/${it.savedId}`}>打开</a> : null}
+                </div>
+              </li>
+            ))}
+          </ul>
+
+          <div className="bt-foot">
+            <div className="seg" role="group" aria-label="保存后的状态">
+              <button type="button" aria-pressed={!plan} onClick={() => setPlan(false)}>收藏</button>
+              <button type="button" aria-pressed={plan} onClick={() => setPlan(true)}>计划做</button>
+            </div>
+            <span className="spacer" />
+            <span className="meta">{sum.savable ? <><DiffNumber value={sum.savable} /> 张可直接保存</> : "没有可直接保存的"}{sum.review ? `，${sum.review} 张需要先检查` : ""}</span>
+            <button type="button" className="btn btn-iron" onClick={() => void saveAll()} disabled={!sum.savable || saving}>{saving ? "保存中…" : "全部保存到图库"}</button>
+          </div>
+          {sum.saved && !sum.savable ? <p className="meta bt-done"><a href="#/gallery">去图库看看 →</a></p> : null}
+        </section>
+      ) : null}
+
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{live}</div>
+    </div>
+  );
+}

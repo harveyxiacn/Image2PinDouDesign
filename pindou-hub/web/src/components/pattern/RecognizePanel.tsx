@@ -3,14 +3,16 @@ import { analyzePattern } from "../../lib/recognize/assistant";
 import type { AnalyzeResult, AssistantStep, Rect } from "../../lib/recognize/types";
 import { hubInfo, aiVision } from "../../lib/sync";
 import { loadPixelSource, saveImage } from "../../lib/images";
-import { METHOD_LABEL, totalOf, type Counts } from "../../lib/model";
+import { METHOD_LABEL, totalOf, type Counts, type PatternStatus } from "../../lib/model";
+import { headerChecks } from "../../lib/batch";
 import { normalizeCode } from "../../lib/palette";
-import { Icon, fmt, navigate, toast } from "../ui";
+import { DiffNumber, Icon, fmt, navigate, prefersReducedMotion, toast } from "../ui";
 import ImageDrop from "./ImageDrop";
 import AnalysisImage from "./AnalysisImage";
 import AssistantTimeline from "./AssistantTimeline";
 import CountsEditor, { type DiffMap } from "./CountsEditor";
 import SaveForm, { type SaveValues } from "./SaveForm";
+import MatrixView from "./MatrixView";
 import { createPattern } from "./save";
 import "./pattern.css";
 
@@ -36,7 +38,14 @@ async function toJpegBase64(file: Blob, maxEdge = 1600): Promise<string> {
   return c.toDataURL("image/jpeg", 0.85).split(",")[1] ?? "";
 }
 
-export default function RecognizePanel({ file, onFile, onClear }: { file: File | null; onFile: (f: File) => void; onClear: () => void }) {
+/** 从批量队列“需要检查”打开时带入：已有的识别结果（不重新跑 OCR）、标签与状态默认值 */
+export type RecognizeSeed = { result: AnalyzeResult; name: string; tags: string; status: PatternStatus };
+
+export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed, onSaved, clearLabel = "换一张" }: {
+  file: File | null; onFile: (f: File) => void; onClear: () => void;
+  /** “用它生成图纸”：由页面切换到生成模式并保留这张图 */
+  onGenerate?: () => void; seed?: RecognizeSeed | null; onSaved?: (patternId: string) => void; clearLabel?: string;
+}) {
   const [url, setUrl] = useState<string | null>(null);
   const [pixels, setPixels] = useState<Pixels | null>(null);
   const [region, setRegion] = useState<Rect | null>(null);
@@ -55,6 +64,12 @@ export default function RecognizePanel({ file, onFile, onClear }: { file: File |
   const [aiBusy, setAiBusy] = useState(false);
   const [ai, setAi] = useState<Ai | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savedOk, setSavedOk] = useState(false);
+  const [focus, setFocus] = useState<string | null>(null);
+  const [view, setView] = useState<"orig" | "restored">("orig");
+  const [forceChart, setForceChart] = useState(false);
+  const seedRef = useRef(seed);
+  seedRef.current = seed;
   const abort = useRef<AbortController | null>(null);
   const pixelsRef = useRef<Pixels | null>(null);
   // 图例字很小：OCR 用更高分辨率的副本（≤5000 长边，手机内存也够），网格识别仍用 2400 版本。
@@ -68,7 +83,7 @@ export default function RecognizePanel({ file, onFile, onClear }: { file: File |
     abort.current?.abort();
     const ctl = new AbortController();
     abort.current = ctl;
-    setRunning(true); setError(""); setSteps([]); setResult(null); setAi(null);
+    setRunning(true); setError(""); setSteps([]); setResult(null); setAi(null); setFocus(null); setForceChart(false);
     try {
       const forceCols = Number(opts.cols) > 0 ? Math.round(Number(opts.cols)) : null;
       const forceRows = Number(opts.rows) > 0 ? Math.round(Number(opts.rows)) : null;
@@ -89,7 +104,7 @@ export default function RecognizePanel({ file, onFile, onClear }: { file: File |
   // 选图后：显示、解码、自动识别一次
   useEffect(() => {
     abort.current?.abort();
-    setResult(null); setSteps([]); setRegion(null); setSelecting(false); setCols(""); setRows(""); setError(""); setPixels(null); pixelsRef.current = null; fullRef.current = null; setAi(null);
+    setResult(null); setSteps([]); setRegion(null); setSelecting(false); setCols(""); setRows(""); setError(""); setPixels(null); pixelsRef.current = null; fullRef.current = null; setAi(null); setFocus(null); setView("orig"); setForceChart(false); setSavedOk(false);
     if (!file) { setUrl(null); return; }
     const u = URL.createObjectURL(file);
     setUrl(u);
@@ -100,7 +115,9 @@ export default function RecognizePanel({ file, onFile, onClear }: { file: File |
       if (!alive) return;
       fullRef.current = full;
       pixelsRef.current = px; setPixels(px);
-      void run({ region: null, ocr, cellCodes, bgEmpty, cols: "", rows: "" });
+      const sd = seedRef.current;
+      if (sd) { setSteps(sd.result.steps); setResult(sd.result); setCounts({ ...sd.result.counts }); setForceChart(true); }
+      else void run({ region: null, ocr, cellCodes, bgEmpty, cols: "", rows: "" });
     }).catch(() => alive && setError("这张图片无法解码，请换一张"));
     return () => { alive = false; URL.revokeObjectURL(u); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -140,7 +157,9 @@ export default function RecognizePanel({ file, onFile, onClear }: { file: File |
         width: grid?.grid.cols, height: grid?.grid.rows, matrix: grid?.matrix, confidence: heavy ? 1 : result?.confidence
       });
       toast("已保存到图库");
-      navigate(`/pattern/${p.id}`);
+      setSaving(false); setSavedOk(true);
+      await new Promise((r) => setTimeout(r, prefersReducedMotion() ? 0 : 700));
+      if (onSaved) onSaved(p.id); else navigate(`/pattern/${p.id}`);
     } catch (e) { toast(e instanceof Error ? e.message : "保存失败"); setSaving(false); }
   };
 
@@ -149,16 +168,32 @@ export default function RecognizePanel({ file, onFile, onClear }: { file: File |
   }
 
   const conf = result ? Math.round(result.confidence * 100) : 0;
+  const notChart = !!result && result.isChart === false && !forceChart;
+  const matrix = result?.grid?.matrix && result.grid.matrix.length ? result.grid.matrix : null;
+  const pick = (code: string) => setFocus((f) => (f === code ? null : code));
+  const checks = result ? headerChecks(result) : [];
   return (
     <div className="ap-grid">
       <section className="stack">
         <div className="panel panel-pad stack">
-          {url && pixels ? <AnalysisImage url={url} srcW={pixels.width} srcH={pixels.height} region={region} onRegion={setRegion} selecting={selecting} grid={result?.grid?.grid ?? null} /> : url ? <img src={url} alt="上传的图纸" /> : null}
+          {matrix && !notChart ? (
+            <div className="seg" role="group" aria-label="图片视图" style={{ alignSelf: "flex-start" }}>
+              <button type="button" aria-pressed={view === "orig"} onClick={() => setView("orig")}>原图</button>
+              <button type="button" aria-pressed={view === "restored"} onClick={() => setView("restored")}>复原预览</button>
+            </div>
+          ) : null}
+          {view === "restored" && matrix && result?.grid && !notChart ? (
+            <>
+              <MatrixView matrix={matrix} width={result.grid.grid.cols} height={result.grid.grid.rows} focusCode={focus} />
+              <p className="meta">按识别结果重新画出的拼豆图。对照原图看，哪里颜色不对就是识别错的地方。</p>
+            </>
+          ) : url && pixels ? <AnalysisImage url={url} srcW={pixels.width} srcH={pixels.height} region={region} onRegion={setRegion} selecting={selecting} grid={notChart ? null : result?.grid?.grid ?? null} matrix={notChart ? null : matrix} focusCode={focus} /> : url ? <img src={url} alt="上传的图纸" /> : null}
+          {focus && !notChart ? <div className="row"><span className="chip chip-iron">高亮 {focus}</span><button type="button" className="btn btn-sm btn-ghost" onClick={() => setFocus(null)}>取消高亮</button></div> : null}
           <div className="row">
             <button className={`btn btn-sm${selecting ? " btn-primary" : ""}`} onClick={() => setSelecting((s) => !s)} aria-pressed={selecting}>{selecting ? "拖动框选中…" : "框选图纸区域"}</button>
             {region ? <button className="btn btn-sm btn-ghost" onClick={() => setRegion(null)}>清除框选</button> : null}
             <span className="spacer" />
-            <button className="btn btn-sm btn-ghost" onClick={onClear}>换一张</button>
+            <button className="btn btn-sm btn-ghost" onClick={onClear}>{clearLabel}</button>
           </div>
           <label className="pt-check"><input type="checkbox" checked={ocr} onChange={(e) => setOcr(e.target.checked)} />读取图例（OCR，需要几秒）</label>
           <label className="pt-check"><input type="checkbox" checked={cellCodes} onChange={(e) => setCellCodes(e.target.checked)} />读取格内色号（图纸每格印了色号时更准，白色豆也不会漏）</label>
@@ -177,7 +212,20 @@ export default function RecognizePanel({ file, onFile, onClear }: { file: File |
       </section>
 
       <section className="stack">
-        {result ? (
+        {notChart ? (
+          <div className="panel panel-pad pt-notchart" role="status">
+            <span className="pt-notchart-ic"><Icon name="gallery" size={22} /></span>
+            <div className="stack" style={{ gap: 6 }}>
+              <h3>这看起来是原图，不是图纸</h3>
+              <p className="meta">{result?.notChartReason || "没有找到规则的拼豆格子，也没有色号图例。"}</p>
+              <p className="meta">想把它做成拼豆？可以直接转换成图纸。</p>
+            </div>
+            <div className="row">
+              {onGenerate ? <button type="button" className="btn btn-iron" onClick={onGenerate}><Icon name="wand" />用它生成图纸</button> : null}
+              <button type="button" className="btn" onClick={() => setForceChart(true)}>仍然按图纸识别</button>
+            </div>
+          </div>
+        ) : result ? (
           <div className="panel">
             <div className="panel-head">
               <h3>识别结果</h3>
@@ -188,13 +236,28 @@ export default function RecognizePanel({ file, onFile, onClear }: { file: File |
               </div>
             </div>
             {result.method === "none" ? <div className="notice iron" style={{ margin: 12 }}>没有读到图例，也没能确定网格。可以框选图纸区域、手动填列数和行数后重新识别，或直接在下表手动添加。</div> : null}
+            {result.paletteWarning ? <div className="notice" role="note" style={{ margin: 12 }}><b>色号体系提示：</b>{result.paletteWarning}</div> : null}
+            {checks.length ? (
+              <div className="pt-header" aria-label="图上标注核对">
+                <span className="label">图上标注</span>
+                <b className="num">{checks.map((c) => c.stated).join(" · ")}</b>
+                <span className="pt-header-chips">
+                  {checks.map((c) => (
+                    <span key={c.key} className={`chip ${c.ok === true ? "chip-leaf" : c.ok === false ? "chip-amber" : ""}`}>
+                      {c.label} {c.ok === true ? "一致" : c.ok === false ? `不符，读到 ${c.read}` : "未读到"}
+                    </span>
+                  ))}
+                </span>
+              </div>
+            ) : null}
             {mismatches ? <div className="notice" style={{ margin: 12 }}>有 {mismatches} 个色号的图例数量和网格数出来的不一致（高亮行）。请对照原图核对。</div> : null}
-            {result.legend?.statedTotal != null ? <p className="meta" style={{ padding: "8px 12px 0" }}>图上标注的总数 {fmt(result.legend.statedTotal)}，当前合计 {fmt(totalOf(counts))}</p> : null}
-            <CountsEditor counts={counts} onChange={setCounts} diff={diff} />
+            {result.legend?.statedTotal != null ? <p className="meta" style={{ padding: "8px 12px 0" }}>图上标注的总数 {fmt(result.legend.statedTotal)}，当前合计 <DiffNumber value={totalOf(counts)} /></p> : null}
+            {matrix ? <p className="meta" style={{ padding: "8px 12px 0" }}>点一个色号，图上只亮出它的格子。</p> : null}
+            <CountsEditor counts={counts} onChange={setCounts} diff={diff} stagger focusCode={focus} onPick={matrix ? pick : undefined} />
           </div>
         ) : running ? <div className="panel empty pegboard"><h3>豆探正在分析…</h3><p>步骤会实时显示在左侧</p></div> : null}
 
-        {aiOn && result ? (
+        {aiOn && result && !notChart ? (
           <div className="panel panel-pad stack">
             <div className="row"><b>本地视觉模型</b><span className="spacer" /><button className="btn btn-sm" onClick={askAi} disabled={aiBusy}>{aiBusy ? "复核中…（可能要几十秒）" : "让本地视觉模型复核"}</button></div>
             {ai ? (
@@ -206,9 +269,9 @@ export default function RecognizePanel({ file, onFile, onClear }: { file: File |
           </div>
         ) : null}
 
-        {result ? (
+        {result && !notChart ? (
           <div className="panel panel-pad">
-            <SaveForm defaultName={(file.name || "").replace(/\.[^.]+$/, "") || "新图纸"} busy={saving} disabled={!Object.keys(counts).length} onSave={save} />
+            <SaveForm defaultName={seed?.name || (file.name || "").replace(/\.[^.]+$/, "") || "新图纸"} defaultTags={seed?.tags} defaultStatus={seed?.status} busy={saving} success={savedOk} disabled={!Object.keys(counts).length} onSave={save} />
           </div>
         ) : null}
       </section>

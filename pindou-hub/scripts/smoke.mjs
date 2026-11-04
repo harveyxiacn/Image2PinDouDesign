@@ -2,13 +2,16 @@
 // 用法：node scripts/smoke.mjs <hubUrl> <outDir> <图纸图片> <照片>
 // 浏览器路径：环境变量 BROWSER_PATH（默认 Windows Edge）。
 import { spawn } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const [url, outDir, chartPath, photoPath] = process.argv.slice(2);
+const [url, outDir, chartPath, photoPath, chartsArg] = process.argv.slice(2);
 if (!url || !outDir || !chartPath || !photoPath) { console.error("用法：node scripts/smoke.mjs <url> <outDir> <chart> <photo>"); process.exit(2); }
 mkdirSync(outDir, { recursive: true });
 const profile = resolve(outDir, "profile");
+// 真实图纸目录（拼豆图/数码暴龙|游戏王|chiikawa）：第 5 个参数、环境变量 CHARTS_DIR，或 cwd / cwd 上一级下的“拼豆图”
+const chartsDir = [chartsArg, process.env.CHARTS_DIR, resolve("拼豆图"), resolve("..", "拼豆图")].find((d) => d && existsSync(d));
+const realChart = (...parts) => { if (!chartsDir) throw new Error("找不到 拼豆图 目录（可用 CHARTS_DIR 指定）"); const f = resolve(chartsDir, ...parts); if (!existsSync(f)) throw new Error(`缺少测试图片 ${f}`); return f; };
 rmSync(profile, { recursive: true, force: true });
 const port = Number(process.env.CDP_PORT ?? 9347);
 const browserPath = process.env.BROWSER_PATH ?? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
@@ -95,11 +98,12 @@ async function noHorizontalScroll(name) {
   const over = await evaluate(`document.documentElement.scrollWidth - document.documentElement.clientWidth`);
   checks.push({ check: `no horizontal scroll: ${name} @${viewport.width}`, ok: over <= 1, detail: `overflow ${over}px` });
 }
-async function setFile(path) {
+async function setFile(path, selector = 'input[type="file"]') {
+  const paths = Array.isArray(path) ? path : [path];
   const doc = await send("DOM.getDocument", { depth: -1, pierce: true });
-  const q = await send("DOM.querySelector", { nodeId: doc.root.nodeId, selector: 'input[type="file"]' });
+  const q = await send("DOM.querySelector", { nodeId: doc.root.nodeId, selector });
   if (!q.nodeId) throw new Error("file input not found");
-  await send("DOM.setFileInputFiles", { nodeId: q.nodeId, files: [path] });
+  await send("DOM.setFileInputFiles", { nodeId: q.nodeId, files: paths });
 }
 async function clickText(text, selector = "button") {
   const ok = await evaluate(`(() => { const el = [...document.querySelectorAll(${JSON.stringify(selector)})].find(b => b.innerText.trim().startsWith(${JSON.stringify(text)}) && !b.disabled); if (!el) return false; el.scrollIntoView({block:"center"}); el.focus(); el.click(); return true; })()`);
@@ -155,6 +159,7 @@ try {
 
   // ---- 识别图纸 ----
   let recognizedText = "";
+  let recognizedHash = "";
   await step("recognize chart (legend + grid)", async () => {
     await go("#/add?mode=recognize");
     await setFile(chartPath);
@@ -166,14 +171,49 @@ try {
     if (!recognizedText.includes("11,128")) throw new Error("total 11,128 not shown");
     return recognizedText.match(/读取格内色号[^\n]*\n[^\n]*/)?.[0] ?? recognizedText.slice(0, 400);
   });
+  // ---- 信任工具：色号高亮 / 复原预览 / 图上标注 ----
+  await step("color highlight toggles on the analysis image", async () => {
+    const overlayInk = `(() => { const c = document.querySelector('canvas.pt-over'); if (!c) return -1; const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4 * 7) if (d[i] > 0) n++; return n; })()`;
+    const before = await evaluate(overlayInk);
+    const picked = await evaluate(`(() => { const b = document.querySelector('.pt-counts .pt-pick'); if (!b) return null; b.scrollIntoView({block:'center'}); b.click(); return b.getAttribute('aria-label'); })()`);
+    if (!picked) throw new Error("no pickable colour row (grid matrix missing?)");
+    await sleep(500);
+    const rows = await evaluate(`document.querySelectorAll('.pt-counts tr[data-focus="true"]').length`);
+    const chip = await evaluate(`[...document.querySelectorAll('.chip-iron')].some(c => c.innerText.startsWith('高亮'))`);
+    const during = await evaluate(overlayInk);
+    await shot("04b-highlight");
+    if (rows !== 1 || !chip) throw new Error(`focus row=${rows} chip=${chip}`);
+    if (during === before) throw new Error(`overlay unchanged (${before})`);
+    await evaluate(`document.querySelector('.pt-counts .pt-pick[aria-pressed="true"]').click()`);
+    await sleep(400);
+    const off = await evaluate(`document.querySelectorAll('.pt-counts tr[data-focus="true"]').length`);
+    const after = await evaluate(overlayInk);
+    if (off !== 0 || after !== before) throw new Error(`not restored: rows=${off} ink ${before}->${after}`);
+    return `${picked}: overlay ink ${before} -> ${during} -> ${after}`;
+  });
+  await step("restored preview toggle shows the recognised bead chart", async () => {
+    await clickText("复原预览");
+    await waitFor(`document.querySelector('.pt-matrix canvas')`, 5000, "matrix canvas");
+    await sleep(500);
+    await shot("04c-restored");
+    const dims = await evaluate(`(() => { const c = document.querySelector('.pt-matrix canvas'); return c.width + 'x' + c.height; })()`);
+    await clickText("原图", ".seg button");
+    return `restored canvas ${dims}`;
+  });
+  await step("header info vs read chips (if the engine fills header)", async () => {
+    const t = await evaluate(`document.querySelector('.pt-header')?.innerText ?? ''`);
+    return t ? t.replace(/\n/g, " ") : "header not provided by engine (skipped)";
+  });
   await step("save recognized pattern", async () => {
     await evaluate(`(() => { const f = document.querySelector('form'); const s = f.querySelector('[aria-pressed]') ; const btns=[...f.querySelectorAll('button[type=button]')]; const plan = btns.find(b => b.innerText.includes('计划做')); plan?.click(); })()`);
     await sleep(200);
     await clickText("保存到图库", "button[type=submit]");
+    await waitFor(`document.querySelector('.pt-save[data-success="true"]') || location.hash.startsWith("#/pattern/")`, 30000, "save success state");
     await waitFor(`location.hash.startsWith("#/pattern/")`, 60000, "pattern detail");
     await sleep(1200);
     await shot("05-pattern-detail");
-    return await evaluate("location.hash");
+    recognizedHash = await evaluate("location.hash");
+    return recognizedHash;
   });
 
   // ---- 生成图纸 ----
@@ -194,6 +234,59 @@ try {
     return await evaluate("location.hash");
   });
 
+  // ---- 不是图纸 ----
+  await step("not-a-chart card on chiikawa1", async () => {
+    await go("#/add?mode=recognize");
+    await clickText("换一张").catch(() => {});
+    await sleep(300);
+    await setFile(realChart("chiikawa", "chiikawa1.jpg"));
+    await waitFor(`document.querySelector('.pt-notchart') || [...document.querySelectorAll('button')].some(b => b.innerText.trim() === '重新识别' && !b.disabled) && document.querySelector('form button[type=submit]')`, 240000, "analysis done");
+    await sleep(600);
+    await shot("16-not-a-chart");
+    const card = await evaluate(`document.querySelector('.pt-notchart')?.innerText ?? ''`);
+    if (!card.includes("不是图纸")) throw new Error("not-a-chart card missing; page shows: " + (await evaluate("document.querySelector('main').innerText")).slice(0, 200));
+    if (!card.includes("用它生成图纸") || !card.includes("仍然按图纸识别")) throw new Error("card buttons missing: " + card);
+    await clickText("用它生成图纸");
+    await waitFor(`location.hash.includes('mode=generate')`, 5000, "route generate");
+    await sleep(800);
+    const kept = await evaluate(`!!document.querySelector('main img, main canvas') && [...document.querySelectorAll('button')].some(b => b.innerText.startsWith('生成图纸'))`);
+    await shot("17-not-chart-to-generate");
+    if (!kept) throw new Error("generate mode did not keep the image");
+    return card.replace(/\n/g, " ").slice(0, 120);
+  });
+
+  // ---- 批量导入 ----
+  const batchFiles = () => [realChart("数码暴龙", "亚古兽.jpg"), realChart("游戏王", "黑魔导士.jpg"), realChart("chiikawa", "chiikawa1.jpg")];
+  await step("batch import of 3 files reaches a final state each", async () => {
+    await go("#/add?mode=batch");
+    await setFile(batchFiles());
+    await waitFor(`document.querySelectorAll('.bt-item').length === 3`, 15000, "3 queued items");
+    await sleep(400);
+    await shot("18-batch-queued");
+    const sawBar = await evaluate(`!!document.querySelector('.bt-bar[role=progressbar]')`);
+    await waitFor(`document.querySelectorAll('.bt-item').length === 3 && ![...document.querySelectorAll('.bt-item')].some(i => ['waiting','running'].includes(i.dataset.state))`, 900000, "queue settled");
+    await sleep(600);
+    await shot("19-batch-done");
+    const states = await evaluate(`[...document.querySelectorAll('.bt-item')].map(i => i.querySelector('.bt-name').innerText + ':' + i.dataset.state + (i.dataset.review === 'true' ? '(review)' : ''))`);
+    const live = await evaluate(`document.querySelector('.bt-wrap [role=status]')?.innerText ?? ''`);
+    if (!sawBar) throw new Error("no progress bar");
+    if (!live) throw new Error("live region stayed empty");
+    const chiikawa = states.find((x) => x.startsWith("chiikawa1"));
+    if (!chiikawa?.includes("notchart")) throw new Error("chiikawa1 not classified notchart: " + states.join(" | "));
+    return states.join(" | ") + " · live=" + live;
+  });
+  await step("batch: non-chart offers generate; save all", async () => {
+    const gen = await evaluate(`[...document.querySelectorAll('.bt-item[data-state=notchart] button')].some(b => b.innerText.includes('用它生成图纸'))`);
+    if (!gen) throw new Error("no 用它生成图纸 on the non-chart row");
+    // 真实引擎下若全部被标“需要检查”，“全部保存”是禁用的：改点第一行的“仍然保存”
+    const allEnabled = await evaluate(`[...document.querySelectorAll('button')].some(b => b.innerText.trim() === '全部保存到图库' && !b.disabled)`);
+    if (allEnabled) await clickText("全部保存到图库"); else await clickText("仍然保存");
+    await waitFor(`document.querySelectorAll('.bt-item[data-saved=true]').length >= 1`, 60000, "items saved");
+    await sleep(500);
+    await shot("20-batch-saved");
+    return await evaluate(`document.querySelectorAll('.bt-item[data-saved=true]').length + ' saved; ' + document.querySelector('.bt-foot').innerText.replace(/\\n/g, ' ')`);
+  });
+
   for (const [hash, name] of [["#/", "08-dashboard"], ["#/gallery", "09-gallery"], ["#/gallery?tab=images", "10-images"], ["#/shopping", "11-shopping"], ["#/history", "12-history"], ["#/settings", "13-settings"]]) {
     await step(`page ${hash}`, async () => { await go(hash); await shot(name); await noHorizontalScroll(hash); return (await evaluate("document.querySelector('main').innerText")).slice(0, 300); });
   }
@@ -201,7 +294,7 @@ try {
 
   // ---- 第 8 阶段证据：无障碍与交互 ----
   const auditAll = [];
-  for (const hash of ["#/", "#/gallery", "#/inventory", "#/shopping", "#/history", "#/settings", "#/add?mode=recognize", "#/add?mode=generate", "#/add?mode=manual"]) {
+  for (const hash of ["#/", "#/gallery", "#/inventory", "#/shopping", "#/history", "#/settings", "#/add?mode=recognize", "#/add?mode=generate", "#/add?mode=manual", "#/add?mode=batch"]) {
     await go(hash);
     const issues = await evaluate(AUDIT);
     auditAll.push(...issues.map((i) => `${hash}: ${i}`));
@@ -230,10 +323,38 @@ try {
   });
   checks.push({ check: "token contrast (light)", ok: true, detail: JSON.stringify(await evaluate(CONTRAST)) });
   await setViewport(390, 844, true);
-  for (const [hash, name] of [["#/", "m1-dashboard"], ["#/inventory", "m2-inventory"], ["#/add?mode=recognize", "m3-add"], ["#/gallery", "m4-gallery"], ["#/shopping", "m5-shopping"], ["#/settings", "m6-settings"]]) {
+  for (const [hash, name] of [["#/", "m1-dashboard"], ["#/inventory", "m2-inventory"], ["#/add?mode=recognize", "m3-add"], ["#/add?mode=batch", "m8-batch"], ["#/gallery", "m4-gallery"], ["#/shopping", "m5-shopping"], ["#/settings", "m6-settings"]]) {
     await step(`mobile ${hash}`, async () => { await go(hash); await shot(name); await noHorizontalScroll(hash); return "ok"; });
   }
 
+  await step("mobile: pattern detail pinch-zooms the bead chart (touch)", async () => {
+    await go(recognizedHash || "#/gallery");
+    await waitFor(`document.querySelector('.pt-matrix-scroll canvas')`, 15000, "matrix canvas");
+    await sleep(500);
+    const w0 = await evaluate(`document.querySelector('.pt-matrix-scroll canvas').width`);
+    const c = await evaluate(`(() => { const r = document.querySelector('.pt-matrix-scroll').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + Math.min(r.height, 300) / 2 }; })()`);
+    await evaluate(`document.querySelector('.pt-matrix-scroll').scrollIntoView({block:'center'})`);
+    const c2 = await evaluate(`(() => { const r = document.querySelector('.pt-matrix-scroll').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + Math.min(r.height, 300) / 2 }; })()`);
+    const pt = (dx) => [{ x: c2.x - dx, y: c2.y, id: 1 }, { x: c2.x + dx, y: c2.y, id: 2 }];
+    await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: pt(20) });
+    for (let d = 30; d <= 110; d += 10) await send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: pt(d) });
+    await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await sleep(600);
+    const w1 = await evaluate(`document.querySelector('.pt-matrix-scroll canvas').width`);
+    await shot("m9-pattern-pinched");
+    void c;
+    if (!(w1 > w0 * 1.3)) throw new Error(`canvas width ${w0} -> ${w1}: pinch did not zoom`);
+    return `canvas ${w0} -> ${w1}`;
+  });
+  await step("pattern detail: source image zooms with buttons", async () => {
+    await clickText("原图", ".seg button").catch(() => {});
+    await sleep(500);
+    const ok = await evaluate(`!!document.querySelector('.pt-zoom-box')`);
+    if (ok) { await clickText("+", ".pt-zoom button"); await sleep(200); }
+    const pct = ok ? await evaluate(`document.querySelector('.pt-zoom .meta.num').innerText`) : "no source view";
+    if (ok && pct.trim() === "100%") throw new Error("zoom stayed 100%");
+    return pct;
+  });
   await step("mobile sheet drag-down closes", async () => {
     await go("#/inventory");
     await clickText("批量入库");
@@ -277,6 +398,7 @@ try {
   });
   await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
   await step("dark mode dashboard", async () => { await go("#/"); await shot("14-dashboard-dark"); return "ok"; });
+  await step("dark mode batch + recognise", async () => { await go("#/add?mode=batch"); await shot("17-batch-dark"); return "ok"; });
   await step("dark mode inventory", async () => { await go("#/inventory"); await shot("15-inventory-dark"); return "ok"; });
   checks.push({ check: "token contrast (dark)", ok: true, detail: JSON.stringify(await evaluate(CONTRAST)) });
 } catch (e) {

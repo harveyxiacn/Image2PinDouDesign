@@ -13,3 +13,10 @@
 .set-prefs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 560px) { .set-prefs { grid-template-columns: 1fr; } }
 .set-addr { display: block; overflow-wrap: anywhere; }
+.set-status { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r-ctl); background: var(--paper-sunk); border: 1px solid var(--rule-soft); }
+.set-status.error, .set-status.offline { background: var(--iron-wash); border-color: transparent; }
+.set-status.syncing { background: var(--amber-wash); border-color: transparent; }
+.set-status-t { display: flex; flex-direction: column; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.set-addr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.set-copy { min-height: 36px; }
+@media (pointer: coarse) { .set-copy, .set-status .btn { min-height: 44px; } }

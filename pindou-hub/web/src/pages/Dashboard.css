@@ -32,3 +32,6 @@
 @media (max-width: 720px) { .dash-steps { grid-template-columns: 1fr; } }
 .dash-step { display: flex; flex-direction: column; gap: 6px; padding: 14px; border-radius: var(--r-panel); background: var(--paper-raised); border: 1px solid var(--rule); }
 .dash-step .n { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: var(--paper); font-size: var(--t-small); font-weight: 600; }
+.dash-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 16px; align-items: start; }
+@media (max-width: 820px) { .dash-two { grid-template-columns: minmax(0, 1fr); } }
+@media (pointer: coarse) { .dash-low button { min-height: 44px; } }

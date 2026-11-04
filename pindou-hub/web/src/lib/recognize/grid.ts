@@ -254,11 +254,11 @@ function findLattice(P: Float64Array, lineLen: number, hint?: number, cov?: (pos
         if (pk < MIN_PITCH) break;
         let ok = true;
         if (cov) {
-          // 子格位置也必须有“横贯整行”的线，而不只是文字边缘
+          // 子格位置也必须有“横贯整行”的线（而不只是文字 / 棋盘格空格的边缘），且是孤立的窄尖峰
           if (lineCov < 0.1) break;
           for (let m = 1; m < k && ok; m += 1) {
             const vals = sel.map((j) => cov(fit.phase + (j + m / k) * fit.pitch));
-            if (median(vals) < 0.6 * lineCov) ok = false;
+            if (median(vals) < 0.75 * lineCov) ok = false;
           }
         } else {
           const d = Math.max(3, Math.round(pk / 2));
@@ -401,7 +401,102 @@ function regionBounds(src: PixelSource, region?: Rect | null) {
   return { x0, y0, x1, y1 };
 }
 
-export function detectGrid(src: PixelSource, region?: Rect | null): GridDetection | null {
+export type GridHint = { cols?: number | null; rows?: number | null };
+
+/**
+ * 检测网格。hint 给出已知的列数 / 行数（图纸抬头“尺寸:55x61”、用户手动指定）时作为强先验：
+ * 自动检测对不上就按“格距 ≈ 宽度/(列数+k)”逐个试，取尺寸最接近的，再把多出 / 缺少的整格（标尺行列）补齐。
+ */
+export function detectGrid(src: PixelSource, region?: Rect | null, hint?: GridHint | null): GridDetection | null {
+  const base = detectCore(src, region);
+  const hc = hint?.cols && hint.cols > 0 ? Math.round(hint.cols) : 0;
+  const hr = hint?.rows && hint.rows > 0 ? Math.round(hint.rows) : 0;
+  if (!hc && !hr) return base;
+  const ok = (g: GridDetection | null) => !!g && (!hc || g.cols === hc) && (!hr || g.rows === hr);
+  if (ok(base)) return base;
+  if (base) {
+    const fitted = fitToSize(src, base, region, hc, hr);
+    if (ok(fitted)) return fitted;
+  }
+  const { x0, y0, x1, y1 } = regionBounds(src, region);
+  let best: { g: GridDetection; err: number } | null = null;
+  for (let k = 0; k <= 6; k += 1) {
+    const p = hc ? (x1 - x0) / (hc + k) : (y1 - y0) / (hr + k);
+    if (p < 4) break;
+    const g = detectCore(src, region, p);
+    if (!g) continue;
+    const err = (hc ? Math.abs(g.cols - hc) : 0) + (hr ? Math.abs(g.rows - hr) : 0);
+    if (!best || err < best.err || (err === best.err && g.score > best.g.score)) best = { g, err };
+    if (err === 0) break;
+  }
+  const baseErr = base ? (hc ? Math.abs(base.cols - hc) : 0) + (hr ? Math.abs(base.rows - hr) : 0) : Infinity;
+  const pick = best && best.err <= baseErr ? best : base ? { g: base, err: baseErr } : null;
+  if (!pick || pick.err > 6) return pick?.g ?? null;
+  // 补齐 / 去掉多出来的整格（多半是标尺行列），两侧对称
+  const g = { ...pick.g };
+  if (hc && g.cols !== hc) {
+    const d = hc - g.cols;
+    g.x0 -= Math.ceil(d / 2) * g.pitchX;
+    g.cols = hc;
+  }
+  if (hr && g.rows !== hr) {
+    const d = hr - g.rows;
+    g.y0 -= Math.ceil(d / 2) * g.pitchY;
+    g.rows = hr;
+  }
+  return g;
+}
+
+
+/**
+ * 已知列数 / 行数（抬头写着）时：沿用检测到的格距与相位，把格网整体延伸（或收缩）到该尺寸。
+ * 空白处的细线检测不到（只有有豆子的地方才有强线），所以检测结果常常只是一小段；这里在候选起点中，
+ * 挑“首尾两条线有线、再往外一格没有线”的那一个（低阈值覆盖率，图外 / 页面空白处覆盖率为 0）。
+ */
+export function fitToSize(src: PixelSource, g: GridDetection, region: Rect | null | undefined, hc: number, hr: number): GridDetection | null {
+  const { x0, y0, x1, y1 } = regionBounds(src, region);
+  const noise = noiseLevel(src, x0, y0, x1, y1);
+  const T = Math.min(Math.max(45, 5 * noise), Math.max(14, 2.5 * noise));
+  const gx1 = g.x0 + g.cols * g.pitchX, gy1 = g.y0 + g.rows * g.pitchY;
+  const one = (axis: "col" | "row", n: number, h: number): number | null => {
+    if (!h || h === n) return 0;
+    const p = axis === "col" ? g.pitchX : g.pitchY;
+    const o0 = axis === "col" ? g.x0 : g.y0;
+    const a = axis === "col" ? g.y0 : g.x0, b = axis === "col" ? gy1 : gx1;
+    const lim = axis === "col" ? src.width : src.height;
+    const cache = new Map<number, number>();
+    const cov = (k: number) => {
+      let v = cache.get(k);
+      if (v === undefined) {
+        const t = o0 + k * p;
+        v = t < 2 || t > lim - 2 ? -1 : toothCoverage(src, axis, t, a, b, T);
+        cache.set(k, v);
+      }
+      return v;
+    };
+    const lo = h >= n ? -(h - n) : 0, hi = h >= n ? 0 : n - h;
+    let best: { s: number; score: number; B: number } | null = null;
+    for (let s = lo; s <= hi; s += 1) {
+      let inner = 0;
+      let bad = false;
+      for (let k = s; k <= s + h; k += 1) { const c = cov(k); if (c < 0) { bad = true; break; } inner += c; }
+      if (bad) continue;
+      const B = cov(s) + cov(s + h) - Math.max(0, cov(s - 1)) - Math.max(0, cov(s + h + 1));
+      const score = inner / (h + 1) + B;
+      if (!best || score > best.score) best = { s, score, B };
+    }
+    return best && best.B >= 0.6 ? best.s : null;
+  };
+  const sx = one("col", g.cols, hc);
+  const sy = one("row", g.rows, hr);
+  if (sx === null && sy === null) return null;
+  const out = { ...g };
+  if (sx !== null && hc) { out.x0 = g.x0 + sx * g.pitchX; out.cols = hc; }
+  if (sy !== null && hr) { out.y0 = g.y0 + sy * g.pitchY; out.rows = hr; }
+  return out;
+}
+
+function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number): GridDetection | null {
   const { x0, y0, x1, y1 } = regionBounds(src, region);
   const W = x1 - x0;
   const H = y1 - y0;
@@ -411,8 +506,8 @@ export function detectGrid(src: PixelSource, region?: Rect | null): GridDetectio
   const first = profiles(src, x0, y0, x1, y1);
   const covX = (a: number, b: number) => (pos: number) => toothCoverage(src, "col", pos + 1 + x0, a, b, edgeT);
   const covY = (a: number, b: number) => (pos: number) => toothCoverage(src, "row", pos + 1 + y0, a, b, edgeT);
-  let lx = findLattice(first.colP, H, undefined, covX(y0, y1));
-  let ly = findLattice(first.rowP, W, undefined, covY(x0, x1));
+  let lx = findLattice(first.colP, H, pitchHint, covX(y0, y1));
+  let ly = findLattice(first.rowP, W, pitchHint, covY(x0, x1));
   if (!lx && !ly) return null;
   if (!lx && ly) lx = findLattice(first.colP, H, ly.pitch, covX(y0, y1));
   if (!ly && lx) ly = findLattice(first.rowP, W, lx.pitch, covY(x0, x1));
@@ -452,8 +547,6 @@ export function detectGrid(src: PixelSource, region?: Rect | null): GridDetectio
     else trimEnds(ly, src, "row", y0, ex[0], ex[1], edgeT);
   }
 
-  // 标尺总是四边对称：若一端在最后一条强线之外还有更多“弱边线”（被标尺盖住/缩小后看不见的外框线），
-  // 就把多出来的那一格补回来
   for (let pass = 0; pass < 2; pass += 1) {
     const ex = extentOf(lx, x0);
     const ey = extentOf(ly, y0);
@@ -532,36 +625,56 @@ function noiseLevel(src: PixelSource, x0: number, y0: number, x1: number, y1: nu
   return median(vals);
 }
 
+/** 端齿相对中段的覆盖率低于此比例就不算真网格线（标尺外沿的“幽灵线”覆盖率约 0.45–0.55，真线约 0.95+）。 */
+const END_STRONG = 0.7;
+
 function trimEnds(l: Lattice, src: PixelSource, axis: "col" | "row", offset: number, a: number, b: number, edgeT: number) {
   const pos = (k: number) => { const f = regress(l); return f.a + (k - l.ka) * f.pitch + offset; };
   const mid: number[] = [];
   const span = l.kb - l.ka;
   for (let i = 1; i <= 9; i += 1) mid.push(toothCoverage(src, axis, pos(l.ka + Math.round((span * i) / 10)), a, b, edgeT));
-  const ref = median(mid);
+  const ref = [...mid].sort((x, y) => x - y)[6]; // 约 70% 分位：避开个别被文字 / 水印遮住的线
   if (ref < 0.2) return;
-  while (l.kb - l.ka > 3 && toothCoverage(src, axis, pos(l.kb), a, b, edgeT) < 0.5 * ref) {
+  const weak = (k: number) => toothCoverage(src, axis, pos(k), a, b, edgeT) < END_STRONG * ref;
+  // 末端 / 起点附近“弱齿 + 1~2 条强齿”：强齿是图例色块 / 标尺的边缘，弱齿之外的都不属于网格
+  // 孤立的强齿（紧挨着一条弱齿）多半是图例色块 / 标尺的边缘，连同弱齿一起去掉
+  while (l.kb - l.ka > 8 && (weak(l.kb) || weak(l.kb - 1))) {
+    l.kb -= weak(l.kb) ? 1 : 2;
+    l.pts = l.pts.filter(([k]) => k <= l.kb);
+  }
+  while (l.kb - l.ka > 8 && (weak(l.ka) || weak(l.ka + 1))) {
+    l.ka += weak(l.ka) ? 1 : 2;
+    l.pts = l.pts.filter(([k]) => k >= l.ka);
+  }
+  while (l.kb - l.ka > 3 && weak(l.kb)) {
     l.kb -= 1;
     l.pts = l.pts.filter(([k]) => k <= l.kb);
   }
-  while (l.kb - l.ka > 3 && toothCoverage(src, axis, pos(l.ka), a, b, edgeT) < 0.5 * ref) {
+  while (l.kb - l.ka > 3 && weak(l.ka)) {
     // 起点前移后 regress 以新的 ka 为参考，pts 里的 k 保持绝对序号，所以不用改
     l.ka += 1;
     l.pts = l.pts.filter(([k]) => k >= l.ka);
   }
 }
 
+/**
+ * 标尺总是四边对称：若一端在最后一条强线之外还有更多“弱边线”（被标尺盖住 / 缩小后看不见的外框线），
+ * 就把多出来的那一格补回来。任一侧的探测位置碰到图像边缘（无法判断）时不补，避免把标尺外沿当成格子。
+ */
 function balanceGhosts(l: Lattice, src: PixelSource, axis: "col" | "row", offset: number, a: number, b: number, edgeT: number) {
   const f = regress(l);
   const pos = (k: number) => f.a + (k - l.ka) * f.pitch + offset;
   const low = Math.max(20, edgeT * 0.5);
   const ref = median(Array.from({ length: 9 }, (_, i) => toothCoverage(src, axis, pos(l.ka + Math.round(((l.kb - l.ka) * (i + 1)) / 10)), a, b, edgeT)));
   if (ref < 0.2) return;
+  const lim = axis === "col" ? src.width : src.height;
+  if (pos(l.ka - 1) < 2 || pos(l.kb + 1) > lim - 2) return;
   const ghosts = (dir: -1 | 1) => {
     let g = 0;
     for (let i = 1; i <= 3; i += 1) {
       const k = dir < 0 ? l.ka - i : l.kb + i;
       const t = pos(k);
-      if (t < 2 || t > (axis === "col" ? src.width : src.height) - 2) break;
+      if (t < 2 || t > lim - 2) break;
       if (toothCoverage(src, axis, t, a, b, low) >= 0.7 * ref) g += 1; else break;
     }
     return g;
@@ -685,6 +798,8 @@ export function readGrid(
     cellVotes?: Record<number, string> | null;
     /** 图纸格内印有色号时，按“有无文字”判定空格 / 豆子（默认 true） */
     useInk?: boolean;
+    /** 闭集色板：图例色块已找全，格子只在 legendCodes 里匹配；图例之外的色号只有“很大一簇且与所有色块都差很远”才允许 */
+    closedPalette?: boolean;
   } = {}
 ): GridReading {
   const treatEmpty = opts.treatBackgroundAsEmpty !== false;
@@ -717,6 +832,7 @@ export function readGrid(
   const { cols, rows, pitchX, pitchY } = grid;
   const cells: Array<{ lab: Lab; r: number; g: number; b: number } | null> = new Array(cols * rows).fill(null);
   const cellInk = new Uint8Array(cols * rows);
+  let flatCells = 0;
   const d = src.data;
   for (let cy = 0; cy < rows; cy += 1) {
     for (let cx = 0; cx < cols; cx += 1) {
@@ -745,6 +861,7 @@ export function readGrid(
       let c = acc.result();
       // 整块内部颜色不纯（有文字）且环形区像素够多时，改用环形区的主色
       if (c && c.frac < 0.85 && ring.size >= 12) c = ring.result() ?? c;
+      if (c && c.frac >= 0.75) flatCells += 1;
       if (c) {
         cells[cy * cols + cx] = { ...c, lab: rgbToLab(c) };
         // 文字墨迹：中央文字带内与格子底色差异明显的像素
@@ -795,12 +912,16 @@ export function readGrid(
       const de = ciede2000(c.lab, p.lab);
       if (de < best) { best = de; c.code = p.code; }
     }
-    if (restPool.length) {
+    // 闭集：只有“占比够大（≥0.5% 格子）且与所有色块都差很远（ΔE>8）”的簇才允许用图例之外的色号
+    const restOk = restPool.length > 0 && (!opts.closedPalette || (c.n >= Math.max(6, 0.005 * cells.length) && best > 8));
+    if (restOk) {
       let rb = Infinity, rc = "";
       for (const p of restPool) {
         const de = ciede2000(c.lab, p.lab);
         if (de < rb) { rb = de; rc = p.code; }
       }
+      // 近白色：H1/H2/T1/P1 几乎分不开，统一记 H2（有格内色号时会被投票改写）
+      if (rb <= 4 && c.lab.l >= 93 && chroma(c.lab) <= 6) rc = "H2";
       if (rb <= 4 && rb + 1.5 < best) { best = rb; c.code = rc; }
     }
     c.de = best;
@@ -828,11 +949,14 @@ export function readGrid(
     return "plain";
   });
   const inkChart = inkedCells >= 10 && inkedCells >= 3 * mixedCells;
-  if (inkChart && treatEmpty && opts.useInk !== false) {
-    // 无字簇 = 空格（即使颜色不像背景）；有字簇 = 豆子（即使颜色像背景，如白色 H2）
+  // 背景色类（颜色上像空白）的簇：图纸格内有色号时，逐格按“有没有字”判断——图形内部的白豆（H2）带着色号文字，图外空白没有
+  const bgLike: boolean[] = clusters.map((c) => !!treatEmpty && isEmpty(c.lab));
+  const perCellInk = inkChart && treatEmpty && opts.useInk !== false;
+  if (perCellInk) {
     clusters.forEach((_, j) => {
-      if (kind[j] === "plain") empty[j] = true;
-      else if (kind[j] === "ink") empty[j] = false;
+      if (bgLike[j]) empty[j] = false; // 逐格判断，见下方 matrix 构建
+      else if (kind[j] === "plain") empty[j] = true;
+      else empty[j] = false;
     });
   }
   // 投票覆盖颜色匹配
@@ -855,7 +979,7 @@ export function readGrid(
     const row: Array<string | null> = [];
     for (let cx = 0; cx < cols; cx += 1) {
       const ci = cellCluster[cy * cols + cx];
-      if (ci < 0 || empty[ci]) { row.push(null); emptyCells += 1; continue; }
+      if (ci < 0 || empty[ci] || (perCellInk && bgLike[ci] && !cellInk[cy * cols + cx])) { row.push(null); emptyCells += 1; continue; }
       const c = clusters[ci];
       const cell = cells[cy * cols + cx]!;
       row.push(c.code);
@@ -886,5 +1010,5 @@ export function readGrid(
     cells: members[j],
     overridden: overridden[j]
   }));
-  return { grid, matrix, counts, colors, emptyCells, backgroundHex: bgRgb ? rgbToHex(bgRgb) : null, inkChart, cellInk, cellCluster, clusters: infos };
+  return { grid, matrix, counts, colors, emptyCells, backgroundHex: bgRgb ? rgbToHex(bgRgb) : null, inkChart, cellInk, cellCluster, clusters: infos, flatFrac: flatCells / Math.max(1, cols * rows) };
 }

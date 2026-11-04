@@ -1,16 +1,18 @@
-import { useState } from "react";
+import React, { useState } from "react";
 import type { Counts } from "../../lib/model";
 import { totalOf } from "../../lib/model";
 import { compareCodes } from "../../lib/inventory";
 import { colorOf, normalizeCode } from "../../lib/palette";
-import { BeadCode, Icon, fmt } from "../ui";
+import { BeadCode, DiffNumber, Icon, fmt } from "../ui";
 import "./pattern.css";
 
 export type DiffMap = Record<string, { legend: number; grid: number }>;
 
 /** 可编辑的色号用量表。diff 提供时标出图例与网格不一致的色号。 */
-export default function CountsEditor({ counts, onChange, diff, readOnly, focusCode, onPick }: {
+export default function CountsEditor({ counts, onChange, diff, readOnly, focusCode, onPick, stagger }: {
   counts: Counts; onChange?: (next: Counts) => void; diff?: DiffMap | null; readOnly?: boolean; focusCode?: string | null; onPick?: (code: string) => void;
+  /** 结果刚出来时让行依次浮现（每行 ≤30ms，总时长封顶）；减少动态时无动画 */
+  stagger?: boolean;
 }) {
   const [code, setCode] = useState("");
   const [count, setCount] = useState("");
@@ -43,13 +45,21 @@ export default function CountsEditor({ counts, onChange, diff, readOnly, focusCo
             </tr>
           </thead>
           <tbody>
-            {codes.map((c) => {
+            {codes.map((c, i) => {
               const d = diff?.[c];
               const differs = !!d && d.legend !== d.grid;
               return (
-                <tr key={c} data-diff={differs} data-focus={focusCode === c} data-click={!!onPick}
+                <tr key={c} data-diff={differs} data-focus={focusCode === c} data-click={!!onPick} data-in={stagger ? "" : undefined}
+                  style={stagger ? ({ "--i": Math.min(i, 12) } as React.CSSProperties) : undefined}
                   onClick={onPick ? () => onPick(c) : undefined}>
-                  <td><BeadCode code={c} showName />{!colorOf(c) ? <span className="chip chip-amber" style={{ marginLeft: 6 }}>未知色号</span> : null}</td>
+                  <td>
+                    {onPick ? (
+                      <button type="button" className="pt-pick" aria-pressed={focusCode === c} aria-label={`${focusCode === c ? "取消高亮" : "高亮"} ${c}`}
+                        onClick={(e) => { e.stopPropagation(); onPick(c); }}><BeadCode code={c} showName /></button>
+                    ) : <BeadCode code={c} showName />}
+                    {!colorOf(c) ? <span className="chip chip-amber" style={{ marginLeft: 6 }}>未知色号</span> : null}
+                    {differs ? <span className="chip chip-amber pt-diff-chip" title="图例读到的数量和网格数出来的不一致">≠</span> : null}
+                  </td>
                   {diff ? <td className="r num">{d ? fmt(d.legend) : "—"}</td> : null}
                   {diff ? <td className="r num">{d ? fmt(d.grid) : "—"}</td> : null}
                   <td className="r">
@@ -67,7 +77,7 @@ export default function CountsEditor({ counts, onChange, diff, readOnly, focusCo
             {!codes.length ? <tr><td colSpan={5} className="meta" style={{ textAlign: "center", padding: 20 }}>还没有色号</td></tr> : null}
           </tbody>
           <tfoot>
-            <tr><td className="meta">合计 {codes.length} 色</td>{diff ? <td /> : null}{diff ? <td /> : null}<td className="r num"><b>{fmt(totalOf(counts))}</b></td>{!readOnly ? <td /> : null}</tr>
+            <tr><td className="meta">合计 {codes.length} 色</td>{diff ? <td /> : null}{diff ? <td /> : null}<td className="r"><b><DiffNumber value={totalOf(counts)} /></b></td>{!readOnly ? <td /> : null}</tr>
           </tfoot>
         </table>
       </div>
