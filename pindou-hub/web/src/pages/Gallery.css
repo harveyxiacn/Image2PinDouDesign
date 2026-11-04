@@ -1,0 +1,7 @@
+.ga-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+.ga-filters .input { flex: 1 1 160px; max-width: 320px; }
+.ga-filters .select { flex: 0 1 auto; }
+.ga-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); gap: 16px; }
+.ga-tile { overflow: hidden; display: flex; flex-direction: column; }
+.ga-tile .row { padding: 10px 12px; }
+.ga-empty { padding: 56px 16px; border: 1px dashed var(--rule-strong); border-radius: var(--r-panel); }

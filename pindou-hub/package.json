@@ -1,0 +1,39 @@
+{
+  "name": "pindou-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "拼豆仓 · 本地 + 局域网的拼豆图纸识别、库存、采购与图库（Web + Android）",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "postinstall": "node scripts/copy-ocr-assets.mjs",
+    "dev": "vite --config web/vite.config.ts",
+    "build": "tsc -p web/tsconfig.json --noEmit && vite build --config web/vite.config.ts",
+    "start": "node server/hub.mjs",
+    "test": "vitest --run --config web/vite.config.ts",
+    "test:server": "node --test server/store.test.mjs server/hub.test.mjs",
+    "android:sync": "npm run build && cap sync android",
+    "android:open": "cap open android"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tesseract.js": "^7.0.0",
+    "@tesseract.js-data/eng": "^1.0.0",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/android": "^8.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.0.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.3.23",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^5.2.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.5",
+    "vitest": "^4.1.8"
+  }
+}

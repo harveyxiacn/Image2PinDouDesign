@@ -1,0 +1,46 @@
+/* 豆盒库存共用部件：sk- 前缀。只用 styles.css 的令牌。 */
+.sk-box { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px; padding: 8px; background: var(--paper-sunk); border: 1px solid var(--rule); border-radius: var(--r-panel); }
+.sk-cell {
+  position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-height: 92px; padding: 8px 8px 8px;
+  text-align: left; cursor: pointer; background: var(--paper-raised); border: 1px solid var(--rule); border-radius: 6px;
+  transition: background-color 120ms var(--ease), border-color 120ms var(--ease), transform 100ms var(--ease);
+}
+.sk-cell:hover { background: var(--paper-lift); border-color: var(--ink-4); }
+.sk-cell:active { transform: scale(0.97); }
+.sk-cell.is-empty { background: transparent; border-style: dashed; }
+.sk-cell.is-empty .sk-qty { color: var(--ink-4); }
+.sk-cell-top { display: flex; align-items: center; gap: 6px; }
+.sk-cell-top .code { font-weight: 600; font-size: var(--t-small); }
+.sk-qty { font-size: var(--t-h3); font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.sk-mark { position: absolute; top: 6px; right: 6px; font-size: var(--t-meta); font-weight: 600; color: var(--iron-ink); }
+.sk-mark::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 3px; border-radius: 50%; background: var(--iron); vertical-align: 1px; }
+.sk-cell .meter { height: 4px; }
+
+.sk-big { display: flex; align-items: center; gap: 14px; }
+.sk-big-num { font-size: var(--t-h1); font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.sk-quick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.sk-sec { padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--rule-soft); }
+.sk-sec > .label { display: block; margin-bottom: 8px; }
+.sk-inline { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.sk-inline .field { flex: 1; min-width: 110px; }
+.sk-list { display: flex; flex-direction: column; }
+.sk-list > * { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--rule-soft); font-size: var(--t-small); }
+.sk-list > *:last-child { border-bottom: 0; }
+.sk-pos { color: var(--leaf); } .sk-neg { color: var(--iron-ink); } .sk-adj { color: var(--amber); }
+
+.sk-picker { display: flex; flex-direction: column; gap: 6px; }
+.sk-picker-list { max-height: 208px; overflow: auto; border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--paper-raised); }
+.sk-picker-list button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 4px 10px; border: 0; background: transparent; text-align: left; cursor: pointer; border-bottom: 1px solid var(--rule-soft); }
+.sk-picker-list button:hover { background: var(--rule-soft); }
+.sk-picker-list button:disabled { opacity: 0.45; cursor: default; }
+@media (pointer: coarse) { .sk-picker-list button { min-height: 44px; } }
+
+.sk-rows { display: flex; flex-direction: column; gap: 6px; }
+.sk-row { display: grid; grid-template-columns: 1fr 112px 36px; gap: 8px; align-items: center; }
+.sk-row .input { width: 100%; text-align: right; }
+.sk-row-bead { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sk-row-bead .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (pointer: coarse) { .sk-row { grid-template-columns: 1fr 104px 44px; } }
+.sk-tick-row { display: grid; grid-template-columns: 28px 1fr 112px; gap: 8px; align-items: center; }
+.sk-tick-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--iron); }
+.sk-tick-row .input { width: 100%; text-align: right; }

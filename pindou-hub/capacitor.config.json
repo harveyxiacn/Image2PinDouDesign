@@ -1,0 +1,12 @@
+{
+  "appId": "com.pindou.hub",
+  "appName": "拼豆仓",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

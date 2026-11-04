@@ -1,0 +1,15 @@
+/* 同步与设置页 */
+.set-sec { margin-bottom: 20px; }
+.set-sec > h3 { margin-bottom: 10px; }
+.set-hub { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 20px; align-items: center; padding: 18px; }
+@media (max-width: 560px) { .set-hub { grid-template-columns: 1fr; justify-items: start; } }
+.set-pair { font-family: var(--font-code); font-size: var(--t-display); font-weight: 600; letter-spacing: 0.14em; line-height: 1; font-variant-numeric: tabular-nums; }
+.set-qr { width: 148px; height: 148px; border-radius: 8px; background: #fff; padding: 6px; border: 1px solid var(--rule); image-rendering: pixelated; }
+.set-kv { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 12px; align-items: center; }
+.set-kv > span:nth-child(odd) { color: var(--ink-3); font-size: var(--t-small); }
+.set-kv > span:nth-child(even) { min-width: 0; overflow-wrap: anywhere; }
+.set-form { display: grid; grid-template-columns: minmax(0, 1fr) 140px auto; gap: 10px; align-items: end; }
+@media (max-width: 560px) { .set-form { grid-template-columns: 1fr; } }
+.set-prefs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 560px) { .set-prefs { grid-template-columns: 1fr; } }
+.set-addr { display: block; overflow-wrap: anywhere; }

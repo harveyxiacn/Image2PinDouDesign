@@ -1,0 +1,9 @@
+/* 豆盒库存页 */
+.inv-bar { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.inv-scroll { overflow-x: auto; max-width: 100%; padding-bottom: 2px; }
+.inv-scroll .seg { flex-wrap: nowrap; }
+.inv-scroll .seg button { white-space: nowrap; }
+.inv-search { flex: 1; min-width: 160px; max-width: 320px; }
+.inv-summary { display: flex; gap: 16px; flex-wrap: wrap; align-items: baseline; color: var(--ink-3); font-size: var(--t-small); }
+.inv-summary b { color: var(--ink); font-size: var(--t-h4); font-weight: 600; }
+@media (pointer: coarse) { .inv-scroll .seg button { height: 38px; } }
