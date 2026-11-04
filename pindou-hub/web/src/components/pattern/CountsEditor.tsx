@@ -6,11 +6,13 @@ import { colorOf, normalizeCode } from "../../lib/palette";
 import { BeadCode, DiffNumber, Icon, fmt } from "../ui";
 import "./pattern.css";
 
+/** 与下方图例用量的逐色核对结果（assistant 的 checks） */
+export type CheckMap = Record<string, { status: "ok" | "short" | "over" | "no-legend"; delta: number }>;
 export type DiffMap = Record<string, { legend: number; grid: number }>;
 
 /** 可编辑的色号用量表。diff 提供时标出图例与网格不一致的色号。 */
-export default function CountsEditor({ counts, onChange, diff, readOnly, focusCode, onPick, stagger }: {
-  counts: Counts; onChange?: (next: Counts) => void; diff?: DiffMap | null; readOnly?: boolean; focusCode?: string | null; onPick?: (code: string) => void;
+export default function CountsEditor({ counts, onChange, diff, checks, readOnly, focusCode, onPick, stagger }: {
+  counts: Counts; onChange?: (next: Counts) => void; diff?: DiffMap | null; checks?: CheckMap | null; readOnly?: boolean; focusCode?: string | null; onPick?: (code: string) => void;
   /** 结果刚出来时让行依次浮现（每行 ≤30ms，总时长封顶）；减少动态时无动画 */
   stagger?: boolean;
 }) {
@@ -58,6 +60,7 @@ export default function CountsEditor({ counts, onChange, diff, readOnly, focusCo
                         onClick={(e) => { e.stopPropagation(); onPick(c); }}><BeadCode code={c} showName /></button>
                     ) : <BeadCode code={c} showName />}
                     {!colorOf(c) ? <span className="chip chip-amber" style={{ marginLeft: 6 }}>未知色号</span> : null}
+                    {checks?.[c] ? <CheckChip check={checks[c]} /> : null}
                     {differs ? <span className="chip chip-amber pt-diff-chip" title="图例读到的数量和网格数出来的不一致">≠</span> : null}
                   </td>
                   {diff ? <td className="r num">{d ? fmt(d.legend) : "—"}</td> : null}
@@ -93,4 +96,12 @@ export default function CountsEditor({ counts, onChange, diff, readOnly, focusCo
       ) : null}
     </div>
   );
+}
+
+function CheckChip({ check }: { check: CheckMap[string] }) {
+  const n = fmt(check.delta);
+  if (check.status === "ok") return <span className="chip chip-leaf pt-check-chip" title="与下方图例的用量一致">✓ 一致</span>;
+  if (check.status === "short") return <span className="chip chip-amber pt-check-chip" title={`比下方图例少 ${n} 颗`}>少 {n}</span>;
+  if (check.status === "over") return <span className="chip chip-amber pt-check-chip" title={`比下方图例多 ${n} 颗`}>多 {n}</span>;
+  return <span className="chip pt-check-chip" title="下方图例里没有这个色号">无图例</span>;
 }

@@ -43,6 +43,14 @@ export type GridReading = {
   cellInk?: Uint8Array;
   /** 每格所属颜色簇编号（-1 = 无法取色），与 clusters 的 id 对应 */
   cellCluster?: Int32Array;
+  /** 智能去背景：与网格边缘 4 邻接相连的背景格（cols×rows，1 = 已去掉）；被轮廓围住的浅色区域不算 */
+  backgroundMask?: Uint8Array;
+  /** 带色号的图纸上，边缘背景格里也印着字的比例（画像素把 H2 印在背景格里时接近 1） */
+  backgroundInkFrac?: number;
+  /** 被去掉的背景格个数 */
+  backgroundCells?: number;
+  /** 核对后判定背景其实是豆子（如整片 H2）时：已把背景格并入该色号（此时 backgroundMask 全 0） */
+  backgroundAssigned?: { code: string; cells: number };
   /** 颜色簇（同色格子的集合）：用于挑选代表格做格内色号 OCR */
   clusters?: ColorCluster[];
 };
@@ -120,6 +128,8 @@ export type AnalyzeResult = {
   cellCodesRead?: boolean;
   /** 格内色号读取概况：读出的颜色数 / 颜色总数 / 校正数 */
   cellCodeStats?: { read: number; clusters: number; overrides: number };
+  /** 与下方图例用量逐色核对：legend 为 null = 图上没有该色数量 */
+  checks?: Array<{ code: string; legend: number | null; read: number; status: "ok" | "short" | "over" | "no-legend" }>;
   /** 图例与网格逐色比对（两者都有时） */
   diff: Array<{ code: string; legend: number; grid: number }>;
   source: { width: number; height: number };

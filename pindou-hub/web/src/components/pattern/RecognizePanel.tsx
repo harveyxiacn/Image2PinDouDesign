@@ -10,7 +10,7 @@ import { DiffNumber, Icon, fmt, navigate, prefersReducedMotion, toast } from "..
 import ImageDrop from "./ImageDrop";
 import AnalysisImage from "./AnalysisImage";
 import AssistantTimeline from "./AssistantTimeline";
-import CountsEditor, { type DiffMap } from "./CountsEditor";
+import CountsEditor, { type CheckMap, type DiffMap } from "./CountsEditor";
 import SaveForm, { type SaveValues } from "./SaveForm";
 import MatrixView from "./MatrixView";
 import { createPattern } from "./save";
@@ -68,6 +68,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const [focus, setFocus] = useState<string | null>(null);
   const [view, setView] = useState<"orig" | "restored">("orig");
   const [forceChart, setForceChart] = useState(false);
+  const [showBg, setShowBg] = useState(true);
   const seedRef = useRef(seed);
   seedRef.current = seed;
   const abort = useRef<AbortController | null>(null);
@@ -129,6 +130,10 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
     if (!result || !result.diff.length) return null;
     return Object.fromEntries(result.diff.map((d) => [d.code, { legend: d.legend, grid: d.grid }]));
   }, [result]);
+  const codeChecks = useMemo<CheckMap | null>(() => {
+    if (!result?.checks?.length || !result.checks.some((c) => c.legend !== null)) return null;
+    return Object.fromEntries(result.checks.map((c) => [c.code, { status: c.status, delta: Math.abs((c.legend ?? 0) - c.read) }]));
+  }, [result]);
   const mismatches = diff ? Object.values(diff).filter((d) => d.legend !== d.grid).length : 0;
 
   const askAi = async () => {
@@ -172,6 +177,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const matrix = result?.grid?.matrix && result.grid.matrix.length ? result.grid.matrix : null;
   const pick = (code: string) => setFocus((f) => (f === code ? null : code));
   const checks = result ? headerChecks(result) : [];
+  const bgCount = result?.grid?.backgroundCells ?? 0;
   return (
     <div className="ap-grid">
       <section className="stack">
@@ -187,7 +193,10 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
               <MatrixView matrix={matrix} width={result.grid.grid.cols} height={result.grid.grid.rows} focusCode={focus} />
               <p className="meta">按识别结果重新画出的拼豆图。对照原图看，哪里颜色不对就是识别错的地方。</p>
             </>
-          ) : url && pixels ? <AnalysisImage url={url} srcW={pixels.width} srcH={pixels.height} region={region} onRegion={setRegion} selecting={selecting} grid={notChart ? null : result?.grid?.grid ?? null} matrix={notChart ? null : matrix} focusCode={focus} /> : url ? <img src={url} alt="上传的图纸" /> : null}
+          ) : url && pixels ? <AnalysisImage url={url} srcW={pixels.width} srcH={pixels.height} region={region} onRegion={setRegion} selecting={selecting} grid={notChart ? null : result?.grid?.grid ?? null} matrix={notChart ? null : matrix} focusCode={focus} bgMask={notChart ? null : result?.grid?.backgroundMask ?? null} showBg={showBg} /> : url ? <img src={url} alt="上传的图纸" /> : null}
+          {bgCount > 0 && !notChart && view === "orig" ? (
+            <label className="pt-check"><input type="checkbox" checked={showBg} onChange={(e) => setShowBg(e.target.checked)} />显示去掉的背景（{fmt(bgCount)} 格，已套灰）</label>
+          ) : null}
           {focus && !notChart ? <div className="row"><span className="chip chip-iron">高亮 {focus}</span><button type="button" className="btn btn-sm btn-ghost" onClick={() => setFocus(null)}>取消高亮</button></div> : null}
           <div className="row">
             <button className={`btn btn-sm${selecting ? " btn-primary" : ""}`} onClick={() => setSelecting((s) => !s)} aria-pressed={selecting}>{selecting ? "拖动框选中…" : "框选图纸区域"}</button>
@@ -253,7 +262,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
             {mismatches ? <div className="notice" style={{ margin: 12 }}>有 {mismatches} 个色号的图例数量和网格数出来的不一致（高亮行）。请对照原图核对。</div> : null}
             {result.legend?.statedTotal != null ? <p className="meta" style={{ padding: "8px 12px 0" }}>图上标注的总数 {fmt(result.legend.statedTotal)}，当前合计 <DiffNumber value={totalOf(counts)} /></p> : null}
             {matrix ? <p className="meta" style={{ padding: "8px 12px 0" }}>点一个色号，图上只亮出它的格子。</p> : null}
-            <CountsEditor counts={counts} onChange={setCounts} diff={diff} stagger focusCode={focus} onPick={matrix ? pick : undefined} />
+            <CountsEditor counts={counts} onChange={setCounts} diff={diff} checks={codeChecks} stagger focusCode={focus} onPick={matrix ? pick : undefined} />
           </div>
         ) : running ? <div className="panel empty pegboard"><h3>豆探正在分析…</h3><p>步骤会实时显示在左侧</p></div> : null}
 

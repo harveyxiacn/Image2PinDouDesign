@@ -6,6 +6,8 @@ import type { CellColorStat, ColorCluster, GridDetection, GridReading, Rect } fr
 
 const MIN_PITCH = 4;
 const MAX_LAG = 250;
+/** 被轮廓围住的浅色区域至少多少格才算豆子（白豆 H2）；更小的是图形内部的缝隙 */
+const ENCLOSED_MIN = 10;
 
 // ───────────────────────── 边缘投影 ─────────────────────────
 
@@ -827,11 +829,13 @@ export function readGrid(
   const protectedLabs = calibrated
     .filter((c) => legend.includes(c.code))
     .filter((c) => (bgLab !== null && de76(c.lab, bgLab) <= 9) || (c.lab.l >= 86 && chroma(c.lab) <= 10))
-    .map((c) => ({ lab: c.lab, tol: isCal(c.code) ? 3 : 6 }));
+    .map((c) => ({ lab: c.lab, tol: isCal(c.code) ? 3 : 6, /** 与页面底色明显不同的浅色（浅蓝、浅粉…）：这种格子一定是豆子，不参与背景泛洪 */ distinct: de76(c.lab, bgLab ?? { l: 100, a: 0, b: 0 }) > 5 }));
 
   const { cols, rows, pitchX, pitchY } = grid;
   const cells: Array<{ lab: Lab; r: number; g: number; b: number } | null> = new Array(cols * rows).fill(null);
   const cellInk = new Uint8Array(cols * rows);
+  /** 格内部“浅色低彩度”像素占比（白 / 浅灰 / 棋盘格两种浅色都算）：智能去背景用 */
+  const lightFrac = new Float32Array(cols * rows);
   let flatCells = 0;
   const d = src.data;
   for (let cy = 0; cy < rows; cy += 1) {
@@ -849,15 +853,20 @@ export function readGrid(
       acc.reset();
       ring.reset();
       const mx = grid.x0 + (cx + 0.5) * pitchX, my = grid.y0 + (cy + 0.5) * pitchY;
+      let lightN = 0, allN = 0;
       for (let y = py0; y <= py1; y += 1) {
         let i = (y * src.width + px0) * 4;
         const inY = Math.abs((y + 0.5 - my) / pitchY) < 0.24;
         for (let x = px0; x <= px1; x += 1, i += 4) {
           acc.add(d[i], d[i + 1], d[i + 2]);
+          const mn = Math.min(d[i], d[i + 1], d[i + 2]), mxv = Math.max(d[i], d[i + 1], d[i + 2]);
+          allN += 1;
+          if (mn >= 180 && mxv - mn <= 28) lightN += 1;
           // 格内印的色号文字居中：环形区域（避开中央文字带）不受文字污染
           if (!(inY && Math.abs((x + 0.5 - mx) / pitchX) < 0.38)) ring.add(d[i], d[i + 1], d[i + 2]);
         }
       }
+      lightFrac[cy * cols + cx] = allN ? lightN / allN : 0;
       let c = acc.result();
       // 整块内部颜色不纯（有文字）且环形区像素够多时，改用环形区的主色
       if (c && c.frac < 0.85 && ring.size >= 12) c = ring.result() ?? c;
@@ -971,17 +980,76 @@ export function readGrid(
     if (pal) c.de = ciede2000(c.lab, pal.lab);
   });
 
+  // ── 智能去背景：背景候选格（浅色低彩度 / 与页面底色相同 / 棋盘格）从网格边缘 4 邻接泛洪，
+  // 只有与边缘相连的那一片才是背景；被轮廓围住的浅色区域（白豆 H2）仍是豆子。
+  const bgMask = new Uint8Array(cols * rows);
+  const cand = new Uint8Array(cols * rows);
+  const distinctBead = clusters.map((c) => protectedLabs.some((pl) => pl.distinct && ciede2000(c.lab, pl.lab) <= pl.tol));
+  let inkFrac = 0;
+  if (treatEmpty) {
+    for (let i = 0; i < cand.length; i += 1) {
+      const ci = cellCluster[i];
+      if (ci >= 0 && (bgLike[ci] || lightFrac[i] >= 0.7) && !distinctBead[ci]) cand[i] = 1;
+    }
+    const stack: number[] = [];
+    // 带色号的图纸：边缘的浅色格大多没有字 → 字是“这是豆子”的强信号，泛洪不穿过有字的格子（图形里的白豆 H2 不会被连成背景）；
+    // 若边缘浅色格本身就印着字（画像素把 H2 印在背景格里），则忽略墨迹
+    let edgeLight = 0, edgeInk = 0;
+    if (inkChart) {
+      for (let x = 0; x < cols; x += 1) for (const i of [x, (rows - 1) * cols + x]) if (cand[i]) { edgeLight += 1; edgeInk += cellInk[i]; }
+      for (let y = 0; y < rows; y += 1) for (const i of [y * cols, y * cols + cols - 1]) if (cand[i]) { edgeLight += 1; edgeInk += cellInk[i]; }
+    }
+    inkFrac = edgeLight >= 4 ? edgeInk / edgeLight : 0;
+    const inkBlocks = inkChart && edgeLight >= 4 && edgeInk <= 0.4 * edgeLight;
+    const seed = (i: number) => { if (cand[i] && !bgMask[i] && !(inkBlocks && cellInk[i])) { bgMask[i] = 1; stack.push(i); } };
+    for (let x = 0; x < cols; x += 1) { seed(x); seed((rows - 1) * cols + x); }
+    for (let y = 0; y < rows; y += 1) { seed(y * cols); seed(y * cols + cols - 1); }
+    while (stack.length) {
+      const i = stack.pop()!;
+      const x = i % cols, y = (i - x) / cols;
+      if (x > 0) seed(i - 1);
+      if (x < cols - 1) seed(i + 1);
+      if (y > 0) seed(i - cols);
+      if (y < rows - 1) seed(i + cols);
+    }
+  }
+  // 无图例时被围住的浅色格也是豆子（有图例但没有浅色色号时，仍按旧规则当空格）
+  // 零散的小空洞（图形内部的缝隙）仍是空格，只有成片（≥ ENCLOSED_MIN 格）的才当豆子
+  const keepEnclosed = treatEmpty && legend.length < 2;
+  const enclosedBead = new Uint8Array(cols * rows);
+  if (keepEnclosed) {
+    const seen = new Uint8Array(cols * rows);
+    for (let s0 = 0; s0 < cand.length; s0 += 1) {
+      if (!cand[s0] || bgMask[s0] || seen[s0]) continue;
+      const comp = [s0];
+      seen[s0] = 1;
+      for (let k = 0; k < comp.length; k += 1) {
+        const i = comp[k];
+        const x = i % cols, y = (i - x) / cols;
+        const nb = [x > 0 ? i - 1 : -1, x < cols - 1 ? i + 1 : -1, y > 0 ? i - cols : -1, y < rows - 1 ? i + cols : -1];
+        for (const j of nb) if (j >= 0 && cand[j] && !bgMask[j] && !seen[j]) { seen[j] = 1; comp.push(j); }
+      }
+      if (comp.length >= ENCLOSED_MIN) for (const i of comp) enclosedBead[i] = 1;
+    }
+  }
+
   const matrix: Array<Array<string | null>> = [];
   const counts: Record<string, number> = {};
   const stat = new Map<string, { n: number; de: number; r: number; g: number; b: number }>();
   let emptyCells = 0;
+  let backgroundCells = 0;
   for (let cy = 0; cy < rows; cy += 1) {
     const row: Array<string | null> = [];
     for (let cx = 0; cx < cols; cx += 1) {
-      const ci = cellCluster[cy * cols + cx];
-      if (ci < 0 || empty[ci] || (perCellInk && bgLike[ci] && !cellInk[cy * cols + cx])) { row.push(null); emptyCells += 1; continue; }
+      const idx = cy * cols + cx;
+      const ci = cellCluster[idx];
+      if (ci < 0) { row.push(null); emptyCells += 1; continue; }
+      if (bgMask[idx]) { row.push(null); emptyCells += 1; backgroundCells += 1; continue; }
+      const inkOk = !(perCellInk && bgLike[ci] && !cellInk[idx]);
+      const enclosedLight = keepEnclosed && enclosedBead[idx] === 1 && inkOk && !(inkChart && !cellInk[idx]);
+      if ((empty[ci] && !enclosedLight) || !inkOk) { row.push(null); emptyCells += 1; continue; }
       const c = clusters[ci];
-      const cell = cells[cy * cols + cx]!;
+      const cell = cells[idx]!;
       row.push(c.code);
       counts[c.code] = (counts[c.code] ?? 0) + 1;
       const s = stat.get(c.code) ?? { n: 0, de: 0, r: 0, g: 0, b: 0 };
@@ -1010,5 +1078,5 @@ export function readGrid(
     cells: members[j],
     overridden: overridden[j]
   }));
-  return { grid, matrix, counts, colors, emptyCells, backgroundHex: bgRgb ? rgbToHex(bgRgb) : null, inkChart, cellInk, cellCluster, clusters: infos, flatFrac: flatCells / Math.max(1, cols * rows) };
+  return { grid, matrix, counts, colors, emptyCells, backgroundHex: bgRgb ? rgbToHex(bgRgb) : null, inkChart, cellInk, cellCluster, clusters: infos, flatFrac: flatCells / Math.max(1, cols * rows), backgroundMask: bgMask, backgroundCells, backgroundInkFrac: inkFrac };
 }

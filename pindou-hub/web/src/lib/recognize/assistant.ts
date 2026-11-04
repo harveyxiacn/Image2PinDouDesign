@@ -175,6 +175,12 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       const t1 = performance.now();
       try {
         const r = await withDeadline(signal, CELL_BUDGET_MS, (sig) => readCellCodes(src, options.ocrSource ?? src, grid!, reading!, sig));
+        // 有可信图例（≥3 色）时，图例就是这张图的色号全集：格内 OCR 读出图例之外的色号（如把 “A1” 读成 “P11”）一律不采用，
+        // 否则会把一整簇颜色改名，再被“补全图例”当成漏读色号重复计数。
+        if (legend && legend.items.length >= 3) {
+          const allowed = new Set(legendCodeList(legend));
+          for (const [id, code] of Object.entries(r.votes)) if (!allowed.has(code)) delete r.votes[Number(id)];
+        }
         const nVotes = Object.keys(r.votes).length;
         const nRead = nVotes - r.recovered;
         if (nVotes > 0) {
@@ -215,6 +221,15 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     step("cellcode", "读取格内色号", "skip", "已跳过格内色号识别");
   }
 
+  // 3c) 智能去背景后的核对：背景到底是“空”还是“某色豆子”（整片 H2 的图），由图例 / 抬头总数裁决
+  if (reading && (reading.backgroundCells ?? 0) > 0) {
+    const sumBefore = sum(reading.counts);
+    const bgN = reading.backgroundCells ?? 0;
+    step("background", "智能去背景", "ok", `去掉 ${fmt(bgN)} 个与边缘相连的背景格，主体 ${fmt(sumBefore)} 颗`);
+    const assigned = decideBackground(reading, legend && legend.items.length >= 2 ? legend : null, header?.total ?? legend?.statedTotal ?? null);
+    if (assigned) step("background-code", "背景算作豆子", "warn", `${assigned.why}；背景不是空的，已把 ${fmt(bgN)} 个背景格算作 ${assigned.code} 豆子`);
+  }
+
   // OCR 数字常见混淆（3↔8、末尾多读一位等）：与网格统计差得远、但改一位后吻合的，采用改后的值
   if (legend && reading) {
     const fixed = reconcileLegend(legend, reading);
@@ -232,12 +247,26 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   if (legendUsed && reading) {
     // 图例没读全（OCR 漏读色号）：网格里有、图例里没有的色号，用网格统计补上
     const added: string[] = [];
+    const merged: string[] = [];
     counts = { ...legendUsed.counts }; // 图例是作者写的数字，优先采用
     for (const [code, n] of Object.entries(reading.counts)) {
+      if (code in legendUsed.counts) continue;
+      // 网格里多出一个图例没有的色号、而图例里恰好有一个色号在网格上是 0 颗且数量几乎相同：
+      // 这是同一簇颜色被叫错了名字（颜色/格内 OCR 误判），不是漏读，不能两边都算。
+      const twin = Object.entries(legendUsed.counts).find(([lc, ln]) => !(reading.counts[lc] > 0) && Math.abs(ln - n) <= Math.max(2, 0.03 * ln));
+      if (twin) {
+        merged.push(`${code}→${twin[0]}`);
+        // 网格读数也改名，后面的“图例与网格对照 / 与下方用量核对”和复原预览才一致
+        reading.counts[twin[0]] = (reading.counts[twin[0]] ?? 0) + n;
+        delete reading.counts[code];
+        for (const row of reading.matrix) for (let i = 0; i < row.length; i++) if (row[i] === code) row[i] = twin[0];
+        continue;
+      }
       // 只补“数量够大”的：JPEG 噪点 / 水印会产生一堆几颗的假色号
       const inPalette = !!legendUsed.palette?.some((p) => p.code === code);
-      if (!(code in legendUsed.counts) && (inPalette || n >= Math.max(4, Math.round(0.004 * sum(reading.counts))))) { counts[code] = n; added.push(code); }
+      if (inPalette || n >= Math.max(4, Math.round(0.004 * sum(reading.counts)))) { counts[code] = n; added.push(code); }
     }
+    if (merged.length) step("legend-twin", "合并误判色号", "warn", `网格里的 ${merged.join("、")} 与图例色号数量一致、网格上该图例色号为 0，按同一种豆计算`);
     const lt = sum(counts);
     const gt = sum(reading.counts);
     const codes = new Set([...Object.keys(counts), ...Object.keys(reading.counts)]);
@@ -313,11 +342,32 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       : `最终用量 ${fmt(sum(counts))} 颗，抬头写的是 ${fmt(header.total)} 颗，有出入`);
     confidence = Math.max(0, Math.min(1, confidence + (ok ? 0.05 : -0.1)));
   }
+  // 与下方图例逐色核对
+  const checks: NonNullable<AnalyzeResult["checks"]> = [];
+  {
+    const lc = legend && legend.items.length >= 2 ? legend.counts : null;
+    const rc = reading?.counts ?? counts;
+    const codes = new Set([...Object.keys(rc), ...(lc ? Object.keys(lc) : [])]);
+    for (const code of [...codes].sort()) {
+      const l = lc && code in lc ? lc[code] : null;
+      const r = rc[code] ?? 0;
+      let status: "ok" | "short" | "over" | "no-legend" = "no-legend";
+      if (l !== null) status = Math.abs(l - r) <= Math.max(2, Math.round(0.03 * l)) ? "ok" : r < l ? "short" : "over";
+      checks.push({ code, legend: l, read: r, status });
+    }
+    if (lc) {
+      const withLegend = checks.filter((c) => c.legend !== null);
+      const okN = withLegend.filter((c) => c.status === "ok").length;
+      const bad = withLegend.filter((c) => c.status !== "ok").map((c) => `${c.code} ${c.status === "short" ? "少" : "多"} ${fmt(Math.abs((c.legend ?? 0) - c.read))}`);
+      step("legend-check", "与下方用量核对", okN === withLegend.length ? "ok" : "warn",
+        `与下方用量核对：${okN}/${withLegend.length} 色一致${bad.length ? `（${bad.slice(0, 6).join("、")}${bad.length > 6 ? "…" : ""}）` : ""}`);
+    }
+  }
   const paletteWarning = detectPaletteMismatch(legend, reading, cellCodeStats);
   if (paletteWarning) step("palette", "核对色卡", "warn", paletteWarning);
   return {
     steps, legend, grid: reading, counts, method, confidence, diff, source, cellCodesRead, cellCodeStats,
-    isChart: true, header: header ?? undefined, paletteWarning: paletteWarning ?? undefined
+    isChart: true, checks, header: header ?? undefined, paletteWarning: paletteWarning ?? undefined
   };
 }
 
@@ -667,7 +717,7 @@ function pickCells(reading: GridReading, clusterId: number, n: number, used: Set
   const inner: number[] = [];
   const rest: number[] = [];
   for (const i of c.cells) {
-    if (used.has(i) || !ink[i]) continue;
+    if (used.has(i) || !ink[i] || reading.backgroundMask?.[i]) continue;
     const x = i % cols, y = Math.floor(i / cols);
     const same = (xx: number, yy: number) => xx >= 0 && yy >= 0 && xx < cols && yy < rows && cc[yy * cols + xx] === clusterId;
     (same(x - 1, y) && same(x + 1, y) && same(x, y - 1) && same(x, y + 1) ? inner : rest).push(i);
@@ -1006,4 +1056,58 @@ function detectPaletteMismatch(
     if (decided.length >= 6 && disagree / decided.length >= 0.6) return msg;
   }
   return null;
+}
+
+
+/**
+ * 背景是“空”还是“某色豆子”：用图例（逐色用量）或抬头总数裁决。
+ * 例：游戏王图纸的整片背景其实是 H2 白豆，图例 H2 ≈ 主体 + 背景。成立时把背景格并入该色号（原地修改 reading）。
+ */
+export function decideBackground(reading: GridReading, legend: LegendReading | null, total: number | null): { code: string; why: string } | null {
+  const mask = reading.backgroundMask;
+  const n = reading.backgroundCells ?? 0;
+  if (!mask || n < 8) return null;
+  const subj = sum(reading.counts);
+  let pick: { code: string; why: string } | null = null;
+  // 画像素式图纸：边缘背景格里每格都印着色号（H2 白豆铺满整张图），图例里 H2 的数字常因字小读错，所以不依赖图例数量；
+  // 只有抬头 / 图上总数明确说“主体已经对上”时才不采用
+  const subjOk = !!total && Math.abs(subj - total) / total <= 0.015 && Math.abs(subj + n - total) / total > 0.015;
+  if ((reading.backgroundInkFrac ?? 0) >= 0.9 && !subjOk) {
+    pick = { code: "H2", why: `背景格里每格都印着色号（铺满整张图的 H2 白豆）` };
+  } else if (legend) {
+    let bestGain = 0;
+    for (const [code, l] of Object.entries(legend.counts)) {
+      const r = reading.counts[code] ?? 0;
+      const errWithout = Math.abs(l - r);
+      const errWith = Math.abs(l - (r + n));
+      // 该色缺口约等于背景格数，且并入后误差缩到原来的 1/3 以内、不超过 8%
+      if (l - r >= 0.6 * n && errWith <= 0.08 * l && errWith * 3 <= errWithout && errWithout - errWith > bestGain) {
+        bestGain = errWithout - errWith;
+        pick = { code, why: `图例 ${code} ${fmt(l)}，主体只有 ${fmt(r)}，加上背景 ${fmt(r + n)}` };
+      }
+    }
+    if (pick && total) {
+      // 总数也要支持：并入后更接近总数
+      if (!(Math.abs(subj + n - total) < Math.abs(subj - total))) pick = null;
+    }
+  } else if (total) {
+    const withBg = Math.abs(subj + n - total) / total;
+    const without = Math.abs(subj - total) / total;
+    if (without > 0.05 && withBg <= 0.02) {
+      const light = Object.keys(reading.counts).find((c) => /^(H2|H1|T1|P1)$/.test(c)) ?? "H2";
+      pick = { code: light, why: `抬头共 ${fmt(total)} 颗，主体 ${fmt(subj)}，加上背景 ${fmt(subj + n)}` };
+    }
+  }
+  if (!pick) return null;
+  const { cols, rows } = reading.grid;
+  for (let y = 0; y < rows; y += 1) for (let x = 0; x < cols; x += 1) if (mask[y * cols + x]) reading.matrix[y][x] = pick.code;
+  reading.counts[pick.code] = (reading.counts[pick.code] ?? 0) + n;
+  reading.emptyCells -= n;
+  const st = reading.colors.find((c) => c.code === pick!.code);
+  if (st) st.count += n;
+  else reading.colors.push({ code: pick.code, count: n, deltaE: 0, sampleHex: reading.backgroundHex ?? "#ffffff" });
+  reading.backgroundAssigned = { code: pick.code, cells: n };
+  reading.backgroundMask = new Uint8Array(mask.length);
+  reading.backgroundCells = 0;
+  return pick;
 }

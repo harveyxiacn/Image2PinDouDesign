@@ -3,10 +3,12 @@ import type { GridDetection, Rect } from "../../lib/recognize/types";
 import "./pattern.css";
 
 /** 显示上传的图：可拖动框选区域（指针事件，触屏可用），并把检测到的网格线叠在图上。坐标均为 PixelSource 像素。 */
-export default function AnalysisImage({ url, srcW, srcH, region, onRegion, selecting, grid, matrix, focusCode }: {
+export default function AnalysisImage({ url, srcW, srcH, region, onRegion, selecting, grid, matrix, focusCode, bgMask, showBg }: {
   url: string; srcW: number; srcH: number; region: Rect | null; onRegion: (r: Rect | null) => void; selecting: boolean; grid: GridDetection | null;
   /** 识别出的每格色号；与 focusCode 一起使用：该色的格子上色描边，其余变暗 */
   matrix?: Array<Array<string | null>> | null; focusCode?: string | null;
+  /** 智能去背景的结果（cols×rows，1 = 已去掉的背景格）；showBg 为真时用中性半透明色盖住这些格子 */
+  bgMask?: Uint8Array | null; showBg?: boolean;
 }) {
   const stage = useRef<HTMLDivElement>(null);
   const over = useRef<HTMLCanvasElement>(null);
@@ -49,13 +51,21 @@ export default function AnalysisImage({ url, srcW, srcH, region, onRegion, selec
       }
       return;
     }
+    if (bgMask && showBg && bgMask.length === grid.cols * grid.rows) {
+      const neutral = getComputedStyle(document.documentElement).getPropertyValue("--ink-3").trim() || "#6b6358";
+      ctx.fillStyle = neutral; ctx.globalAlpha = 0.42;
+      for (let r = 0; r < grid.rows; r++) for (let c = 0; c < grid.cols; c++) {
+        if (bgMask[r * grid.cols + c]) ctx.fillRect(grid.x0 + c * grid.pitchX, grid.y0 + r * grid.pitchY, grid.pitchX, grid.pitchY);
+      }
+      ctx.globalAlpha = 1;
+    }
     ctx.strokeStyle = "rgba(214, 69, 42, 0.8)";
     ctx.lineWidth = Math.max(1, srcW / 900);
     ctx.beginPath();
     for (let i = 0; i <= grid.cols; i++) { const x = grid.x0 + i * grid.pitchX; ctx.moveTo(x, grid.y0); ctx.lineTo(x, grid.y0 + grid.rows * grid.pitchY); }
     for (let j = 0; j <= grid.rows; j++) { const y = grid.y0 + j * grid.pitchY; ctx.moveTo(grid.x0, y); ctx.lineTo(grid.x0 + grid.cols * grid.pitchX, y); }
     ctx.stroke();
-  }, [grid, srcW, srcH, matrix, focusCode]);
+  }, [grid, srcW, srcH, matrix, focusCode, bgMask, showBg]);
 
   const shown = drag ? rectOf(drag) : region;
   return (

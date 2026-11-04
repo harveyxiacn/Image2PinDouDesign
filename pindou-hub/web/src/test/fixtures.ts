@@ -157,6 +157,27 @@ export function buildChart(o: ChartOpts): Chart {
   return { src: { width, height, data }, matrix, counts, x0, y0, gridWidth: gw, gridHeight: gh, render };
 }
 
+/** 在 buildChart 的结果上按自定义矩阵重画每个格子的内部（保留网格线）：code → 色卡色，null → 空白（白 / 棋盘格）。 */
+export function repaintCells(chart: Chart, pitch: number, cell: (cx: number, cy: number) => string | null, empty: "white" | "checker" = "white", cols = chart.matrix[0].length, rows = chart.matrix.length) {
+  const { data, width } = chart.src;
+  for (let cy = 0; cy < rows; cy += 1) {
+    for (let cx = 0; cx < cols; cx += 1) {
+      const code = cell(cx, cy);
+      const xa = chart.x0 + Math.round(cx * pitch) + 2, xb = chart.x0 + Math.round((cx + 1) * pitch) - 1;
+      const ya = chart.y0 + Math.round(cy * pitch) + 2, yb = chart.y0 + Math.round((cy + 1) * pitch) - 1;
+      const rgb = code ? (code === "WHITE" ? { r: 255, g: 255, b: 255 } : MARD_PALETTE.find((c) => c.code === code)!.rgb) : null;
+      for (let y = ya; y < yb; y += 1) for (let x = xa; x < xb; x += 1) {
+        const i = (y * width + x) * 4;
+        let r: number, g: number, b: number;
+        if (rgb) { r = rgb.r; g = rgb.g; b = rgb.b; }
+        else if (empty === "checker") { const v = (Math.floor((x - chart.x0) / (pitch / 2)) + Math.floor((y - chart.y0) / (pitch / 2))) % 2 === 0 ? 255 : 226; r = g = b = v; }
+        else { r = g = b = 255; }
+        data[i] = r; data[i + 1] = g; data[i + 2] = b;
+      }
+    }
+  }
+}
+
 export function gradientImage(w: number, h: number): PixelSource {
   const data = new Uint8ClampedArray(w * h * 4);
   for (let y = 0; y < h; y += 1) {

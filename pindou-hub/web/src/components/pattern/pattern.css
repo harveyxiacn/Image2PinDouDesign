@@ -118,3 +118,6 @@
 .pt-zoom-box[data-zoomed="true"]:active { cursor: grabbing; }
 .pt-zoom-inner { transform-origin: center center; will-change: transform; }
 .pt-zoom-inner img { width: 100%; height: auto; display: block; user-select: none; -webkit-user-drag: none; }
+
+/* 与图例用量核对的小标签 */
+.pt-check-chip { margin-left: 6px; white-space: nowrap; }

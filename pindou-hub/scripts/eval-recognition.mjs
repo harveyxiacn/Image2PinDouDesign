@@ -149,6 +149,13 @@ export async function evaluate(mods, { dir, truth, only, ocr = true, log = conso
       rec.legendTotal = res.legend ? sumOf(res.legend.counts) : null;
       rec.paletteWarning = res.paletteWarning;
       rec.cellCodesRead = res.cellCodesRead;
+      rec.legendCounts = res.legend?.counts ?? null;
+      rec.bgCode = (res.grid?.clusters ?? []).filter((c) => c.cells.length && c.cells.some((i) => res.grid.backgroundMask?.[i])).map((c) => `${c.colorCode}/${c.code}:${c.cells.filter((i) => res.grid.backgroundMask[i]).length}`).join(" ");
+      rec.bgInk = res.grid?.backgroundInkFrac ?? null;
+      rec.legendPalette = res.legend?.palette?.map((p) => p.code).join(",") ?? null;
+      rec.bgCells = res.grid?.backgroundCells ?? null;
+      rec.bgAssigned = res.grid?.backgroundAssigned ?? null;
+      rec.checks = res.checks ? `${res.checks.filter((c) => c.status === "ok").length}/${res.checks.filter((c) => c.legend !== null).length}` : null;
       rec.steps = res.steps.map((s) => `${s.status} ${s.label}: ${s.detail}`);
     } catch (err) {
       rec.ms = Math.round(performance.now() - t0);

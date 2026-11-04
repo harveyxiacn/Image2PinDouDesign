@@ -2,12 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { MARD_PALETTE } from "@engine/palette";
-import { analyzePattern, buildChipPalette } from "../lib/recognize/assistant";
+import { analyzePattern, buildChipPalette, decideBackground } from "../lib/recognize/assistant";
 import { detectGrid, readGrid } from "../lib/recognize/grid";
 import type { Chip } from "../lib/recognize/legend";
 import { assignBelowBands, chipStack, findChips, normalizeCode, parseChipTexts, parseHeaderText, parseLegendText, parseLegendWords } from "../lib/recognize/legend";
 import { setOcrBackend, terminateOcr } from "../lib/recognize/ocr";
-import { buildChart, buildRulerChart, createNodeOcrBackend, decodePng, downscaleArea, driftColors, gradientImage, illustrationImage, TEST_CODES } from "./fixtures";
+import { buildChart, buildRulerChart, createNodeOcrBackend, decodePng, downscaleArea, driftColors, gradientImage, illustrationImage, repaintCells, TEST_CODES } from "./fixtures";
 
 const VALID = new Set(MARD_PALETTE.map((c) => c.code));
 
@@ -143,6 +143,58 @@ describe("标尺剥离 / 抬头尺寸强制", () => {
     expect(g?.rows).toBe(30);
     expect(Math.abs(g!.x0 - chart.x0)).toBeLessThan(2);
     expect(Math.abs(g!.y0 - chart.y0)).toBeLessThan(2);
+  });
+});
+
+describe("智能去背景（边缘泛洪）", () => {
+  const COLS = 30, ROWS = 24, P = 14;
+  const base = () => buildChart({ cols: COLS, rows: ROWS, pitch: P, boldEvery: 5, emptyFrac: 0, codes: ["A4", "B5"], seed: 71, titleBand: false, legendBand: false });
+  const inRect = (x: number, y: number) => x >= 8 && x <= 21 && y >= 6 && y <= 17;
+  const onRing = (x: number, y: number) => inRect(x, y) && (x === 8 || x === 21 || y === 6 || y === 17);
+
+  it("(a) 白底 + 轮廓围住的白色区域：外圈背景被去掉，被围住的白区仍是豆子", () => {
+    const chart = base();
+    repaintCells(chart, P, (x, y) => (onRing(x, y) ? "A4" : inRect(x, y) ? "WHITE" : null), "white");
+    const g = detectGrid(chart.src)!;
+    expect([g.cols, g.rows]).toEqual([COLS, ROWS]);
+    const r = readGrid(chart.src, g, { allowedCodes: [...TEST_CODES, "H2"], legendCodes: null });
+    const ring = 14 * 2 + 10 * 2, inner = 12 * 10;
+    expect(r.backgroundCells).toBe(COLS * ROWS - 14 * 12);
+    expect(r.backgroundMask![0]).toBe(1);
+    expect(r.backgroundMask![12 * COLS + 14]).toBe(0);
+    expect(r.counts.A4).toBe(ring);
+    expect(Object.values(r.counts).reduce((a, b) => a + b, 0)).toBe(ring + inner);
+  });
+
+  it("(b) 棋盘格空背景：整片去掉，豆子数不变", () => {
+    const chart = buildChart({ cols: COLS, rows: ROWS, pitch: P, boldEvery: 5, emptyFrac: 0, checker: true, beadRect: { c0: 8, r0: 6, c1: 21, r1: 17 }, seed: 72, titleBand: false, legendBand: false });
+    const g = detectGrid(chart.src)!;
+    const r = readGrid(chart.src, g, { allowedCodes: TEST_CODES, legendCodes: null });
+    expect(r.counts).toEqual(chart.counts);
+    expect(r.backgroundCells).toBe(COLS * ROWS - 14 * 12);
+  });
+
+  it("(c) 背景其实是 H2 豆子：图例 H2 = 背景 + 内部时，背景并入 H2；图例没有 H2 时不动", () => {
+    const chart = base();
+    repaintCells(chart, P, (x, y) => (onRing(x, y) ? "A4" : inRect(x, y) ? "B5" : null), "white");
+    const g = detectGrid(chart.src)!;
+    const bgN = COLS * ROWS - 14 * 12;
+    const r1 = readGrid(chart.src, g, { allowedCodes: [...TEST_CODES, "H2"], legendCodes: null });
+    expect(r1.backgroundCells).toBe(bgN);
+    const legend = (h2: number) => ({ items: [], counts: { A4: 48, B5: 120, H2: h2 }, statedTotal: null, rawText: "" });
+    const none = decideBackground(readGrid(chart.src, g, { allowedCodes: TEST_CODES, legendCodes: null }), legend(0) as never, null);
+    expect(none).toBeNull();
+    const r2 = readGrid(chart.src, g, { allowedCodes: [...TEST_CODES, "H2"], legendCodes: null });
+    const got = decideBackground(r2, legend(bgN + 3) as never, null);
+    expect(got?.code).toBe("H2");
+    expect(r2.counts.H2).toBe(bgN);
+    expect(r2.backgroundCells).toBe(0);
+    expect(r2.backgroundAssigned).toEqual({ code: "H2", cells: bgN });
+    // 画像素式：背景格里每格都印着色号 → 即使图例数量读不出，背景也是 H2
+    const r3 = readGrid(chart.src, g, { allowedCodes: [...TEST_CODES, "H2"], legendCodes: null });
+    r3.backgroundInkFrac = 1;
+    expect(decideBackground(r3, null, null)?.code).toBe("H2");
+    expect(r3.counts.H2).toBe(bgN);
   });
 });
 
