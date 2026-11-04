@@ -3,7 +3,12 @@ import { Icon } from "../ui";
 import "./pattern.css";
 
 /** 图片选择区：点击 / 拖入 / 粘贴 / 手机相机。onFile 收到的一定是 image/*。 */
-export default function ImageDrop({ onFile, title, hint, compact }: { onFile: (file: File) => void; title?: string; hint?: string; compact?: boolean }) {
+export default function ImageDrop({ onFile, onFiles, title, hint, compact }: {
+  onFile: (file: File) => void;
+  /** 传了就允许一次选多张：选了 2 张以上时调用它（单张仍走 onFile） */
+  onFiles?: (files: File[]) => void;
+  title?: string; hint?: string; compact?: boolean;
+}) {
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
 
@@ -18,8 +23,9 @@ export default function ImageDrop({ onFile, title, hint, compact }: { onFile: (f
   }, [onFile]);
 
   const take = (files: FileList | null | undefined) => {
-    const file = Array.from(files ?? []).find((f) => f.type.startsWith("image/"));
-    if (file) onFile(file);
+    const imgs = Array.from(files ?? []).filter((f) => f.type.startsWith("image/"));
+    if (imgs.length > 1 && onFiles) onFiles(imgs);
+    else if (imgs[0]) onFile(imgs[0]);
   };
 
   return (
@@ -39,7 +45,7 @@ export default function ImageDrop({ onFile, title, hint, compact }: { onFile: (f
         <h3>{title ?? "拖入、点击选择或粘贴图片"}</h3>
         {hint ? <p className="meta">{hint}</p> : null}
       </div>
-      <input ref={input} type="file" accept="image/*" hidden onChange={(e) => { take(e.target.files); e.target.value = ""; }} />
+      <input ref={input} type="file" accept="image/*" multiple={!!onFiles} hidden onChange={(e) => { take(e.target.files); e.target.value = ""; }} />
     </div>
   );
 }

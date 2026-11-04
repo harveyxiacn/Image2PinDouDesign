@@ -66,6 +66,14 @@ export function score(mods, rec, t) {
     const codes = Object.keys(tl);
     m.codeExact = codes.filter((c) => (got[c] ?? 0) === tl[c]).length;
     m.codeTotal = codes.length;
+    // 格内色号指标：真值里印着格内色号的图，真实图例色号有多少被“格内读出的色号”正确命名
+    if (t.codesInCells) {
+      const names = new Set((rec.cellNames ?? []).map((c) => norm(mods, c)));
+      m.cellNamed = codes.filter((c) => names.has(c)).length;
+      m.cellNamedTotal = codes.length;
+      m.cellFake = [...names].filter((c) => !(c in tl)).length;
+    }
+    m.colorsFound = Object.keys(got).length;
     m.absErr = codes.reduce((a, c) => a + Math.abs((got[c] ?? 0) - tl[c]), 0) + Object.keys(got).filter((c) => !(c in tl)).reduce((a, c) => a + got[c], 0);
   }
   return m;
@@ -89,6 +97,8 @@ function summarizeOne(results, mods, title) {
   const ce = withTruth.filter((r) => r.metrics.codeTotal);
   lines.push(`色号用量完全一致: ${pct(ce.reduce((a, r) => a + r.metrics.codeExact, 0), ce.reduce((a, r) => a + r.metrics.codeTotal, 0))}`);
   const ic = withTruth.filter((r) => r.metrics.isChartOk !== undefined);
+  const cn = withTruth.filter((r) => r.metrics.cellNamedTotal);
+  lines.push(`格内色号命名正确(真图例码): ${pct(cn.reduce((a, r) => a + r.metrics.cellNamed, 0), cn.reduce((a, r) => a + r.metrics.cellNamedTotal, 0))}；多出的假色号共 ${cn.reduce((a, r) => a + r.metrics.cellFake, 0)}`);
   lines.push(`是否图纸判断正确: ${pct(ic.filter((r) => r.metrics.isChartOk).length, ic.length)}`);
   const ms = results.map((r) => r.ms).sort((a, b) => a - b);
   lines.push(`用时: 中位 ${ms[ms.length >> 1] ?? 0} ms，最大 ${ms[ms.length - 1] ?? 0} ms，共 ${results.length} 张，其中有 truth ${withTruth.length} 张`);
@@ -97,7 +107,7 @@ function summarizeOne(results, mods, title) {
 
 function table(results) {
   const pad = (s, n) => { s = String(s); let w = 0; for (const ch of s) w += ch.charCodeAt(0) > 255 ? 2 : 1; return s + " ".repeat(Math.max(0, n - w)); };
-  const head = ["图", "尺寸(检测/真值)", "表头", "图纸", "总数(终/真)", "码对/码数", "方法", "置信", "ms"];
+  const head = ["图", "尺寸(检测/真值)", "表头", "图纸", "总数(终/真)", "码对/码数", "格内命名/簇", "方法", "置信", "ms"];
   const rows = results.map((r) => {
     const t = r.truth;
     return [
@@ -107,6 +117,7 @@ function table(results) {
       r.isChart === false ? "非" : "是",
       `${r.total ?? "-"}/${t?.statedTotal ?? t?.legendSum ?? "?"}${r.metrics.totalOk === undefined ? "" : r.metrics.totalOk ? " ✓" : " ✗"}`,
       r.metrics.codeTotal ? `${r.metrics.codeExact}/${r.metrics.codeTotal}` : "-",
+      r.metrics.cellNamedTotal ? `${r.metrics.cellNamed}/${r.metrics.cellNamedTotal}+${r.metrics.cellFake} c${r.clusterCount} ${r.cellStats ?? ""}` : "-",
       r.method,
       r.confidence?.toFixed(2),
       r.ms
@@ -119,6 +130,13 @@ function table(results) {
 export async function evaluate(mods, { dir, truth, only, ocr = true, lowres = 0, enhance = "auto", log = console.log }) {
   const backend = mods.createNodeOcrBackend?.();
   if (backend && mods.setOcrBackend) mods.setOcrBackend(backend);
+  if (process.env.PH_GLYPH_DEBUG) {
+    let n = 0;
+    globalThis.__phGlyphDebug = (info) => {
+      if (info.stack) { const f = join(tmpdir(), `glyph-stack-${n++}.png`); writeFileSync(f, mods.encodePng(info.stack)); console.log("GLYPHSTACK " + f); }
+      else console.log("GLYPH " + JSON.stringify(info));
+    };
+  }
   const jpeg = createRequire(join(HUB, "package.json"))("jpeg-js");
   const results = [];
   for (const file of walk(dir)) {
@@ -158,6 +176,9 @@ export async function evaluate(mods, { dir, truth, only, ocr = true, lowres = 0,
       rec.legendTotal = res.legend ? sumOf(res.legend.counts) : null;
       rec.paletteWarning = res.paletteWarning;
       rec.cellCodesRead = res.cellCodesRead;
+      rec.cellNames = res.cellCodeStats?.names ?? null;
+      rec.cellStats = res.cellCodeStats ? `${res.cellCodeStats.read}/${res.cellCodeStats.clusters} glyph${res.cellCodeStats.glyph ?? "-"} merged${res.cellCodeStats.merged ?? "-"}` : null;
+      rec.clusterCount = res.grid?.clusters?.length ?? null;
       rec.legendCounts = res.legend?.counts ?? null;
       rec.bgCode = (res.grid?.clusters ?? []).filter((c) => c.cells.length && c.cells.some((i) => res.grid.backgroundMask?.[i])).map((c) => `${c.colorCode}/${c.code}:${c.cells.filter((i) => res.grid.backgroundMask[i]).length}`).join(" ");
       rec.bgInk = res.grid?.backgroundInkFrac ?? null;
@@ -195,7 +216,7 @@ async function loadViaVite() {
     server,
     mods: {
       analyzePattern: assistant.analyzePattern, setOcrBackend: ocr.setOcrBackend, terminateOcr: ocr.terminateOcr,
-      decodePng: fx.decodePng, downscaleArea: fx.downscaleArea, createNodeOcrBackend: fx.createNodeOcrBackend,
+      decodePng: fx.decodePng, encodePng: fx.encodePng, downscaleArea: fx.downscaleArea, createNodeOcrBackend: fx.createNodeOcrBackend,
       normalizeCode: legend.normalizeCode
     }
   };

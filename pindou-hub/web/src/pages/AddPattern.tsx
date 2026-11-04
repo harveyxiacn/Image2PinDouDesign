@@ -4,7 +4,9 @@ import { getBlob, useData } from "../lib/db";
 import { navigate, useRoute } from "../components/ui";
 import RecognizePanel, { type RecognizeSeed } from "../components/pattern/RecognizePanel";
 import BatchPanel from "../components/pattern/BatchPanel";
-import { batchStore } from "../components/pattern/batchRunner";
+import { batchStore, enqueue } from "../components/pattern/batchRunner";
+import StitchPanel from "../components/pattern/StitchPanel";
+import MultiChoice from "../components/pattern/MultiChoice";
 import type { BatchItem } from "../lib/batch";
 import GeneratePanel from "../components/pattern/GeneratePanel";
 import ManualPanel from "../components/pattern/ManualPanel";
@@ -26,6 +28,8 @@ export default function AddPattern() {
   const imageId = route.query.get("image");
   const [file, setFile] = useState<File | null>(null);
   const [loadError, setLoadError] = useState("");
+  /** 多张图：asking = 先问是拼接还是批量；stitching = 拼接面板 */
+  const [multi, setMulti] = useState<{ files: File[]; step: "asking" | "stitching" } | null>(null);
   /** 批量队列里“检查 / 查看 / 仍按图纸识别”打开的那一张：用单张识别视图审阅，保存后回到队列 */
   const [review, setReview] = useState<{ id: string; file: File; seed: RecognizeSeed } | null>(null);
 
@@ -43,7 +47,10 @@ export default function AddPattern() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageId]);
 
-  const go = (m: Mode) => { setReview(null); navigate(`/add?mode=${m}`); };
+  // 切换方式（含浏览器前进 / 后退）时丢掉多图选择 / 拼接面板
+  useEffect(() => { setMulti(null); }, [mode]);
+
+  const go = (m: Mode) => { setReview(null); setMulti(null); navigate(`/add?mode=${m}`); };
   const toGenerate = (f: File) => { setFile(f); setReview(null); navigate("/add?mode=generate"); };
   const openReview = (it: BatchItem) => {
     // notchart / 无结果的条目没有可用 seed：直接按单张重新识别
@@ -66,7 +73,17 @@ export default function AddPattern() {
         </div>
       </div>
       {loadError ? <div className="notice" role="alert" style={{ marginBottom: 12 }}>{loadError}</div> : null}
-      {mode === "recognize" ? <RecognizePanel file={file} onFile={setFile} onClear={clear} onGenerate={file ? () => toGenerate(file) : undefined} /> : null}
+      {mode === "recognize" && multi?.step === "stitching" ? (
+        <StitchPanel files={multi.files} onCancel={() => setMulti(null)} onUse={(f) => { setMulti(null); setFile(f); }} />
+      ) : null}
+      {mode === "recognize" && multi?.step === "asking" ? (
+        <MultiChoice count={multi.files.length} onStitch={() => setMulti({ files: multi.files, step: "stitching" })}
+          onBatch={() => { enqueue(multi.files); setMulti(null); navigate("/add?mode=batch"); }} onCancel={() => setMulti(null)} />
+      ) : null}
+      {mode === "recognize" && !multi ? (
+        <RecognizePanel file={file} onFile={setFile} onClear={clear} onGenerate={file ? () => toGenerate(file) : undefined}
+          onMulti={(files, how) => setMulti({ files, step: how === "stitch" ? "stitching" : "asking" })} />
+      ) : null}
       {mode === "batch" ? (
         <>
           <div hidden={!!review}><BatchPanel onReview={openReview} onGenerate={toGenerate} /></div>

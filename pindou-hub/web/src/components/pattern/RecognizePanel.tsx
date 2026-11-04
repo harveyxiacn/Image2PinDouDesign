@@ -9,6 +9,7 @@ import { headerChecks } from "../../lib/batch";
 import { normalizeCode } from "../../lib/palette";
 import { DiffNumber, Icon, fmt, navigate, prefersReducedMotion, toast } from "../ui";
 import ImageDrop from "./ImageDrop";
+import CaptureTips, { TipsList } from "./CaptureTips";
 import AnalysisImage, { type ImageView } from "./AnalysisImage";
 import EnhanceCard, { loadHdMode, saveHdMode, type EnhState, type HdMode } from "./EnhanceCard";
 import AssistantTimeline from "./AssistantTimeline";
@@ -17,6 +18,7 @@ import SaveForm, { type SaveValues } from "./SaveForm";
 import MatrixView from "./MatrixView";
 import { createPattern } from "./save";
 import "./pattern.css";
+import "./stitch.css";
 
 type Pixels = Awaited<ReturnType<typeof loadPixelSource>>;
 type Ai = { counts: Counts; notes?: string; model: string };
@@ -43,10 +45,12 @@ async function toJpegBase64(file: Blob, maxEdge = 1600): Promise<string> {
 /** 从批量队列“需要检查”打开时带入：已有的识别结果（不重新跑 OCR）、标签与状态默认值 */
 export type RecognizeSeed = { result: AnalyzeResult; name: string; tags: string; status: PatternStatus };
 
-export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed, onSaved, clearLabel = "换一张" }: {
+export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed, onSaved, clearLabel = "换一张", onMulti }: {
   file: File | null; onFile: (f: File) => void; onClear: () => void;
   /** “用它生成图纸”：由页面切换到生成模式并保留这张图 */
   onGenerate?: () => void; seed?: RecognizeSeed | null; onSaved?: (patternId: string) => void; clearLabel?: string;
+  /** 一次选了多张图（或点「多张截图拼接」）：交给页面决定是拼接还是批量；mode=stitch 表示用户已明确要拼接 */
+  onMulti?: (files: File[], mode: "ask" | "stitch") => void;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [pixels, setPixels] = useState<Pixels | null>(null);
@@ -78,6 +82,8 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const [hdBlob, setHdBlob] = useState<Blob | null>(null);
   const [hdUrl, setHdUrl] = useState<string | null>(null);
   const [useHdSource, setUseHdSource] = useState(false);
+  const [tipsOpen, setTipsOpen] = useState(false);
+  const stitchInput = useRef<HTMLInputElement>(null);
   const enhRef = useRef<EnhanceResult | null>(null);
   const modeRef = useRef<HdMode>(hdMode);
   modeRef.current = hdMode;
@@ -244,7 +250,19 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   };
 
   if (!file) {
-    return <ImageDrop onFile={onFile} title="上传拼豆图纸截图或照片" hint="支持拖入、粘贴、从相册或相机选择。有色号图例的图纸最准。" />;
+    return (
+      <div className="stack">
+        <ImageDrop onFile={onFile} onFiles={onMulti ? (fs) => onMulti(fs, "ask") : undefined} title="上传拼豆图纸截图或照片" hint="支持拖入、粘贴、从相册或相机选择。有色号图例的图纸最准。" />
+        {onMulti ? (
+          <div className="st-entry">
+            <button type="button" className="btn" onClick={() => stitchInput.current?.click()}><Icon name="scan" size={16} />多张截图拼接</button>
+            <span className="meta">图纸很长、分了几段截的图？选中它们，自动拼成一张。</span>
+            <input ref={stitchInput} type="file" accept="image/*" multiple hidden data-testid="stitch-input" onChange={(e) => { const fs = Array.from(e.target.files ?? []).filter((f) => f.type.startsWith("image/")); e.target.value = ""; if (fs.length) onMulti(fs, "stitch"); }} />
+          </div>
+        ) : null}
+        <CaptureTips />
+      </div>
+    );
   }
 
   const conf = result ? Math.round(result.confidence * 100) : 0;
@@ -352,6 +370,14 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
                 <div className="row"><button className="btn btn-sm" onClick={() => { setCounts(ai.counts); toast("已采用视觉模型的结果"); }}>采用它的结果</button><button className="btn btn-sm btn-ghost" onClick={() => setAi(null)}>忽略</button></div>
               </>
             ) : null}
+          </div>
+        ) : null}
+
+        {result && !notChart && (result.enhance?.level === "low" || result.enhance?.level === "very-low") ? (
+          <div className="notice st-hint" role="note" data-testid="low-quality-hint">
+            <span><b>这张图偏{result.enhance.level === "very-low" ? "很" : ""}糊。</b>如果读出来的数量对不上，换一张更清楚的原图会更准。</span>
+            <button type="button" className="btn btn-sm" aria-expanded={tipsOpen} onClick={() => setTipsOpen((o) => !o)}>{tipsOpen ? "收起小贴士" : "怎样拿到更清楚的图"}</button>
+            {tipsOpen ? <TipsList /> : null}
           </div>
         ) : null}
 

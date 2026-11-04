@@ -6,6 +6,9 @@ import { refineLattice } from "./lattice";
 import { trimRulerBands } from "./ruler";
 import { assignBelowBands, cellCodeCandidates, chipStack, findChips, findStatedTotal, parseChipTexts, parseHeaderText, parseLegendWords } from "./legend";
 import type { HeaderInfo } from "./legend";
+import { readChipLegend } from "./legendchips";
+import { reconcileCounts } from "./reconcile";
+import type { ReconcileResult } from "./reconcile";
 import { enhanceImage, summarizeEnhance, assessQuality } from "../enhance";
 import type { EnhanceResult } from "../enhance";
 import type {
@@ -48,20 +51,22 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   let rf = 1;
   const enhMode = options.enhance ?? "auto";
   let upNote = "";
-  if (enhMode !== "off" && !options.region && Math.max(src.width, src.height) <= 1100) {
+  /** 图例是否只读了个大概（有数量没读清 / 被按网格校正过 / 漏读色号）：这时格内色号读得全的网格计数比图例数字更可靠 */
+  let legendPatchy = 0;
+  if (enhMode !== "off" && !options.region && Math.max(src.width, src.height) <= 2000) {
     const sus = !grid0 || Math.min(grid0.cols, grid0.rows) <= 24 || grid0.score < 0.55;
     if (sus) {
       try {
-        const F = Math.max(3, Math.min(6, Math.ceil(1800 / Math.max(src.width, src.height))));
+        const F = Math.max(2, Math.min(6, Math.ceil(2400 / Math.max(src.width, src.height))));
         const up = await enhanceImage(src, { grid: null, scale: F, method: "sharp-upscale", signal });
         const g1 = up.method === "none" ? null : detectGrid(up.image, null);
         const k = up.image.width / src.width;
         // 粗网格（≤24 格）多半是每 5 / 10 格一条的粗线：按边缘能量找回细格
         const coarse = g1 && g1.score >= 0.45 ? g1 : grid0 ? { ...grid0, x0: grid0.x0 * k, y0: grid0.y0 * k, pitchX: grid0.pitchX * k, pitchY: grid0.pitchY * k } : null;
-        if (up.method !== "none" && coarse && Math.min(coarse.cols, coarse.rows) <= 24) {
+        if (up.method !== "none" && coarse && Math.min(coarse.cols, coarse.rows) <= 40) {
           const fine = refineLattice(up.image, coarse);
           // 细格在原图上必须真的很小（< 9 像素）才算“低清”问题；否则就是一张格子本来就大的图
-          if (fine && fine.cols >= 8 && fine.rows >= 8 && fine.pitchX / k < 9 && fine.pitchY / k < 9) {
+          if (fine && fine.cols >= 8 && fine.rows >= 8 && fine.pitchX / k < 11 && fine.pitchY / k < 11) {
             upNote = `（原图上只检测到 ${grid0?.cols ?? coarse.cols}×${grid0?.rows ?? coarse.rows} 的粗网格，按边缘细分）`;
             grid0 = { ...fine, x0: fine.x0 / k, y0: fine.y0 / k, pitchX: fine.pitchX / k, pitchY: fine.pitchY / k };
             readSrc = up.image; rf = k;
@@ -69,7 +74,9 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
         }
         const ratioOk = (a: number, b: number) => { const r = a / b; return r >= 1.6 && Math.abs(r - Math.round(r)) <= 0.12 * r; };
         if (rf === 1 && g1 && g1.cols >= 8 && g1.rows >= 8 && g1.score >= 0.5 && g1.pitchX / k >= 2.4 && g1.pitchY / k >= 2.4
-          && (!grid0 || (ratioOk(g1.cols, grid0.cols) && ratioOk(g1.rows, grid0.rows)))) {
+          && (!grid0 || (ratioOk(g1.cols, grid0.cols) && ratioOk(g1.rows, grid0.rows))
+            // 原图网格本来就很弱（JPEG 小图上常检测成乱七八糟的尺寸）：放大图上明显更规整的网格直接采用
+            || (grid0.score < 0.55 && g1.score >= 0.62 && g1.score >= grid0.score + 0.12 && Math.min(g1.cols, g1.rows) > 40))) {
           upNote = grid0 ? `（原图上只检测到 ${grid0.cols}×${grid0.rows} 的粗网格）` : "（原图上没检测到网格）";
           grid0 = { ...g1, x0: g1.x0 / k, y0: g1.y0 / k, pitchX: g1.pitchX / k, pitchY: g1.pitchY / k };
           readSrc = up.image; rf = k;
@@ -175,11 +182,12 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   } else {
     const t0 = performance.now();
     try {
-      const parsed = await withDeadline(signal, OCR_BUDGET_MS, (sig) => readLegend(src, hiSrc, grid, sig));
+      const parsed = await withDeadline(signal, OCR_BUDGET_MS, (sig) => readLegend(src, hiSrc, grid, sig, ocrOn && options.headerOcr !== false));
       if (parsed.items.length >= 2) {
         legend = parsed;
         const total = sum(parsed.counts);
         const pal = parsed.palette?.length ?? 0;
+        if (pal > parsed.items.length) legendPatchy += pal - parsed.items.length;
         step("legend", "读取图例", parsed.items.length >= 2 ? "ok" : "warn", `读到图例 ${parsed.items.length} 色，合计 ${fmt(total)} 颗`
           + (pal > parsed.items.length ? `（色块共 ${pal} 个，${pal - parsed.items.length} 个的数量没读清，按网格统计补上）` : "")
           + (parsed.statedTotal ? `（图上标注总数 ${fmt(parsed.statedTotal)}）` : "")
@@ -257,7 +265,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     } else {
       const t1 = performance.now();
       try {
-        const r = await withDeadline(signal, CELL_BUDGET_MS, (sig) => readCellCodes(src, hiSrc, grid!, reading!, sig));
+        const r = await withDeadline(signal, CELL_BUDGET_MS, (sig) => readCellCodes(src, hiSrc, grid!, reading!, sig, legend && legend.items.length >= 3 ? { allowed: legendCodeList(legend), legendColors: legend.colors ?? null } : {}));
         // 有可信图例（≥3 色）时，图例就是这张图的色号全集：格内 OCR 读出图例之外的色号（如把 “A1” 读成 “P11”）一律不采用，
         // 否则会把一整簇颜色改名，再被“补全图例”当成漏读色号重复计数。
         if (legend && legend.items.length >= 3) {
@@ -265,7 +273,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
           for (const [id, code] of Object.entries(r.votes)) if (!allowed.has(code)) delete r.votes[Number(id)];
         }
         const nVotes = Object.keys(r.votes).length;
-        const nRead = nVotes - r.recovered;
+        const nRead = Math.max(0, nVotes - r.recovered - r.merged);
         if (nVotes > 0) {
           const before = reading;
           const next = readG(grid!, {
@@ -281,7 +289,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
           if (sum(next.counts) > 0) {
             reading = next;
             cellCodesRead = true;
-            cellCodeStats = { read: nRead, clusters: r.total, overrides };
+            cellCodeStats = { read: nRead, clusters: r.total, overrides, glyph: r.glyph, merged: r.merged, names: [...new Set(Object.values(r.votes))] };
             const ovTxt = overrides ? `，格内色号校正了 ${overrides} 个颜色匹配` : "，与颜色匹配一致";
             step("cellcode", "读取格内色号", nRead >= r.total * 0.8 ? "ok" : "warn",
               `读出 ${nRead}/${r.total} 个颜色的格内色号${r.recovered ? `（另 ${r.recovered} 个按校正后的颜色补全）` : ""}${ovTxt}，用时 ${((performance.now() - t1) / 1000).toFixed(1)} 秒`);
@@ -315,7 +323,8 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
 
   // OCR 数字常见混淆（3↔8、末尾多读一位等）：与网格统计差得远、但改一位后吻合的，采用改后的值
   if (legend && reading) {
-    const fixed = reconcileLegend(legend, reading);
+    const fixed = reconcileLegend(legend, reading, header?.total ?? legend.statedTotal ?? null);
+    legendPatchy += fixed;
     if (fixed > 0) step("legend-fix", "校正图例数字", "warn", `按网格统计校正了 ${fixed} 个疑似 OCR 误读的数量`);
   }
 
@@ -361,11 +370,25 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       abs += Math.abs(l - g);
     }
     const mismatch = diff.filter((d) => d.legend !== d.grid && !added.includes(d.code)).length;
+    // 网格读数是否“硬”：格内色号读出了绝大多数颜色，或网格规整、平涂、色差小。
+    // JPEG 压缩后图例小数字常被读错（8↔6、1↔7），而格子是一颗颗数出来的——此时有分歧的色号以网格为准。
+    const gtAll = sum(reading.counts);
+    const gridDeAll = reading.colors.reduce((s, c) => s + c.deltaE * c.count, 0) / Math.max(1, gtAll);
+    const gridTrusted = reading.grid.score >= 0.7 && (reading.flatFrac ?? 0) >= 0.7 && gridDeAll <= 4;
+    // 图例“只读了个大概”的程度：没读清的数量 + 漏读的色号 + 被校正的数字，占全部色号的比例
+    const patchy = (legendPatchy + added.length) / Math.max(1, codes.size) >= 0.35;
+    const codesStrong = !!cellCodesRead && !!cellCodeStats && cellCodeStats.read / Math.max(1, cellCodeStats.clusters) >= 0.8;
     const agreement = Math.max(0, 1 - abs / Math.max(lt, gt, 1));
     if (added.length) step("legend-missing", "补全图例", "warn", `图例漏读 ${added.length} 个色号（${added.join("、")}），已按网格统计补上`);
     if (Math.abs(lt - gt) / Math.max(lt, gt, 1) <= 0.03) {
       method = "legend+grid";
       confidence = 0.75 + 0.2 * agreement;
+      if (codesStrong && patchy && mismatch && Math.abs(lt - gt) / Math.max(lt, gt, 1) >= 0.005) {
+        // 网格上数到了的色号用网格数字；网格上为 0 的（如被当成背景去掉的浅色豆）保留图例数字
+        const fixed: string[] = [];
+        for (const d of diff) if (d.grid > 0 && d.legend !== d.grid && !added.includes(d.code)) { counts[d.code] = d.grid; fixed.push(d.code); }
+        if (fixed.length) step("legend-fix-grid", "按网格校正图例", "warn", `${fixed.length} 个色号的图例数字与逐格计数不同（${fixed.slice(0, 8).join("、")}${fixed.length > 8 ? " 等" : ""}），格子读数更可靠，已按网格计数`);
+      }
       step("compare", "图例与网格对照", mismatch ? "warn" : "ok",
         mismatch
           ? `总数吻合（图例 ${fmt(lt)} / 网格 ${fmt(gt)}），网格统计与图例有 ${mismatch} 个色号不一致`
@@ -374,9 +397,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       // 两边总数对不上：谁更可信？有总数（抬头 / 图上标注）就看谁更接近；没有就看网格是否“可信”
       // （规整、平涂、平均色差小）——小图里图例数字 OCR 常读错位，而网格计数是确定性的
       const target = header?.total ?? legendUsed.statedTotal ?? null;
-      const gridDe = reading.colors.reduce((s, c) => s + c.deltaE * c.count, 0) / Math.max(1, gt);
-      const gridTrusted = reading.grid.score >= 0.7 && (reading.flatFrac ?? 0) >= 0.7 && gridDe <= 4;
-      const useGrid = target ? Math.abs(gt - target) < Math.abs(lt - target) : gridTrusted;
+      const useGrid = target ? Math.abs(gt - target) < Math.abs(lt - target) : gridTrusted || (codesStrong && patchy);
       if (useGrid) {
         counts = { ...reading.counts };
         method = agreement >= 0.5 ? "legend+grid" : "grid";
@@ -417,6 +438,24 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   }
 
   confidence = Math.max(0, Math.min(1, confidence));
+  // 多来源核对：图例读数（含备选读法）/ 网格 / 抬头总数——合计对不上总数时，在有争议的色号里挑合计恰好吻合的组合，并给每个色号标注把握
+  let recon: ReconcileResult | null = null;
+  if (sum(counts) > 0) {
+    try {
+      recon = reconcileCounts({
+        current: counts,
+        legend: legend && legend.items.length >= 2 ? legend.items : null,
+        grid: reading?.counts ?? null,
+        cellCodes: cellCodesRead,
+        total: header?.total ?? legend?.statedTotal ?? null,
+        colors: header?.colors ?? null
+      });
+      if (recon.changed.length) {
+        counts = recon.counts;
+        step("reconcile", "按总数核对读数", "warn", recon.notes.join("；"));
+      }
+    } catch { recon = null; }
+  }
     // 抬头总数核对 / 色数核对
   if (header?.total && sum(counts) > 0) {
     const ok = Math.abs(sum(counts) - header.total) / header.total <= 0.01;
@@ -436,7 +475,8 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       const r = rc[code] ?? 0;
       let status: "ok" | "short" | "over" | "no-legend" = "no-legend";
       if (l !== null) status = Math.abs(l - r) <= Math.max(2, Math.round(0.03 * l)) ? "ok" : r < l ? "short" : "over";
-      checks.push({ code, legend: l, read: r, status });
+      const pv = recon?.prov[code];
+      checks.push({ code, legend: l, read: r, status, ...(pv ? { source: pv.source, confidence: pv.confidence, uncertain: pv.uncertain } : {}) });
     }
     if (lc) {
       const withLegend = checks.filter((c) => c.legend !== null);
@@ -445,6 +485,10 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       step("legend-check", "与下方用量核对", okN === withLegend.length ? "ok" : "warn",
         `与下方用量核对：${okN}/${withLegend.length} 色一致${bad.length ? `（${bad.slice(0, 6).join("、")}${bad.length > 6 ? "…" : ""}）` : ""}`);
     }
+  }
+  {
+    const unsure = checks.filter((c) => c.uncertain && c.read > 0);
+    if (unsure.length && unsure.length <= 12) step("uncertain", "需要核对的色号", "warn", `${unsure.map((c) => c.code).join("、")} 的读数来源互相矛盾或把握不高，建议对照原图核对`);
   }
   const paletteWarning = detectPaletteMismatch(legend, reading, cellCodeStats);
   if (paletteWarning) step("palette", "核对色卡", "warn", paletteWarning);
@@ -581,7 +625,7 @@ function scaleRect(r: Rect, f: number): RectI {
  *   把每块的文字叠成一张小图一次识别（版面规整，快且准），否则按词框空间配对。
  * ② 若还没读到总数，再识别上方抬头条带找“N 颗豆”。
  */
-async function readLegend(src: PixelSource, hi: PixelSource, grid: GridDetection | null, signal: AbortSignal): Promise<LegendReading> {
+async function readLegend(src: PixelSource, hi: PixelSource, grid: GridDetection | null, signal: AbortSignal, headerRead = false): Promise<LegendReading> {
   const { ocrWords } = await import("./ocr");
   const f = hi.width / src.width;
   const exclude = grid ? padRect(gridRect(grid), Math.max(grid.pitchX, grid.pitchY) * 1.2) : null;
@@ -603,10 +647,36 @@ async function readLegend(src: PixelSource, hi: PixelSource, grid: GridDetection
 
   let result: LegendReading = { items: [], counts: {}, statedTotal: null, rawText: "" };
   const crop = cropTight(main);
-  if (crop) {
+  {
+    // 新：版式无关的图例读取器（色块 + 色号 + 数量，数量可在下 / 右 / 块内）。读出的条目够多就直接采用，否则走下面的老路径。
+    // 条带不加网格外扩的安全边距：小图里图例紧贴标尺，外扩会把色块切掉
+    const g0 = grid ? gridRect(grid) : null;
+    const rawBands = g0 ? outsideBands(src, g0) : bands;
+    const rawBelow = g0 ? rawBands.filter((b) => b.y >= g0.y + g0.height - 1) : [];
+    const rawMain = [...(rawBelow.length ? rawBelow : rawBands)].sort((a, b) => area(b) - area(a))[0];
+    const rc = rawMain ? cropTight(rawMain) : null;
+    let cl0: Awaited<ReturnType<typeof readChipLegend>> = null;
+    for (const cand of [rc, crop]) {
+      cl0 = null;
+      if (!cand || cand.img.height < 8) continue;
+      throwIfAborted(signal);
+      try {
+        const cl = await readChipLegend(cand.img, signal);
+        cl0 = cl;
+        // 读数合计不可能超过格子总数（超过说明色号 / 数量被连写读错了）
+        const clSum = cl ? cl.items.reduce((a, it) => a + it.count, 0) : 0;
+        const tooMany = !!grid && clSum > grid.cols * grid.rows;
+        if (cl && !tooMany && cl.confirmed >= Math.max(3, Math.ceil(0.5 * cl.chipCount))) { result = cl; break; }
+      } catch (err) { if ((err as Error)?.name === "AbortError") throw err; }
+      if (cand === crop || (rc && crop && rc.oy === crop.oy && rc.img.height === crop.img.height)) break;
+      if (cl0 && cl0.chipCount > 0) break; // 已经找到色块、只是不是带数量的图例：换个裁剪重试也一样
+    }
+  }
+  if (crop && result.items.length < 2) {
     throwIfAborted(signal);
     const chips = findChips(crop.img, Math.max(12, Math.round(0.015 * hi.width)), 0.9);
-    if (chips.length >= 3) {
+    // 图例最多几十色；上百个“色块”是把图纸格子 / 标尺当成了色块，不读（又慢又会读出一堆假色号）
+    if (chips.length >= 3 && chips.length <= 60) {
       // 去掉尺寸明显不同的“色块”（水印 / 文字团）：以中位尺寸为准
       const hs = chips.map((c) => c.height).sort((x, y) => x - y), ws2 = chips.map((c) => c.width).sort((x, y) => x - y);
       const mh = hs[hs.length >> 1], mw = ws2[ws2.length >> 1];
@@ -671,7 +741,8 @@ async function readLegend(src: PixelSource, hi: PixelSource, grid: GridDetection
       if (parsed.items.length > result.items.length) result = parsed;
     }
   }
-  if (result.statedTotal === null && header) {
+  // 抬头条带在“读取抬头”那一步已经读过（没读到就是没有），不重复读：这一遍 OCR 常要好几秒
+  if (result.statedTotal === null && header && !headerRead) {
     throwIfAborted(signal);
     const hc = cropTight(header);
     if (hc) {
@@ -751,12 +822,24 @@ const DIGIT_PARTNER: Record<string, string[]> = {
 };
 
 /** 返回被校正的条目数。 */
-function reconcileLegend(legend: LegendReading, reading: GridReading): number {
+function reconcileLegend(legend: LegendReading, reading: GridReading, statedTotal: number | null = null): number {
   const grid = reading.counts;
+  // 图例各色相加恰好等于图上写的总数：数字整体可信，网格数（颜色相近的色号会互相串）不能再去“校正”
+  const legendSum = Object.values(legend.counts).reduce((a, b) => a + b, 0);
+  if (statedTotal && Math.abs(legendSum - statedTotal) <= Math.max(1, Math.round(0.002 * statedTotal))) return 0;
+  // 网格整体可信吗：图例与网格在绝大多数色号上吻合（≥ 85%）时，个别不吻合的多半是图例数字读错；
+  // 大面积对不上（颜色相近的色号互相串、背景被误并）时，网格数不可信，不能拿它推翻图例上读到的数
+  const cmp = legend.items.filter((it) => (reading.counts[it.code] ?? 0) >= 5);
+  const gridTrusted = cmp.length >= 3 && cmp.filter((it) => Math.abs(it.count - reading.counts[it.code]) / reading.counts[it.code] <= 0.1).length >= 0.85 * cmp.length;
   let fixed = 0;
   for (const item of legend.items) {
     const g = grid[item.code] ?? 0;
     if (g < 5) continue;
+    // 色块图例读取器里被两遍以上识别一致、没有备选读法的数量很可信：网格数（颜色相近的色号会互相串）不能推翻它
+    // （网格读数有格内色号印证时除外：此时网格数比同一种读法反复读出的同一个错数更可信）
+    if (!gridTrusted && item.source === "色块图例" && (item.votes ?? 0) >= 2 && !item.alts?.length) continue;
+    // 白色（H1 / H2）常常就是图纸底色，网格数里被去背景 / 并背景弄乱了，不能拿来推翻图例上写的数
+    if (/^H[12]$/.test(item.code) && item.source === "色块图例") continue;
     const l = item.count;
     if (Math.abs(l - g) / g <= 0.1) continue;
     const s = String(l);
@@ -774,7 +857,7 @@ function reconcileLegend(legend: LegendReading, reading: GridReading): number {
     if (best === null) {
       // 改一位也对不上：若该色号的图例色块颜色被网格精确匹配（ΔE≤2），以网格数为准（OCR 很可能读错了）
       const st = reading.colors.find((c) => c.code === item.code);
-      if (legend.colors?.[item.code] && st && st.deltaE <= (legend.palette ? 5 : 2)) best = g;
+      if (legend.colors?.[item.code] && st && st.deltaE <= ((item.votes ?? 0) >= 2 && !item.alts?.length ? 1.5 : legend.palette ? 5 : 2)) best = g;
     }
     if (best !== null) {
       item.count = best;
@@ -816,14 +899,32 @@ function pickCells(reading: GridReading, clusterId: number, n: number, used: Set
  * 竖向叠成一张图识别一次；簇内多数票决定色号。最多 2 次 OCR（第二次补读第一次没结论的簇）。
  */
 async function readCellCodes(
-  src: PixelSource, hi: PixelSource, grid: GridDetection, reading: GridReading, signal: AbortSignal
-): Promise<{ votes: Record<number, string>; total: number; recovered: number }> {
+  src: PixelSource, hi: PixelSource, grid: GridDetection, reading: GridReading, signal: AbortSignal,
+  gopts: { allowed?: string[] | null; legendColors?: Record<string, { r: number; g: number; b: number }> | null } = {}
+): Promise<{ votes: Record<number, string>; total: number; recovered: number; glyph: number; merged: number }> {
   const { ocrWords } = await import("./ocr");
   const f = hi.width / src.width;
   const clusters = reading.clusters!;
   let eligible = clusters.filter((c) => c.inkCells >= Math.max(1, Math.ceil(c.count * 0.5)));
   // 颜色簇太多（照片 / 噪点）说明不是规整的色号图：放弃；否则只取格子最多的前 60 个簇，并限制叠图总高度
-  if (eligible.length > 90) return { votes: {}, total: eligible.length, recovered: 0 };
+  // 先把噪点拆碎的簇并成颜色组，整组读一次字；碎簇太多（照片）才放弃
+  const gv: Record<number, string> = {};
+  const noisy = clusters.length > 90;
+  let glyphGroups = 0;
+  try {
+    const { groupClusters, readGlyphCodes } = await import("./glyph");
+    const groups = groupClusters(reading).filter((g) => g.count >= 2 && g.cells.filter((i) => reading.cellInk![i]).length >= 0.4 * g.count);
+    if (groups.length > 0 && groups.length <= 90) {
+      const g = await readGlyphCodes(hi, f, grid, reading, groups, gopts, signal, (img, sg, o) => ocrWords(img, sg, o));
+      for (const [gid, v] of Object.entries(g.votes)) for (const m of groups.find((x) => x.id === Number(gid))!.members) gv[m] = v.code;
+      glyphGroups = Object.keys(g.votes).length;
+    }
+  } catch (err) {
+    (globalThis as { __phGlyphDebug?: (info: unknown) => void }).__phGlyphDebug?.({ error: String((err as Error)?.stack ?? err) });
+    if (signal.aborted) throw err;
+  }
+  if (eligible.length > 90) eligible = [];
+  if (noisy && !Object.keys(gv).length) return { votes: {}, total: clusters.length, recovered: 0, glyph: 0, merged: 0 };
   eligible = [...eligible].sort((x, y) => y.count - x.count).slice(0, 60);
   const perCluster = Math.max(1, Math.min(5, Math.floor(200 / Math.max(1, eligible.length))));
   const tally = new Map<number, Map<string, number>>();
@@ -886,14 +987,17 @@ async function readCellCodes(
     return null;
   };
 
-  await runRound(eligible.map((c) => c.id), perCluster);
-  const unresolved = eligible.filter((c) => decide(c.id) === null && c.count > (picked.get(c.id) ?? 0)).map((c) => c.id);
+  // 1) 簇平均字形：同色格子对齐平均后整体识别（抗水印 / JPEG 噪点）；2) 没读出的簇再退回逐格投票
+  const rest = eligible.filter((c) => !gv[c.id]);
+  if (rest.length) await runRound(rest.map((c) => c.id), perCluster);
+  const unresolved = rest.filter((c) => decide(c.id) === null && c.count > (picked.get(c.id) ?? 0)).map((c) => c.id);
   if (unresolved.length) await runRound(unresolved.slice(0, 40), Math.min(5, perCluster + 2));
   const votes: Record<number, string> = {};
   for (const c of eligible) {
-    const v = decide(c.id);
+    const v = gv[c.id] ?? decide(c.id);
     if (v) votes[c.id] = v;
   }
+  for (const [id, code] of Object.entries(gv)) if (!votes[Number(id)]) votes[Number(id)] = code;
   // 证据太少（文字太小 / 识别很差）时整体放弃：几票很可能是误读，宁可按颜色匹配
   if (Object.keys(votes).length < Math.max(3, Math.ceil(eligible.length * 0.25))) {
     for (const k of Object.keys(votes)) delete votes[Number(k)];
@@ -904,7 +1008,7 @@ async function readCellCodes(
   let recovered = 0;
   if (decided.length >= 8 && (agree / decided.length < 0.9 || dup) && agree / decided.length < 0.6) {
     // 颜色整体漂移（一致率低）：用文字读出的色号当“标准答案”，拟合 颜色→色卡 的校正，再补全 / 纠正个别读错的簇
-    recovered = calibrateVotes(eligible, votes);
+    recovered = calibrateVotes(clusters.filter((c) => !c.empty), votes);
   } else if (decided.length >= 4 && agree / decided.length >= 0.6) {
     // 颜色匹配整体可靠时，只采纳“颜色上也说得过去”的不一致结果，防止少数 OCR 误读（如 A17 读成 A7）推翻正确的颜色匹配
     for (const [id, code] of decided) {
@@ -914,7 +1018,23 @@ async function readCellCodes(
       if (!pal || ciede2000(rgbToLab(cl.rgb), pal.lab) > 8) delete votes[Number(id)];
     }
   }
-  return { votes, total: eligible.length, recovered };
+  // 3) 水印 / JPEG 噪点把同一颜色拆成的小碎簇：颜色与某个已读簇几乎相同、且小得多 → 并入它（同色号）
+  let merged = 0;
+  if (Object.keys(votes).length >= 3) {
+    const labs = clusters.map((c) => rgbToLab(c.rgb));
+    for (const c of clusters) {
+      if (votes[c.id] || c.empty) continue;
+      let bi = -1, bd = Infinity;
+      for (const idStr of Object.keys(votes)) {
+        const j = Number(idStr);
+        if (clusters[j].count < 2.5 * c.count) continue;
+        const d = ciede2000(labs[c.id], labs[j]);
+        if (d < bd) { bd = d; bi = j; }
+      }
+      if (bi >= 0 && bd <= 5) { votes[c.id] = votes[bi]; merged += 1; }
+    }
+  }
+  return { votes, total: Math.max(eligible.length, Object.keys(votes).length - merged), recovered, glyph: glyphGroups, merged };
 }
 
 /**

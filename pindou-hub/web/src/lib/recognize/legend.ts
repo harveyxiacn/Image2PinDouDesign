@@ -1,4 +1,5 @@
 // 图例解析：纯字符串 / 词框处理，不依赖 OCR，便于单测。
+import { ciede2000, rgbToLab } from "@engine/color";
 import type { Counts, LegendItem, LegendReading, Rect } from "./types";
 
 type Word = { text: string; bbox: { x0: number; y0: number; x1: number; y1: number } };
@@ -420,7 +421,7 @@ export type ChipStack = {
  * 把每个色块里的文字（黑字白底、双线性放大 scale 倍）按阅读顺序竖向叠成一张小图，
  * 一块一行，交给 OCR 的“整块文字”模式：版面规整，比整张图稀疏识别准得多，也快得多。
  */
-export function chipStack(src: PixelSrc, chips: Chip[], scale: number, targetGlyphH?: number, inkThr = 0.5, binarize = false): ChipStack {
+export function chipStack(src: PixelSrc, chips: Chip[], scale: number, targetGlyphH?: number, inkThr = 0.5, binarize = false, keepTail = false): ChipStack {
   const { width: w, data: d } = src;
   const sorted = [...chips].sort((a, b) => (Math.abs(a.y - b.y) > 0.5 * a.height ? a.y - b.y : a.x - b.x));
   const pad = targetGlyphH ? 14 : Math.max(6, Math.round(6 * scale));
@@ -447,7 +448,7 @@ export function chipStack(src: PixelSrc, chips: Chip[], scale: number, targetGly
         const i = ((c.y + y) * w + c.x + x) * 4;
         const diff = Math.abs(d[i] - rr) + Math.abs(d[i + 1] - gg) + Math.abs(d[i + 2] - bb2);
         const v = targetGlyphH
-          ? (refDiff < 60 ? 0 : Math.min(255, Math.max(0, ((diff - (c.inkThr ?? inkThr) * refDiff) / (0.2 * refDiff)) * 128 + 128)))
+          ? (refDiff < 60 ? 0 : (c.inkThr ?? inkThr) < 0 ? Math.min(255, (diff / refDiff) * 255) : Math.min(255, Math.max(0, ((diff - (c.inkThr ?? inkThr) * refDiff) / (0.2 * refDiff)) * 128 + 128)))
           : Math.min(255, Math.max(0, (diff - 30) * 1.0));
         ink[y * c.width + x] = v;
         if (v > 120) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
@@ -480,7 +481,7 @@ export function chipStack(src: PixelSrc, chips: Chip[], scale: number, targetGly
         return bt - tp + 1;
       };
       const big = toks.filter((t) => heightOf(t) >= 0.4 * (y1 - y0 + 1));
-      if (big.length >= 3) {
+      if (!keepTail && big.length >= 3) {
         const lastTok = big[big.length - 1];
         const lh = heightOf(lastTok);
         const others = big.slice(0, -1).map(heightOf);
@@ -532,7 +533,7 @@ const DIGIT_FIX: Record<string, string[]> = {
   g: ["9", "8"], r: ["7"], o: ["0", "6"], q: ["9"], l: ["1"], i: ["1"]
 };
 
-function codeCandidates(token: string, valid: Set<string>): string[] {
+export function codeCandidates(token: string, valid: Set<string>): string[] {
   const t = token.normalize("NFKC").replace(/[^0-9A-Za-z|]/g, "");
   if (t.length < 2 || t.length > 4) return [];
   const out = new Set<string>();
@@ -646,4 +647,202 @@ export function cellCodeCandidates(text: string, valid: Set<string>): string[] {
     for (const c of codeCandidates(tok, valid)) if (!out.includes(c)) out.push(c);
   }
   return out; // 已按“修改代价”从小到大排序
+}
+
+
+// ───────────────────────── 版式无关的图例读取：纯函数部分（解析 / 校验 / 色块查找） ─────────────────────────
+
+/**
+ * 数量的各种写法：x321、×321、X321、*321、321颗、321，以及“B13 315”（取最后一个数字串）。
+ * 允许 OCR 把 0/1/5/8/2 认成 O/I/L/S/B/Z；千分位逗号；一个真数字都没有的不算。
+ */
+export function parseCountPattern(text: string): number | null {
+  const t = text.normalize("NFKC").toUpperCase().replace(/[颗粒个]|PCS?/g, " ");
+  const toks = t.split(/[\s:：()（）=·•・]+/).filter(Boolean);
+  for (let i = toks.length - 1; i >= 0; i -= 1) {
+    let k = toks[i].replace(/^[X×*]+/, "").replace(/[X×*]+$/, "");
+    if (!k) continue;
+    // 一个 token 里混着色号和数量（“B13315”）不拆
+    if (!/^[0-9OILSBZ|,]{1,7}$/.test(k) || !/[0-9]/.test(k)) continue;
+    // 字母只允许在数字占多数时当混淆处理
+    const nDigit = (k.match(/[0-9]/g) ?? []).length;
+    if (nDigit * 2 < k.replace(/,/g, "").length) continue;
+    k = k.replace(/,/g, "").replace(/[OQD]/g, "0").replace(/[IL|]/g, "1").replace(/S/g, "5").replace(/B/g, "8").replace(/Z/g, "2");
+    const n = Number(k);
+    if (Number.isFinite(n) && n >= 1 && n <= 99999) return n;
+  }
+  return null;
+}
+
+/** 色块里的一段文字：可能是“A13”，也可能是“B13 315”或“A13·84颗”。返回色号候选（按改动代价排序）与数量（有则）。 */
+export function splitGlued(token: string, valid: Set<string>): Array<{ code: string; count: number }> {
+  const m = /^(ZG|[A-Z])(\d{3,8})[A-Z]{0,2}$/.exec(token);
+  if (!m) return [];
+  const out: Array<{ code: string; count: number }> = [];
+  for (let k = 1; k <= 3 && k < m[2].length; k += 1) {
+    const rest = m[2].slice(k);
+    if (rest[0] === "0" || rest.length > 4) continue;
+    const code = m[1] + m[2].slice(0, k);
+    if (valid.has(code)) out.push({ code, count: Number(rest) });
+  }
+  return out;
+}
+
+export function parseCodeCountText(text: string, valid: Set<string>): { codes: string[]; count: number | null; /** 色号与数量连写（“A10195”，冒号 / 空格被丢）时的各种拆法 */ glued: Array<{ code: string; count: number }> } {
+  const norm = text.normalize("NFKC").toUpperCase();
+  // 数量后面粘着的单位字（“7TH”“95H”里的 TH / H 是“颗”被读错）：只在不像色号（≥ 2 个 token、不是第一个）时去掉
+  const toks = norm.split(/[\s·•・∙⋅:：()（）=]+/).filter(Boolean).map((tk, i) => (i >= 1 && /^[0-9]{1,5}[A-Z|]{1,2}$/.test(tk) ? tk.replace(/[A-Z|]+$/, "") : tk));
+  let count: number | null = null;
+  let countIdx = toks.length;
+  // 数量必须在色号之后：从后往前找第一个“像数量”的 token（≥ 2 个 token 时纯数字也算，单个 token 只认带 x 前缀的）；
+  // 数量后面跟着的短杂质（“颗”被读成 Hi / P| 之类）跳过
+  for (let i = toks.length - 1; i >= 0; i -= 1) {
+    const tk = toks[i];
+    const prefixed = /^[X×*][0-9OILSBZ|,]+$/.test(tk);
+    const plain = i >= 1 && /^[0-9,]+(?:颗|粒)?$/.test(tk);
+    if (!prefixed && !plain) { if (i === toks.length - 1 || i === toks.length - 2) continue; break; }
+    // “51 48”：数量后面的单位字（颗）被读成 1–2 位的假数字 → 数量是前一个数字 token
+    const prev = toks[i - 1];
+    const j = plain && !prefixed && tk.length <= 2 && i >= 2 && prev !== undefined && /^[0-9,]{1,6}$/.test(prev) ? i - 1 : i;
+    const n = parseCountPattern(toks[j]);
+    if (n !== null) { count = n; countIdx = j; }
+    break;
+  }
+  const codes: string[] = [];
+  for (const tk of toks.slice(0, countIdx)) for (const c of cellCodeCandidates(tk, valid)) if (!codes.includes(c)) codes.push(c);
+  const glued = count === null ? toks.flatMap((tk) => splitGlued(tk, valid)) : [];
+  return { codes, count, glued };
+}
+
+export type ColorOf = (code: string) => { r: number; g: number; b: number } | null;
+
+export function deltaE(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): number {
+  return ciede2000(rgbToLab(a), rgbToLab(b));
+}
+
+/**
+ * 色号候选校验：色块实际颜色必须与该色号的色卡色接近（ΔE ≤ maxDE，色块被 JPEG / 水印轻微改色）。
+ * 返回通过校验的候选，顺序：OCR 候选原有顺序（改动代价小的在前）；颜色相差很远的候选（如绿色块上的 E20）被剔除。
+ */
+export function validateCodeCandidates(cands: string[], rgb: { r: number; g: number; b: number }, colorOf: ColorOf, maxDE = 12): Array<{ code: string; dE: number }> {
+  const out: Array<{ code: string; dE: number }> = [];
+  for (const code of cands) {
+    const pc = colorOf(code);
+    if (!pc) continue;
+    const d = deltaE(rgb, pc);
+    if (d <= maxDE) out.push({ code, dE: d });
+  }
+  return out;
+}
+
+/** 与色块颜色最接近的色号（按 ΔE 升序，≤ maxDE，最多 k 个）。 */
+export function nearestCodesByColor(rgb: { r: number; g: number; b: number }, codes: Iterable<string>, colorOf: ColorOf, maxDE = 8, k = 4): Array<{ code: string; dE: number }> {
+  const lab = rgbToLab(rgb);
+  const out: Array<{ code: string; dE: number }> = [];
+  for (const code of codes) {
+    const pc = colorOf(code);
+    if (!pc) continue;
+    const d = ciede2000(lab, rgbToLab(pc));
+    if (d <= maxDE) out.push({ code, dE: d });
+  }
+  return out.sort((a, b) => a.dE - b.dE).slice(0, k);
+}
+
+/**
+ * 数字写法的邻近混淆（OCR 常把 3↔8、1↔7、5↔6、0↔8↔6 认混）：给一个数量，列出把某一位换成混淆数字后的备选。
+ */
+const CONFUSE: Record<string, string[]> = { "0": ["8", "6", "9"], "1": ["7"], "2": ["7"], "3": ["8", "5"], "5": ["6", "3", "8"], "6": ["5", "8", "0"], "7": ["1"], "8": ["3", "0", "6", "9"], "9": ["8", "0", "4"], "4": ["9"] };
+export function countAlternatives(n: number): number[] {
+  const s = String(n);
+  const out = new Set<number>();
+  for (let i = 0; i < s.length; i += 1) for (const d of CONFUSE[s[i]] ?? []) out.add(Number(s.slice(0, i) + d + s.slice(i + 1)));
+  out.delete(n);
+  return [...out].filter((v) => v >= 1);
+}
+
+/**
+ * 平涂色块查找（版式无关）：与页面底色明显不同的像素连成块（4 连通），块的外接矩形足够“实心”（内部的文字空洞允许）。
+ * 色块颜色取块内像素的逐通道中位数（文字像素是少数，中位数就是底色）。浅到几乎和纸一样的色块（如白色 H1 / H2）
+ * 找不到——由调用方按排列规律补全。
+ */
+export function findFlatBlobs(src: PixelSrc, diffThr = 45): Chip[] {
+  const { width: w, height: h, data: d } = src;
+  const votes = new Map<number, number>();
+  const sx = Math.max(1, Math.floor(w / 120)), sy = Math.max(1, Math.floor(h / 60));
+  for (let y = 0; y < h; y += sy) for (let x = 0; x < w; x += sx) {
+    const i = (y * w + x) * 4;
+    const k = ((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4);
+    votes.set(k, (votes.get(k) ?? 0) + 1);
+  }
+  let bk = 0, bv = -1;
+  for (const [k, v] of votes) if (v > bv) { bv = v; bk = k; }
+  // 底色：取该桶内像素的平均，比桶中心准
+  let br = 0, bg = 0, bb = 0, bn = 0;
+  for (let y = 0; y < h; y += sy) for (let x = 0; x < w; x += sx) {
+    const i = (y * w + x) * 4;
+    const k = ((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4);
+    if (k === bk) { br += d[i]; bg += d[i + 1]; bb += d[i + 2]; bn += 1; }
+  }
+  br = Math.round(br / bn); bg = Math.round(bg / bn); bb = Math.round(bb / bn);
+  const mask = new Uint8Array(w * h);
+  for (let p = 0; p < w * h; p += 1) {
+    const i = p * 4;
+    if (Math.abs(d[i] - br) + Math.abs(d[i + 1] - bg) + Math.abs(d[i + 2] - bb) > diffThr) mask[p] = 1;
+  }
+  // 腐蚀一次（3×3）：把 1–2 像素宽的边框线 / 笔画切掉，色块不会通过描边连到旁边的数量框
+  {
+    const er = new Uint8Array(w * h);
+    for (let y = 1; y < h - 1; y += 1) for (let x = 1; x < w - 1; x += 1) {
+      const p = y * w + x;
+      if (mask[p] && mask[p - 1] && mask[p + 1] && mask[p - w] && mask[p + w] && mask[p - w - 1] && mask[p - w + 1] && mask[p + w - 1] && mask[p + w + 1]) er[p] = 1;
+    }
+    mask.set(er);
+  }
+  const out: Chip[] = [];
+  const stack: number[] = [];
+  const members: number[] = [];
+  for (let p0 = 0; p0 < w * h; p0 += 1) {
+    if (mask[p0] !== 1) continue;
+    let minX = w, maxX = 0, minY = h, maxY = 0;
+    stack.length = 0; members.length = 0;
+    stack.push(p0); mask[p0] = 2;
+    while (stack.length) {
+      const p = stack.pop()!;
+      members.push(p);
+      const x = p % w, y = (p - x) / w;
+      if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (x > 0 && mask[p - 1] === 1) { mask[p - 1] = 2; stack.push(p - 1); }
+      if (x < w - 1 && mask[p + 1] === 1) { mask[p + 1] = 2; stack.push(p + 1); }
+      if (y > 0 && mask[p - w] === 1) { mask[p - w] = 2; stack.push(p - w); }
+      if (y < h - 1 && mask[p + w] === 1) { mask[p + w] = 2; stack.push(p + w); }
+    }
+    const bw = maxX - minX + 1, bh = maxY - minY + 1;
+    const n = members.length;
+    if (bw < 8 || bh < 8 || n < 40 || n / (bw * bh) < 0.45 || bw / bh < 0.6 || bw / bh > 9 || bw * bh > 0.3 * w * h) continue;
+    const rs: number[] = [], gs: number[] = [], bs: number[] = [];
+    const step = Math.max(1, Math.floor(n / 600));
+    for (let k = 0; k < n; k += step) { const i = members[k] * 4; rs.push(d[i]); gs.push(d[i + 1]); bs.push(d[i + 2]); }
+    const med = (a: number[]) => a.sort((x, y) => x - y)[a.length >> 1];
+    const cr = med(rs), cg = med(gs), cb = med(bs);
+    // 水印 / 相邻文字常粘在色块边上，把外接矩形撑大：只保留“接近色块颜色”的列 / 行连续段
+    let tx = minX, ty = minY, tw = bw, th = bh;
+    if (n >= 150) {
+      const cp = new Int32Array(bw), rp = new Int32Array(bh);
+      for (const p of members) {
+        const i = p * 4;
+        if (Math.abs(d[i] - cr) + Math.abs(d[i + 1] - cg) + Math.abs(d[i + 2] - cb) <= 60) { const x = p % w, y = (p - x) / w; cp[x - minX] += 1; rp[y - minY] += 1; }
+      }
+      const run = (prof: Int32Array): [number, number] => {
+        const thr = 0.3 * Math.max(...prof);
+        let a0 = 0, a1 = prof.length - 1;
+        while (a0 < a1 && prof[a0] < thr) a0 += 1;
+        while (a1 > a0 && prof[a1] < thr) a1 -= 1;
+        return [a0, a1 - a0 + 1];
+      };
+      const [cx0, cl] = run(cp), [ry0, rl] = run(rp);
+      if (cl >= 8 && rl >= 8) { tx = minX + cx0; tw = cl; ty = minY + ry0; th = rl; }
+    }
+    out.push({ x: tx - 1, y: ty - 1, width: tw + 2, height: th + 2, r: cr, g: cg, b: cb, bg: [br, bg, bb] });
+  }
+  return out;
 }

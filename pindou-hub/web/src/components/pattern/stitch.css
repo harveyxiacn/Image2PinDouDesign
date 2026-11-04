@@ -1,0 +1,44 @@
+/* 多张截图拼接 + 取图小贴士（前缀 st-），仅使用设计令牌 */
+.st-tips { overflow: hidden; }
+.st-tips-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px; background: none; border: 0; color: var(--ink); text-align: left; cursor: pointer; }
+.st-tips-head:hover { background: var(--paper-sunk); }
+.st-tips-head:focus-visible { outline: 2px solid var(--iron); outline-offset: -2px; }
+.st-tips-chev { margin-left: auto; display: grid; transition: transform 160ms var(--ease); color: var(--ink-3); }
+.st-tips[data-open="true"] .st-tips-chev { transform: rotate(90deg); }
+.st-tips-body { padding: 0 12px 12px; }
+.st-tips-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; color: var(--ink-2); font-size: var(--t-small); }
+.st-hint { display: flex; flex-direction: column; gap: 6px; }
+.st-hint button { align-self: flex-start; }
+@media (prefers-reduced-motion: reduce) { .st-tips-chev { transition: none; } }
+
+.st-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.st-entry .meta { flex: 1 1 200px; }
+.st-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 560px) { .st-choice-grid { grid-template-columns: minmax(0, 1fr); } }
+.st-choice-card { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px; text-align: left; cursor: pointer; border: 1px solid var(--rule); border-radius: var(--r-panel); background: var(--paper-raised); color: var(--ink); }
+.st-choice-card:hover { border-color: var(--iron); background: var(--iron-wash); }
+.st-choice-card:focus-visible { outline: 2px solid var(--iron); outline-offset: 2px; }
+.st-choice-card .btn { margin-top: 4px; pointer-events: none; }
+
+.st-thumbs { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 8px; }
+.st-thumb { position: relative; border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--paper-sunk); overflow: hidden; display: flex; flex-direction: column; }
+.st-thumb img { width: 100%; height: 120px; object-fit: contain; display: block; background: var(--paper-sunk); }
+.st-thumb[data-out="true"] { border-color: var(--iron); }
+.st-num { position: absolute; top: 4px; left: 4px; min-width: 22px; height: 22px; padding: 0 6px; display: grid; place-items: center; border-radius: 11px; background: var(--ink); color: var(--paper); font-size: 12px; font-weight: 600; }
+.st-out { position: absolute; top: 4px; right: 4px; }
+.st-thumb-actions { display: flex; justify-content: space-between; padding: 2px; border-top: 1px solid var(--rule); background: var(--paper-raised); }
+.st-ib { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: var(--r-ctl); background: none; color: var(--ink-2); cursor: pointer; }
+.st-ib:hover:not(:disabled) { background: var(--paper-sunk); color: var(--ink); }
+.st-ib:focus-visible { outline: 2px solid var(--iron); outline-offset: -2px; }
+.st-ib:disabled { opacity: 0.35; cursor: default; }
+.st-flip { display: grid; transform: scaleX(-1); }
+@media (pointer: coarse) { .st-ib { width: 44px; height: 44px; } .st-thumb img { height: 110px; } }
+.st-add { border-style: dashed; border-width: 1.5px; background: none; }
+.st-add button { flex: 1; min-height: 150px; display: grid; place-content: center; justify-items: center; gap: 4px; border: 0; background: none; color: var(--ink-3); cursor: pointer; }
+.st-add button:hover:not(:disabled) { color: var(--ink); background: var(--iron-wash); }
+.st-add button:focus-visible { outline: 2px solid var(--iron); outline-offset: -2px; }
+.st-warn { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.st-seams { pointer-events: none; }
+.st-rect { fill: none; stroke: var(--iron); stroke-width: 2; stroke-dasharray: 8 6; vector-effect: non-scaling-stroke; }
+.st-ov { fill: var(--iron); fill-opacity: 0.12; }
+.st-label { fill: var(--iron); font-weight: 700; paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round; vector-effect: non-scaling-stroke; }

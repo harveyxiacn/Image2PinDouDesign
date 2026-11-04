@@ -396,7 +396,6 @@ try {
 
   // ---- 高清化 UI：糊图上传 → 卡片 / 对比滑块 / 下载 / 开关（引擎没有放大时只验证卡片与开关） ----
   await step("HD card: degraded upload, toggle persists, compare slider", async () => {
-    await evaluate(`localStorage.setItem("pindou.fakeHd", "1")`); // FAKE_HD_TEMP
     await go("#/add?mode=recognize");
     await clickText("换一张").catch(() => {});
     await sleep(300);
@@ -502,6 +501,129 @@ try {
     return await evaluate(`document.querySelectorAll('.bt-item[data-saved=true]').length + ' saved; ' + document.querySelector('.bt-foot').innerText.replace(/\\n/g, ' ')`);
   });
 
+  // ---- 多张截图拼接 + 取图小贴士 ----
+  const tilePaths = [1, 2, 3, 4].map((k) => resolve(outDir, `tile${k}.jpg`));
+  const tileOrder = [tilePaths[2], tilePaths[0], tilePaths[3], tilePaths[1]]; // 打乱顺序
+  const freshRecognize = async () => {
+    await go("#/add?mode=batch"); await go("#/add?mode=recognize"); // 切走再切回：丢掉拼接面板 / 选择卡片的状态
+    await clickText("换一张").catch(() => {}); await sleep(400);
+  };
+  await step("capture tips card on the upload area: visible, toggles, remembers", async () => {
+    await freshRecognize();
+    await evaluate(`localStorage.removeItem('pindou.tipsOpen')`);
+    await go("#/add?mode=batch"); await freshRecognize();
+    const open0 = await evaluate(`document.querySelector('[data-testid=capture-tips]')?.dataset.open`);
+    if (open0 !== "true") throw new Error("tips not open by default: " + open0);
+    const txt = await evaluate(`document.querySelector('[data-testid=capture-tips]').innerText`);
+    for (const k of ["长按图片", "保存图片", "缩略图", "1/4", "多张截图拼接", "原图"]) if (!txt.includes(k)) throw new Error("tips missing: " + k);
+    await shot("30-tips-open");
+    await clickText("怎样拿到更清楚的图纸");
+    const closed = await evaluate(`document.querySelector('[data-testid=capture-tips]').dataset.open === 'false' && !document.querySelector('#st-tips-body') && document.querySelector('.st-tips-head').getAttribute('aria-expanded') === 'false'`);
+    if (!closed) throw new Error("tips did not collapse");
+    await go("#/add?mode=batch"); await freshRecognize();
+    const still = await evaluate(`document.querySelector('[data-testid=capture-tips]').dataset.open`);
+    if (still !== "false") throw new Error("collapsed state not remembered");
+    await clickText("怎样拿到更清楚的图纸");
+    return "open → closed (remembered) → open";
+  });
+  await step("make 4 overlapping phone screenshots (fake status/nav bars, JPEG) from the chart", async () => {
+    await freshRecognize();
+    await setFile(chartPath);
+    await waitFor(`(() => { const i = document.querySelector('.pt-stage img'); return i && i.naturalWidth > 100; })()`, 60000, "chart image shown");
+    const tiles = await evaluate(`new Promise(async (res) => {
+      const img = document.querySelector('.pt-stage img');
+      const W = 3200, H = Math.round(img.naturalHeight * W / img.naturalWidth);
+      const base = document.createElement('canvas'); base.width = W; base.height = H;
+      const bx = base.getContext('2d'); bx.imageSmoothingQuality = 'high'; bx.drawImage(img, 0, 0, W, H);
+      const cw = 1900, ch = 1700, xs = [0, W - cw], ys = [0, H - ch], out = [];
+      for (const y of ys) for (const x of xs) {
+        const c = document.createElement('canvas'); c.width = cw; c.height = ch + 130;
+        const g = c.getContext('2d');
+        g.fillStyle = '#111'; g.fillRect(0, 0, cw, 60); g.fillStyle = '#f2f2f2'; g.fillRect(0, 60, cw, 70);
+        g.fillStyle = '#eee'; g.font = '28px sans-serif'; g.fillText('9:41', 24, 40); g.fillRect(cw - 120, 22, 90, 18);
+        g.fillStyle = '#222'; g.font = '30px sans-serif'; g.fillText('< 拼豆图纸', 24, 108);
+        g.drawImage(base, x, y, cw, ch, 0, 130, cw, ch);
+        g.fillStyle = '#fafafa'; g.fillRect(0, 130 + ch - 0, cw, 0);
+        out.push(await new Promise((r) => c.toBlob((b) => { const f = new FileReader(); f.onload = () => r(String(f.result).split(',')[1]); f.readAsDataURL(b); }, 'image/jpeg', 0.8)));
+      }
+      res(out);
+    })`, 120000);
+    tiles.forEach((b64, i) => writeFileSync(tilePaths[i], Buffer.from(b64, "base64")));
+    return tiles.map((t) => Math.round(t.length * 0.75 / 1024) + " KB").join(", ");
+  });
+  await step("multi-select in the drop area asks: 拼接 vs 批量导入", async () => {
+    await freshRecognize();
+    await setFile(tileOrder);
+    await waitFor(`document.querySelector('[data-testid=multi-choice]')`, 10000, "choice card");
+    const t = await evaluate(`document.querySelector('[data-testid=multi-choice]').innerText`);
+    if (!t.includes("同一张图纸的分段截图") || !t.includes("不同的图纸") || !t.includes("批量导入") || !t.includes("拼接")) throw new Error("choice text: " + t);
+    await shot("31-multi-choice");
+    await clickText("重新选择");
+    await waitFor(`!document.querySelector('[data-testid=multi-choice]') && document.querySelector('[data-testid=capture-tips]')`, 5000, "back to upload");
+    return "both options shown, cancel returns";
+  });
+  await step("stitch 4 shuffled screenshots → preview with seams → recognise", async () => {
+    await freshRecognize();
+    await setFile(tileOrder, '[data-testid=stitch-input]');
+    await waitFor(`document.querySelector('[data-testid=stitch-panel]')`, 10000, "stitch panel");
+    const thumbs = await evaluate(`document.querySelectorAll('.st-thumbs .st-thumb:not(.st-add)').length`);
+    if (thumbs !== 4) throw new Error("thumbs " + thumbs);
+    await waitFor(`document.querySelector('[data-testid=stitch-result]')`, 120000, "stitch result");
+    await sleep(500);
+    const info = await evaluate(`document.querySelector('[data-testid=stitch-result]').innerText.replace(/\\n/g, ' ')`);
+    const out = await evaluate(`document.querySelectorAll('.st-thumb[data-out=true]').length`);
+    if (out) throw new Error("some tiles not joined: " + info);
+    const m = info.match(/(\d[\d,]*)×(\d[\d,]*)/); const conf = info.match(/可信度 (\d+)%/);
+    if (!m || !conf || +conf[1] < 80) throw new Error("result/confidence: " + info.slice(0, 200));
+    const w = +m[1].replace(/,/g, ""), h = +m[2].replace(/,/g, "");
+    if (Math.abs(w - 3200) > 8) throw new Error("stitched width " + w);
+    const seams = await evaluate(`!!document.querySelector('.st-seams') && document.querySelectorAll('.st-rect').length`);
+    if (seams !== 4) throw new Error("seam rects " + seams);
+    await shot("32-stitch-result");
+    // 接缝开关
+    await evaluate(`[...document.querySelectorAll('.pt-check')].find(l => l.innerText.includes('显示接缝')).querySelector('input').click()`);
+    await sleep(150);
+    if (await evaluate(`!!document.querySelector('.st-seams')`)) throw new Error("seams still drawn after toggle off");
+    await evaluate(`[...document.querySelectorAll('.pt-check')].find(l => l.innerText.includes('显示接缝')).querySelector('input').click()`);
+    // 缩略图排序 / 移除后结果失效，需要重新拼接
+    await evaluate(`document.querySelector('.st-thumb button[aria-label="第 1 张后移"]').click()`);
+    await sleep(200);
+    if (await evaluate(`!!document.querySelector('[data-testid=stitch-result]')`)) throw new Error("result should reset after reorder");
+    await clickText("开始拼接");
+    await waitFor(`document.querySelector('[data-testid=stitch-result]')`, 120000, "stitch result again");
+    await clickText("用拼好的图识别");
+    await waitFor(`!document.querySelector('[data-testid=stitch-panel]') && document.querySelector('.pt-stage img')`, 20000, "recognise view");
+    await waitFor(`[...document.querySelectorAll('button')].some(b => b.innerText.trim() === '重新识别' && !b.disabled) && document.body.innerText.includes('识别结果')`, 240000, "recognition of stitched image");
+    await sleep(600);
+    await shot("33-stitched-recognised");
+    const timeline = await evaluate(`[...document.querySelectorAll('.pt-steps li')].map(l => l.innerText.replace(/\\n/g, ' / ')).join(' || ')`);
+    if (!/检测到 156×138 网格/.test(timeline)) throw new Error("stitched image not read as 156×138: " + timeline.slice(0, 500));
+    const t = await evaluate("document.querySelector('main').innerText");
+    return `${w}×${h}, conf ${conf[1]}% · ` + (t.match(/可信度 \d+%/)?.[0] ?? "") + " · " + (t.match(/合计[^\n]*/)?.[0] ?? "");
+  });
+  await step("batch import keeps working from the choice card", async () => {
+    await freshRecognize();
+    await setFile(tileOrder.slice(0, 2));
+    await waitFor(`document.querySelector('[data-testid=multi-choice]')`, 10000, "choice card");
+    await clickText("是不同的图纸");
+    await waitFor(`document.querySelectorAll('.bt-item').length >= 2`, 15000, "queue shows items");
+    return await evaluate(`location.hash + ' · ' + document.querySelectorAll('.bt-item').length + ' queued'`);
+  });
+  await step("low-quality hint links to the tips (HD card degraded upload)", async () => {
+    await freshRecognize();
+    await setFile(degradedPath);
+    await waitFor(`[...document.querySelectorAll('button')].some(b => b.innerText.trim() === '重新识别' && !b.disabled) && document.querySelector('[data-testid=enhance-card]')?.dataset.state === 'done'`, 240000, "recognition done");
+    await sleep(500);
+    const has = await evaluate(`!!document.querySelector('[data-testid=low-quality-hint]')`);
+    const lvl = await evaluate(`document.querySelector('[data-testid=enhance-card]').innerText.replace(/\\n/g, ' ').slice(0, 80)`);
+    if (!has) return "no low/very-low level reported for this upload (hint not shown): " + lvl;
+    await clickText("怎样拿到更清楚的图");
+    const ok = await evaluate(`document.querySelector('[data-testid=low-quality-hint]').innerText.includes('长按图片')`);
+    if (!ok) throw new Error("hint did not reveal tips");
+    await shot("34-low-quality-hint");
+    return "hint shown and expands tips";
+  });
+
   for (const [hash, name] of [["#/", "08-dashboard"], ["#/gallery", "09-gallery"], ["#/gallery?tab=images", "10-images"], ["#/shopping", "11-shopping"], ["#/history", "12-history"], ["#/settings", "13-settings"]]) {
     await step(`page ${hash}`, async () => { await go(hash); await shot(name); await noHorizontalScroll(hash); return (await evaluate("document.querySelector('main').innerText")).slice(0, 300); });
   }
@@ -543,7 +665,6 @@ try {
   }
 
   await step("mobile 390: zoomed recognition preview, inspector, pinch, no overflow; dark + desktop-dark shots", async () => {
-    await evaluate(`localStorage.setItem("pindou.fakeHd", "1")`); // FAKE_HD_TEMP
     await go("#/add?mode=recognize");
     await clickText("换一张").catch(() => {});
     await sleep(300);
@@ -661,6 +782,47 @@ try {
     const running = await evaluate(`document.getAnimations().filter((a) => a.playState === 'running' && a.effect?.getTiming().iterations !== Infinity).length`);
     await send("Emulation.setEmulatedMedia", { features: [] });
     return `closed next frame · running finite animations ${running}`;
+  });
+  await step("mobile 390: capture tips + stitch flow, no overflow; dark; reduced motion", async () => {
+    await setViewport(390, 844, true);
+    await freshRecognize();
+    await sleep(300);
+    await noHorizontalScroll("add recognise upload (tips)");
+    await shot("m30-tips");
+    await setFile(tileOrder, '[data-testid=stitch-input]');
+    await waitFor(`document.querySelector('[data-testid=stitch-result]')`, 120000, "stitch result (mobile)");
+    await sleep(600);
+    await noHorizontalScroll("stitch result");
+    await evaluate(`document.querySelector('[data-testid=stitch-result]').scrollIntoView({block:'start'})`);
+    await shot("m31-stitch-result");
+    // 缩略图操作按钮触控尺寸 ≥ 44px
+    const small = await evaluate(`[...document.querySelectorAll('.st-thumb-actions button')].filter(b => { const r = b.getBoundingClientRect(); return r.width < 43 || r.height < 43; }).length`);
+    if (small) throw new Error(small + " thumb buttons smaller than 44px");
+    await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
+    await sleep(400);
+    await shot("m32-stitch-dark");
+    await evaluate(`window.scrollTo(0, 0)`);
+    await shot("m33-stitch-dark-top");
+    await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+    await freshRecognize();
+    await clickText("怎样拿到更清楚的图纸");
+    await sleep(100);
+    const dur = await evaluate(`getComputedStyle(document.querySelector('.st-tips-chev')).transitionDuration`);
+    await clickText("怎样拿到更清楚的图纸");
+    await send("Emulation.setEmulatedMedia", { features: [] });
+    if (!/^(0(\.00?\d*)?s)(, 0(\.00?\d*)?s)*$/.test(dur)) throw new Error("tips chevron still animates under reduced motion: " + dur);
+    await setViewport(1366, 900);
+    return "no overflow, 44px targets, dark ok, reduced-motion transition " + dur;
+  });
+  await step("desktop dark: stitch result", async () => {
+    await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
+    await freshRecognize();
+    await setFile(tileOrder, '[data-testid=stitch-input]');
+    await waitFor(`document.querySelector('[data-testid=stitch-result]')`, 120000, "stitch result (desktop dark)");
+    await sleep(600);
+    await shot("35-stitch-dark");
+    await send("Emulation.setEmulatedMedia", { features: [] });
+    return "ok";
   });
   await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
   await step("dark mode dashboard", async () => { await go("#/"); await shot("14-dashboard-dark"); return "ok"; });

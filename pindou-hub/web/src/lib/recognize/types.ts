@@ -74,7 +74,7 @@ export type ColorCluster = {
   overridden?: boolean;
 };
 
-export type LegendItem = { code: string; count: number; source: string };
+export type LegendItem = { code: string; count: number; source: string; /** 数量的备选读法（OCR 多次识别结果不一致时，按票数降序） */ alts?: number[]; /** 数量被几遍识别一致读到（≥ 2 且没有备选 = 很可信） */ votes?: number };
 
 export type LegendReading = {
   items: LegendItem[];
@@ -132,9 +132,17 @@ export type AnalyzeResult = {
   /** 是否成功读到了格内色号并用来校正颜色匹配 */
   cellCodesRead?: boolean;
   /** 格内色号读取概况：读出的颜色数 / 颜色总数 / 校正数 */
-  cellCodeStats?: { read: number; clusters: number; overrides: number };
+  cellCodeStats?: { read: number; clusters: number; overrides: number; /** 簇平均字形读出的簇数 */ glyph?: number; /** 按颜色并入已读簇的碎簇数 */ merged?: number; /** 格内读出的色号（去重） */ names?: string[] };
   /** 与下方图例用量逐色核对：legend 为 null = 图上没有该色数量 */
-  checks?: Array<{ code: string; legend: number | null; read: number; status: "ok" | "short" | "over" | "no-legend" }>;
+  checks?: Array<{
+    code: string; legend: number | null; read: number; status: "ok" | "short" | "over" | "no-legend";
+    /** 最终采用的数量来自哪里：图例 / 网格（含格内色号）/ 两者一致 / 按总数挑选 */
+    source?: "legend" | "grid" | "both" | "total-fit";
+    /** 0–1：多个来源一致、且合计与抬头总数吻合时高 */
+    confidence?: number;
+    /** 来源互相矛盾、无法确定的色号（界面可提示核对） */
+    uncertain?: boolean;
+  }>;
   /** 图例与网格逐色比对（两者都有时） */
   diff: Array<{ code: string; legend: number; grid: number }>;
   source: { width: number; height: number };

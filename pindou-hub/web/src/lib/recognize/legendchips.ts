@@ -1,0 +1,370 @@
+// 版式无关的图例读取器（色块 + 色号 + 数量）。
+// 小红书上的图纸图例版式五花八门：色号写在色块里 / 色块旁 / 色块下，数量写在色块里 / 右边 / 下面（x321、×321、315、84 颗）。
+// 做法：先找平涂色块（连通域），按行聚类并按排列规律补出“白色（和纸一样白）的隐形色块”，
+// 再为每个色块分别裁出 ① 色号字段 ② 数量字段（选有字的位置：下方 / 右侧 / 块内），各自叠成一张小图（字高放大到 ~40px、
+// 相对色块底色二值化，深浅两种字都行），各识别一遍（带白名单）。色号用色块颜色与色卡色的 ΔE 校验，数量保留多次识别的备选。
+import type { PixelSource } from "@engine/types";
+import { MARD_PALETTE } from "@engine/palette";
+import { findFlatBlobs, chipStack, cellCodeCandidates, nearestCodesByColor, parseCodeCountText, parseCountPattern, validateCodeCandidates } from "./legend";
+import type { Chip } from "./legend";
+import type { LegendItem, LegendReading } from "./types";
+
+const VALID = new Set(MARD_PALETTE.map((c) => c.code));
+const PAL = new Map(MARD_PALETTE.map((c) => [c.code, c]));
+const colorOf = (code: string) => PAL.get(code)?.rgb ?? null;
+
+type Rc = { x: number; y: number; width: number; height: number };
+type Entry = {
+  chip: Chip;
+  synthetic: boolean;
+  /** 数量字段所在位置 */
+  countRect: Rc | null;
+  below: Rc | null;
+  right: Rc | null;
+  label: Rc | null;
+  where: "below" | "right" | "inside" | null;
+  codeTexts: string[];
+  countTexts: string[];
+  code: string | null;
+  dE: number | null;
+  guessed: boolean;
+  count: number | null;
+  countAlts: number[];
+  codeAlts: string[];
+  votes: number;
+};
+
+export type ChipLegendResult = LegendReading & {
+  /** 检测到的色块数（含补出的隐形块） */
+  chipCount: number;
+  /** 色号由文字读出（非按颜色猜）且数量也读到的条目数——判断这次读取是否可信 */
+  confirmed: number;
+  /** 每个条目的来源 / 把握（给 reconcile 用） */
+  entries: Array<{ code: string; count: number | null; countAlts: number[]; codeAlts: string[]; dE: number | null; guessed: boolean; where: string | null }>;
+};
+
+function rowText(words: Array<{ text: string; bbox: { x0: number; y0: number; x1: number; y1: number } }>, y0: number, y1: number): string {
+  return words
+    .filter((w) => { const cy = (w.bbox.y0 + w.bbox.y1) / 2; return cy >= y0 && cy < y1; })
+    .sort((a, b) => a.bbox.x0 - b.bbox.x0).map((w) => w.text).join(" ");
+}
+
+function inkIn(img: PixelSource, r: Rc, bg: [number, number, number]): number {
+  const x0 = Math.max(0, Math.floor(r.x)), x1 = Math.min(img.width, Math.ceil(r.x + r.width));
+  const y0 = Math.max(0, Math.floor(r.y)), y1 = Math.min(img.height, Math.ceil(r.y + r.height));
+  let n = 0;
+  for (let y = y0; y < y1; y += 1) for (let x = x0; x < x1; x += 1) {
+    const i = (y * img.width + x) * 4;
+    if (Math.abs(img.data[i] - bg[0]) + Math.abs(img.data[i + 1] - bg[1]) + Math.abs(img.data[i + 2] - bg[2]) > 150) n += 1;
+  }
+  return n;
+}
+
+/** 同尺寸（±25% 高、±40% 宽）且总面积最大的一群才是图例色块；水印 / 文字团（数量多但面积小）/ 插图块被丢掉。 */
+function dominantChips(blobs: Chip[]): Chip[] {
+  let best: Chip[] = [], bestA = 0;
+  for (const a of blobs) {
+    const grp = blobs.filter((b) => Math.abs(b.height - a.height) <= 0.25 * a.height && Math.abs(b.width - a.width) <= 0.4 * a.width);
+    const area = grp.reduce((s, c) => s + c.width * c.height, 0);
+    if (grp.length >= 2 && area > bestA) { best = grp; bestA = area; }
+  }
+  return best;
+}
+
+function groupRows(chips: Chip[]): Chip[][] {
+  const sorted = [...chips].sort((a, b) => a.y + a.height / 2 - (b.y + b.height / 2));
+  const rows: Chip[][] = [];
+  for (const c of sorted) {
+    const cy = c.y + c.height / 2;
+    const row = rows.find((r) => Math.abs(r[0].y + r[0].height / 2 - cy) <= 0.5 * c.height);
+    if (row) row.push(c); else rows.push([c]);
+  }
+  for (const r of rows) r.sort((a, b) => a.x - b.x);
+  return rows.sort((a, b) => a[0].y - b[0].y);
+}
+
+/** 色块里写了两行字（上：色号，下：×数量）时，按行的墨迹间隙切成两块；不是两行返回 null。 */
+function splitTwoLines(img: PixelSource, c: Chip): { top: Rc; bottom: Rc } | null {
+  const k = Math.max(2, Math.round(0.1 * c.height));
+  const x0 = c.x + k, x1 = c.x + c.width - k, y0 = c.y + k, y1 = c.y + c.height - k;
+  if (x1 - x0 < 8 || y1 - y0 < 16) return null;
+  let ref = 0;
+  const diffAt = (x: number, y: number) => { const i = (y * img.width + x) * 4; return Math.abs(img.data[i] - c.r) + Math.abs(img.data[i + 1] - c.g) + Math.abs(img.data[i + 2] - c.b); };
+  for (let y = y0; y < y1; y += 1) for (let x = x0; x < x1; x += 1) ref = Math.max(ref, diffAt(x, y));
+  if (ref < 120) return null;
+  const rows: boolean[] = [];
+  for (let y = y0; y < y1; y += 1) { let n = 0; for (let x = x0; x < x1; x += 1) if (diffAt(x, y) > 0.5 * ref) n += 1; rows.push(n >= 1); }
+  const segs: Array<[number, number]> = [];
+  let st = -1;
+  rows.forEach((on, i) => { if (on && st < 0) st = i; if ((!on || i === rows.length - 1) && st >= 0) { segs.push([st, on && i === rows.length - 1 ? i : i - 1]); st = -1; } });
+  // 合并相隔 1 像素的碎段
+  const merged: Array<[number, number]> = [];
+  for (const sg of segs) { const l = merged[merged.length - 1]; if (l && sg[0] - l[1] <= 2) l[1] = sg[1]; else merged.push([...sg]); }
+  const big = merged.filter((sg) => sg[1] - sg[0] + 1 >= 4);
+  if (big.length !== 2) return null;
+  const [a, b] = big;
+  if (b[0] - a[1] < 2) return null;
+  return { top: { x: x0, y: y0 + a[0] - 1, width: x1 - x0, height: a[1] - a[0] + 3 }, bottom: { x: x0, y: y0 + b[0] - 1, width: x1 - x0, height: b[1] - b[0] + 3 } };
+}
+
+export async function readChipLegend(img: PixelSource, signal: AbortSignal): Promise<ChipLegendResult | null> {
+  const { ocrWords } = await import("./ocr");
+  const t0 = performance.now();
+  // 找到了色块但读下去发现不是“色块 + 数量”图例：返回空结果（chipCount > 0），调用方不必再换个裁剪重试
+  const gaveUp = (): ChipLegendResult => ({ items: [], counts: {}, statedTotal: null, rawText: "", chipCount: 1, confirmed: 0, entries: [] });
+  // 贴着裁剪边缘的块是被截断的东西（图纸最后一行格子、标尺），不是图例色块
+  const blobs = findFlatBlobs(img).filter((b) => b.x > 0 && b.y > 0 && b.x + b.width < img.width && b.y + b.height < img.height);
+  const chips0 = dominantChips(blobs);
+  // 少于 3 个不成图例；多于 40 个多半是标尺 / 格子本身（图例最多几十色），也不读
+  if (chips0.length < 3 || chips0.length > 36) return null;
+  const medW = [...chips0.map((c) => c.width)].sort((a, b) => a - b)[chips0.length >> 1];
+  const medH = [...chips0.map((c) => c.height)].sort((a, b) => a - b)[chips0.length >> 1];
+  const bg = chips0[0].bg ?? ([255, 255, 255] as [number, number, number]);
+  const rows = groupRows(chips0);
+
+  // 1) 按排列规律补出隐形色块（和纸同色的白色块）：行内间距为整数倍时补中间的；行首 / 行尾若有字也补
+  const entries: Entry[] = [];
+  const mk = (chip: Chip, synthetic: boolean): Entry => ({ chip, synthetic, countRect: null, below: null, right: null, label: null, where: null, codeTexts: [], countTexts: [], code: null, dE: null, guessed: false, count: null, countAlts: [], codeAlts: [], votes: 0 });
+  const rowEntries: Entry[][] = [];
+  const allPitches: number[] = [];
+  for (const r of rows) for (let i = 1; i < r.length; i += 1) allPitches.push(r[i].x - r[i - 1].x);
+  const pitch = allPitches.length ? [...allPitches].sort((a, b) => a - b)[Math.floor(allPitches.length * 0.3)] : 0;
+  const rowCy = (r: Chip[]) => [...r.map((c) => c.y + c.height / 2)].sort((a, b) => a - b)[r.length >> 1];
+  const mkSyn = (x: number, cy: number): Chip => ({ x: Math.round(x), y: Math.round(cy - medH / 2), width: medW, height: medH, r: bg[0], g: bg[1], b: bg[2], bg });
+  for (const r of rows) {
+    const list: Entry[] = [];
+    const cy = rowCy(r);
+    if (pitch > medW * 0.9) {
+      // 行首补一个：左边有一个间距的位置上有字
+      const lead = { x: r[0].x - pitch, y: cy - medH / 2, width: medW, height: medH };
+      if (lead.x >= 0 && inkIn(img, { ...lead, width: Math.max(medW, Math.round(0.8 * pitch)), height: Math.round(1.8 * medH) }, bg) >= 30) list.push(mk(mkSyn(lead.x, cy), true));
+    }
+    r.forEach((c, i) => {
+      list.push(mk(c, false));
+      if (i + 1 < r.length && pitch > medW * 0.9) {
+        const gap = r[i + 1].x - c.x;
+        const k = Math.round(gap / pitch);
+        if (k >= 2 && Math.abs(gap - k * pitch) <= 0.25 * pitch) {
+          for (let j = 1; j < k; j += 1) {
+            const sx = c.x + (gap * j) / k;
+            // 该位置上要有字才补（避免把真正的空位当色块）
+            if (inkIn(img, { x: sx, y: cy - medH / 2, width: Math.max(medW, Math.round(0.8 * pitch)), height: medH + Math.round(medH * 0.9) }, bg) >= 30) list.push(mk(mkSyn(sx, cy), true));
+          }
+        }
+      }
+    });
+    if (pitch > medW * 0.9) {
+      const last = r[r.length - 1];
+      const tail = { x: last.x + pitch, y: cy - medH / 2, width: medW, height: medH };
+      if (tail.x + tail.width <= img.width && inkIn(img, { ...tail, width: Math.min(img.width - tail.x, Math.max(medW, Math.round(0.8 * pitch))), height: Math.round(1.8 * medH) }, bg) >= 30) list.push(mk(mkSyn(tail.x, cy), true));
+    }
+    rowEntries.push(list);
+    entries.push(...list);
+  }
+
+  if (entries.length > 44) return gaveUp();
+
+  // 2) 数量字段位置：每个色块 下方 / 右侧 / 块内，选有字的
+  rowEntries.forEach((list, ri) => {
+    const nextRowTop = ri + 1 < rowEntries.length ? Math.min(...rowEntries[ri + 1].map((e) => e.chip.y)) : img.height;
+    list.forEach((e, i) => {
+      const c = e.chip;
+      const prev = list[i - 1]?.chip, next = list[i + 1]?.chip;
+      const left = prev ? (prev.x + prev.width + c.x) / 2 : Math.max(0, c.x - 0.3 * c.width);
+      const rightB = next ? (c.x + c.width + next.x) / 2 : Math.min(img.width, c.x + 1.3 * c.width);
+      const belowTop = c.y + c.height + 1;
+      const belowH = Math.min(nextRowTop - 1 - belowTop, Math.round(1.0 * c.height));
+      const below: Rc | null = belowH >= 10 ? { x: left, y: belowTop, width: rightB - left, height: belowH } : null;
+      const rX = c.x + c.width + 2;
+      const rW = Math.min((next ? next.x - 2 : Math.min(img.width, rX + 1.8 * c.width)) - rX, 3 * c.width + 12);
+      const right: Rc | null = rW >= 12 ? { x: rX, y: c.y - 1, width: rW, height: c.height + 2 } : null;
+      const lW = Math.min((next ? next.x - 2 : Math.min(img.width, rX + 5 * c.width)) - rX, 9 * c.width + 20);
+      const label: Rc | null = lW >= 24 ? { x: rX, y: Math.max(0, c.y - 3), width: lW, height: c.height + 6 } : null;
+      e.label = label && inkIn(img, label, bg) >= 20 ? label : null;
+      e.below = below && inkIn(img, below, bg) >= 8 ? below : null;
+      e.right = right && inkIn(img, right, bg) >= 8 ? right : null;
+    });
+  });
+
+  // 3) 色号字段：色块内文字
+  const runOcr = async (stackImg: PixelSource, whitelist: string) => ocrWords(stackImg, signal, { scale: 1, psm: "6", whitelist });
+  const readCounts = async (list: Entry[], pick: (e: Entry) => Rc | null, target: number, thr: number, bin: boolean, wl = "0123456789xX*"): Promise<Map<Entry, string>> => {
+    const out = new Map<Entry, string>();
+    const items = list.filter((e) => pick(e));
+    if (!items.length) return out;
+    const pseudo = items.map((e, i) => {
+      const r = pick(e)!;
+      const x = Math.max(0, Math.floor(r.x)), y = Math.max(0, Math.floor(r.y));
+      return { x, y, width: Math.max(6, Math.min(Math.floor(r.width), img.width - x)), height: Math.max(6, Math.min(Math.floor(r.height), img.height - y)), r: bg[0], g: bg[1], b: bg[2], bg, tag: i, inkThr: thr };
+    });
+    const st = chipStack(img, pseudo, 1, target, thr, bin, true);
+    if (!st.rows.length) return out;
+    const res = await runOcr(st.image, wl);
+    for (const row of st.rows) out.set(items[row.chip.tag ?? -1], rowText(res.words, row.y0, row.y1));
+    return out;
+  };
+  const codeWl = "ABCDEFGHMPQRTYZ0123456789():.";
+  const readCodes = async (list: Entry[], target: number, thr: number, bin: boolean, wl: string = codeWl) => {
+    const chs = list.map((e, i) => {
+      // 内缩：色块边缘（抗锯齿 / 圆角 / 描边）不是文字，否则会被当成墨迹撑大字高
+      const k = Math.max(2, Math.round(0.14 * e.chip.height));
+      return { ...e.chip, x: e.chip.x + k, y: e.chip.y + k, width: Math.max(4, e.chip.width - 2 * k), height: Math.max(4, e.chip.height - 2 * k), tag: i, inkThr: thr };
+    });
+    const st = chipStack(img, chs, 1, target, thr, bin, true);
+    if (!st.rows.length) return;
+    const res = await runOcr(st.image, wl);
+    for (const row of st.rows) list[row.chip.tag ?? -1].codeTexts.push(rowText(res.words, row.y0, row.y1));
+  };
+  const resolveCodes = (list: Entry[]) => {
+    for (const e of list) {
+      if (e.code) continue;
+      const cands: string[] = [];
+      for (const t of e.codeTexts) {
+        const p = parseCodeCountText(t, VALID);
+        for (const c of p.codes) if (!cands.includes(c)) cands.push(c);
+        for (const g of p.glued) if (!cands.includes(g.code)) cands.push(g.code);
+      }
+      // 隐形（白）块没有颜色信息：色号文字读到什么就是什么，但必须是浅色号
+      const rgb = { r: e.chip.r, g: e.chip.g, b: e.chip.b };
+      const ok = validateCodeCandidates(cands, rgb, colorOf, e.synthetic ? 14 : 11);
+      e.codeAlts = ok.map((o) => o.code);
+      if (ok.length) { e.code = ok[0].code; e.dE = ok[0].dE; }
+    }
+  };
+  // 第一遍不加白名单：色块里常写“A1 · 154 颗”，白名单会把分隔符丢掉让色号和数量连成一串；不加白名单时分隔符能保留
+  await readCodes(entries, 40, 0.5, false, "");
+  resolveCodes(entries);
+  // 数量写在色块里 / 旁边（“A26 (871)”）：多读两遍参数不同的，数量投票（括号常被认成 1，一遍不可靠）
+  if (entries.filter((e) => e.codeTexts.some((t) => parseCodeCountText(t, VALID).count !== null || parseCodeCountText(t, VALID).glued.length)).length >= 0.4 * entries.length) {
+    await readCodes(entries, 56, 0.4, true);
+    await readCodes(entries, 32, 0.6, false);
+  }
+  // 色块里是两行字（上 色号 / 下 ×数量）：分行各读一遍（色号白名单 / 数字白名单），比整块混读准得多
+  const twoLine = new Map<Entry, { top: Rc; bottom: Rc }>();
+  for (const e of entries) { if (e.synthetic) continue; const sp = splitTwoLines(img, e.chip); if (sp) twoLine.set(e, sp); }
+  if (twoLine.size >= Math.max(3, 0.5 * entries.filter((e) => !e.synthetic).length)) {
+    const list = [...twoLine.keys()];
+    for (const e of entries) e.codeTexts.length = 0;
+    const mk2 = (pick: (sp: { top: Rc; bottom: Rc }) => Rc, tag: (e: Entry) => number) => list.map((e) => { const r = pick(twoLine.get(e)!); return { x: r.x, y: r.y, width: r.width, height: r.height, r: e.chip.r, g: e.chip.g, b: e.chip.b, bg: [bg[0], bg[1], bg[2]] as [number, number, number], tag: tag(e) }; });
+    for (const [target, thr, bin] of [[40, 0.5, false], [48, -1, false], [32, 0.4, true]] as const) {
+      const st = chipStack(img, mk2((sp) => sp.top, (e) => list.indexOf(e)).map((c) => ({ ...c, inkThr: thr })), 1, target, thr, bin, true);
+      if (st.rows.length) { const res = await runOcr(st.image, "ABCDEFGHMPQRTYZ0123456789"); for (const row of st.rows) list[row.chip.tag ?? -1].codeTexts.push(rowText(res.words, row.y0, row.y1)); }
+      const st2 = chipStack(img, mk2((sp) => sp.bottom, (e) => list.indexOf(e)).map((c) => ({ ...c, inkThr: thr })), 1, target, thr, bin, true);
+      if (st2.rows.length) { const res = await runOcr(st2.image, "0123456789xX*"); for (const row of st2.rows) list[row.chip.tag ?? -1].countTexts.push(rowText(res.words, row.y0, row.y1)); }
+      for (const e of entries) e.code = null;
+      resolveCodes(entries);
+    }
+  }
+  const unresolved = () => entries.filter((e) => !e.code);
+  // 色块里没有数量、旁边 / 下面也没有字（只有色号的色板）：不是带数量的图例，立刻放弃，别浪费 OCR 时间
+  {
+    const hasInline = (e: Entry) => e.codeTexts.some((x) => parseCodeCountText(x, VALID).count !== null || parseCodeCountText(x, VALID).glued.length);
+    const withText = entries.filter((e) => e.below || e.right || e.label || hasInline(e)).length;
+    if (withText < 0.4 * entries.length) return gaveUp();
+  }
+  // 色块里没有字（小方块 + 右边写“H7 (735)”的版式）：读色块右侧的整段文字，同时得到色号和数量（多遍识别，数量投票）
+  const labelLayout = unresolved().length >= 0.4 * entries.length && entries.some((e) => e.label);
+  if (labelLayout) {
+    for (const [target, thr, bin] of [[24, -1, false], [28, -1, false], [20, -1, false]] as const) {
+      const u = entries.filter((e) => e.label);
+      const m = await readCounts(u, (e) => e.label, target, thr, bin, codeWl + "xX*");
+      for (const [e, t] of m) e.codeTexts.push(t);
+      resolveCodes(u);
+      // 第一遍就读不出几个数量：这不是“色块 + 数量”的图例（只有色号的色板等），不必再读
+      if (target === 24 && entries.filter((e) => e.codeTexts.some((x) => parseCodeCountText(x, VALID).count !== null || parseCodeCountText(x, VALID).glued.length)).length < 0.3 * entries.length) return gaveUp();
+    }
+  }
+  const late = () => performance.now() - t0 > 6000;
+  if (unresolved().length && !late()) { const u = unresolved(); await readCodes(u, 56, 0.4, true); resolveCodes(u); }
+  if (unresolved().length && !late()) { const u = unresolved(); await readCodes(u, 32, 0.6, false); resolveCodes(u); }
+  if (unresolved().length && !late()) { const u = unresolved(); await readCodes(u, 72, 0.3, true); resolveCodes(u); }
+
+  // 4) 数量字段：下方 / 右侧两种版式各读一遍，看哪边读得出“数量”（整张图例版式一致），再对胜出的版式用另一组参数补读一遍留备选
+  const parsedN = (m: Map<Entry, string>) => [...m.values()].filter((t) => parseCountPattern(t) !== null).length;
+  // 数量已经写在色块里 / 紧跟色号的文字里（“A26 (871)”“A1 · 154 颗”）：不再单独读下方 / 右侧
+  const hasInline2 = (e: Entry) => e.codeTexts.some((x) => parseCodeCountText(x, VALID).count !== null || parseCodeCountText(x, VALID).glued.length);
+  const inlineLayout = entries.filter(hasInline2).length >= 0.5 * entries.length;
+  const skipRegions = labelLayout || inlineLayout;
+  const rb = skipRegions ? new Map<Entry, string>() : await readCounts(entries, (e) => e.below, 40, 0.5, false);
+  const rr = skipRegions ? new Map<Entry, string>() : await readCounts(entries, (e) => e.right, 40, 0.5, false);
+  const useBelow = parsedN(rb) >= parsedN(rr);
+  // 下方 / 右侧都读不出数量、色块里也没有数量：只有色号的色板，不是带数量的图例
+  if (!skipRegions && Math.max(parsedN(rb), parsedN(rr)) < Math.max(2, 0.3 * entries.length)
+    && entries.filter((e) => e.codeTexts.some((x) => parseCodeCountText(x, VALID).count !== null || parseCodeCountText(x, VALID).glued.length)).length < 0.3 * entries.length) return gaveUp();
+  const first = useBelow ? rb : rr, other = useBelow ? rr : rb;
+  const pickWin = (e: Entry) => (useBelow ? e.below : e.right);
+  for (const e of entries) {
+    const t = first.get(e);
+    if (pickWin(e)) {
+      e.where = useBelow ? "below" : "right"; e.countRect = pickWin(e);
+      if (t !== undefined) e.countTexts.push(t);
+      continue;
+    }
+    const t2 = other.get(e);
+    if (t2 !== undefined && parseCountPattern(t2) !== null) { e.where = useBelow ? "right" : "below"; e.countRect = useBelow ? e.right : e.below; e.countTexts.push(t2); }
+  }
+  for (const [target, thr, bin] of [[56, 0.4, true], [36, -1, false]] as const) {
+    const second = skipRegions ? new Map<Entry, string>() : await readCounts(entries.filter((e) => e.countRect), (e) => e.countRect, target, thr, bin);
+    for (const [e, t] of second) e.countTexts.push(t);
+  }
+  for (const e of entries) {
+    const vals: number[] = [];
+    for (const t of e.countTexts) { const n = parseCountPattern(t); if (n !== null) vals.push(n); }
+    // 色块里 / 旁边的整段文字（“A26 (871)”“B13 315”）里带的数量
+    for (const t of e.codeTexts) {
+      const p = parseCodeCountText(t, VALID);
+      if (p.count !== null) vals.push(p.count);
+      else { const g = p.glued.find((x) => x.code === e.code); if (g) vals.push(g.count); }
+    }
+    if (!vals.length) continue;
+    // 多数票；平票取第一遍
+    const tally = new Map<number, number>();
+    for (const v of vals) tally.set(v, (tally.get(v) ?? 0) + 1);
+    const ranked = [...tally.entries()].sort((a, b) => b[1] - a[1] || vals.indexOf(a[0]) - vals.indexOf(b[0]));
+    e.count = ranked[0][0];
+    e.votes = ranked[0][1];
+    e.countAlts = ranked.slice(1).map((r) => r[0]);
+  }
+
+  // 5) 没读出色号的：按色块颜色找最近且未占用的色号（只对真实色块；隐形块不猜）
+  const used = new Set<string>();
+  // 同一色号出现两次：颜色更吻合的保留，另一个重新找
+  const byCode = new Map<string, Entry[]>();
+  for (const e of entries) if (e.code) byCode.set(e.code, [...(byCode.get(e.code) ?? []), e]);
+  for (const [code, list] of byCode) {
+    list.sort((a, b) => (a.dE ?? 99) - (b.dE ?? 99));
+    for (const e of list.slice(1)) {
+      const alt = e.codeAlts.find((c) => c !== code && !byCode.has(c));
+      e.code = alt ?? null; e.dE = null;
+    }
+    used.add(code);
+  }
+  for (const e of entries) if (e.code) used.add(e.code);
+  for (const e of entries) {
+    if (e.code || e.synthetic) continue;
+    const near = nearestCodesByColor({ r: e.chip.r, g: e.chip.g, b: e.chip.b }, [...VALID].filter((c) => !used.has(c)), colorOf, 12, 3);
+    if (near.length) { e.code = near[0].code; e.dE = near[0].dE; e.guessed = true; e.codeAlts = near.map((n) => n.code); used.add(e.code); }
+  }
+
+  const items: LegendItem[] = [];
+  const counts: Record<string, number> = {};
+  const colors: Record<string, { r: number; g: number; b: number }> = {};
+  const palette: NonNullable<LegendReading["palette"]> = [];
+  const detail: ChipLegendResult["entries"] = [];
+  // 大多数色块都读到数量时，按颜色猜号、又没数量的零散块多半是图例旁的徽标 / 水印，不算色块
+  const dropUnread = entries.filter((e) => e.count !== null).length >= 0.5 * entries.length;
+  for (const e of entries) {
+    if (!e.code) continue;
+    if (dropUnread && e.count === null && e.guessed) continue;
+    const rgb = e.synthetic ? (colorOf(e.code) ?? { r: e.chip.r, g: e.chip.g, b: e.chip.b }) : { r: e.chip.r, g: e.chip.g, b: e.chip.b };
+    colors[e.code] = rgb;
+    palette.push({ code: e.code, rgb, count: e.count, ...(e.guessed ? { guessed: true } : {}) });
+    detail.push({ code: e.code, count: e.count, countAlts: e.countAlts, codeAlts: e.codeAlts, dE: e.dE, guessed: e.guessed, where: e.where });
+    if (e.count !== null && e.count > 0) {
+      items.push({ code: e.code, count: e.count, source: "色块图例", votes: e.votes, ...(e.countAlts.length ? { alts: e.countAlts } : {}) });
+      counts[e.code] = e.count;
+    }
+  }
+  const raw = entries.map((e) => `${e.code ?? "?"}|${e.codeTexts.join("/")}|${e.countTexts.join("/")}`).join("\n").slice(0, 2000);
+  return { items, counts, statedTotal: null, rawText: raw, colors, palette, chipCount: entries.length, confirmed: entries.filter((e) => e.code && !e.guessed && e.count !== null).length, entries: detail };
+}
