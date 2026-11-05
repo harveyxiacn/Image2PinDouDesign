@@ -337,24 +337,37 @@ export async function readGlyphCodes(
     return lc ? rgbToLab(lc) : pal.get(code)?.lab ?? null;
   };
   const texts = new Map<number, string[]>();
-  // 两种二值化软度：笔画粗细不同时误读互不相同
-  for (const [lo, span] of [[0.45, 0.3], [0.55, 0.25], [0.3, 0.4]] as const) {
+  // 三种二值化软度：笔画粗细不同时误读互不相同。前两种并发读（worker 池），第三种只给还没“两遍读成同一个有效色号”的组
+  const wl = opts.whitelist ?? "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const allowedSet = new Set(allowed);
+  const readVariant = async (lo: number, span: number, only?: Set<number>): Promise<Array<[number, string]>> => {
+    const list = only ? glyphs.filter((g) => only.has(g.id)) : glyphs;
+    const out: Array<[number, string]> = [];
     // 每批最多 40 行，避免叠图过高
-    for (let s = 0; s < glyphs.length; s += 40) {
-      const stack = stackGlyphs(glyphs.slice(s, s + 40), 40, lo, span);
+    for (let s = 0; s < list.length; s += 40) {
+      const stack = stackGlyphs(list.slice(s, s + 40), 40, lo, span);
       if (!stack.rows.length) continue;
       (globalThis as { __phGlyphDebug?: (info: unknown) => void }).__phGlyphDebug?.({ stack: stack.image });
-      const res = await ocr(stack.image, signal, { scale: 1, psm: "6", whitelist: opts.whitelist ?? "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" });
+      const res = await ocr(stack.image, signal, { scale: 1, psm: "6", whitelist: wl });
       for (const row of stack.rows) {
         const t = res.words
           .filter((w) => { const cy = (w.bbox.y0 + w.bbox.y1) / 2; return cy >= row.y0 && cy < row.y1; })
           .sort((a, b) => a.bbox.x0 - b.bbox.x0).map((w) => w.text).join("");
-        const arr = texts.get(row.id) ?? [];
-        arr.push(t);
-        texts.set(row.id, arr);
+        out.push([row.id, t]);
       }
     }
+    return out;
+  };
+  const absorb = (rs: Array<Array<[number, string]>>) => { for (const r of rs) for (const [id, t] of r) { const arr = texts.get(id) ?? []; arr.push(t); texts.set(id, arr); } };
+  absorb(await Promise.all([readVariant(0.45, 0.3), readVariant(0.55, 0.25)]));
+  const undecided = new Set<number>();
+  for (const { id } of glyphs) {
+    const t = texts.get(id) ?? [];
+    const a0 = (t[0] ?? "").toUpperCase().replace(/[^0-9A-Z]/g, "");
+    // 两遍相同且就是一个有效色号：再读一遍只会得到同样的最优候选（文字代价 0 已是最低）
+    if (!(t.length >= 2 && a0 && a0 === (t[1] ?? "").toUpperCase().replace(/[^0-9A-Z]/g, "") && allowedSet.has(a0))) undecided.add(id);
   }
+  if (undecided.size) absorb([await readVariant(0.3, 0.4, undecided)]);
   const dbg = (globalThis as { __phGlyphDebug?: (info: unknown) => void }).__phGlyphDebug;
   for (const { id } of glyphs) {
     const cl = clusters[id];

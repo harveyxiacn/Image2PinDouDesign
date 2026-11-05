@@ -840,6 +840,7 @@ try {
   try { ws?.close(); } catch { /* */ }
   browser.kill();
   await sleep(500);
-  rmSync(profile, { recursive: true, force: true });
+  // Edge 有时还没完全释放用户目录：清理失败不影响检查结果
+  try { rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 400 }); } catch (e) { console.log(`(profile cleanup skipped: ${e?.code ?? e})`); }
   process.exit(checks.every((c) => c.ok) && !errors.some((e) => e.type === "exception") ? 0 : 1);
 }

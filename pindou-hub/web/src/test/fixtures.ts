@@ -322,8 +322,19 @@ function upscaleBilinear(src: PixelSource, s: number): PixelSource {
 
 /** 供 setOcrBackend 使用：node 里直接跑 tesseract.js（语言包取 web/public/ocr）。 */
 export function createNodeOcrBackend() {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let worker: any = null;
+  // 小型 worker 池（默认 2 个）：互相独立的识别可以并发；每个 worker 记住自己上次设置的参数，避免重复 setParameters
+  type W = { w: Promise<any> | null; busy: boolean; key: string }; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const POOL = Math.max(1, Number(process.env.PH_OCR_POOL ?? 2) || 2);
+  const slots: W[] = Array.from({ length: POOL }, () => ({ w: null, busy: false, key: "" }));
+  const waiters: Array<() => void> = [];
+  const acquire = async (): Promise<W> => {
+    for (;;) {
+      const free = slots.find((x) => !x.busy);
+      if (free) { free.busy = true; return free; }
+      await new Promise<void>((res) => waiters.push(res));
+    }
+  };
+  const release = (x: W) => { x.busy = false; waiters.shift()?.(); };
   const log: Array<{ w: number; h: number; psm: string; ms: number }> = [];
   return {
     log,
@@ -333,25 +344,35 @@ export function createNodeOcrBackend() {
       const img = upscaleBilinear(source, scale);
       // tesseract 对极端长宽比 / 过大图会在 worker 线程里抛未捕获错误，直接拒绝
       if (img.width < 4 || img.height < 4 || img.width > 12000 || img.height > 30000 || img.height / img.width > 120) throw new Error(`图像尺寸不适合识别 ${img.width}x${img.height}`);
-      if (!worker) {
-        const mod = await import("tesseract.js");
-        const langPath = fileURLToPath(new URL("../../public/ocr/", import.meta.url));
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        worker = await (mod as any).createWorker("eng", 1, { langPath, gzip: true, cachePath: mkdtempSync(join(tmpdir(), "ph-ocr-")), logger: () => {}, errorHandler: () => {} });
-      }
-      if (process.env.PH_OCR_TRACE) console.log(`OCR ${img.width}x${img.height} psm=${opts.psm ?? "11"} wl=${!!opts.whitelist}`);
-      const t0 = performance.now();
-      await worker.setParameters({ tessedit_pageseg_mode: opts.psm ?? "11", user_defined_dpi: "300", tessedit_char_whitelist: opts.whitelist ?? "" });
-      const res = await worker.recognize(encodePng(img), {}, { blocks: true, text: true });
-      log.push({ w: img.width, h: img.height, psm: opts.psm ?? "11", ms: Math.round(performance.now() - t0) });
-      const words: Array<{ text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }> = [];
-      for (const b of res.data.blocks ?? []) for (const p of b.paragraphs) for (const l of p.lines) for (const wd of l.words) {
-        words.push({ text: wd.text, confidence: wd.confidence, bbox: { x0: wd.bbox.x0 / scale, y0: wd.bbox.y0 / scale, x1: wd.bbox.x1 / scale, y1: wd.bbox.y1 / scale } });
-      }
-      return { text: String(res.data.text ?? ""), words };
+      const slot = await acquire();
+      try {
+        if (!slot.w) {
+          slot.w = (async () => {
+            const mod = await import("tesseract.js");
+            const langPath = fileURLToPath(new URL("../../public/ocr/", import.meta.url));
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (mod as any).createWorker("eng", 1, { langPath, gzip: true, cachePath: mkdtempSync(join(tmpdir(), "ph-ocr-")), logger: () => {}, errorHandler: () => {} });
+          })();
+        }
+        const worker = await slot.w;
+        if (process.env.PH_OCR_TRACE) console.log(`OCR ${img.width}x${img.height} psm=${opts.psm ?? "11"} wl=${!!opts.whitelist}`);
+        const t0 = performance.now();
+        const key = `${opts.psm ?? "11"}|${opts.whitelist ?? ""}`;
+        if (key !== slot.key) { await worker.setParameters({ tessedit_pageseg_mode: opts.psm ?? "11", user_defined_dpi: "300", tessedit_char_whitelist: opts.whitelist ?? "" }); slot.key = key; }
+        const png = encodePng(img);
+        const t2 = performance.now();
+        const res = await worker.recognize(png, {}, { blocks: true, text: true });
+        log.push({ w: img.width, h: img.height, psm: opts.psm ?? "11", ms: Math.round(performance.now() - t0) });
+        if (process.env.PH_OCR_TRACE) console.log(`OCR done ${img.width}x${img.height} rec=${Math.round(performance.now() - t2)}`);
+        const words: Array<{ text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }> = [];
+        for (const b of res.data.blocks ?? []) for (const p of b.paragraphs) for (const l of p.lines) for (const wd of l.words) {
+          words.push({ text: wd.text, confidence: wd.confidence, bbox: { x0: wd.bbox.x0 / scale, y0: wd.bbox.y0 / scale, x1: wd.bbox.x1 / scale, y1: wd.bbox.y1 / scale } });
+        }
+        return { text: String(res.data.text ?? ""), words };
+      } finally { release(slot); }
     },
     async terminate() {
-      if (worker) { const w = worker; worker = null; await w.terminate(); }
+      for (const x of slots) { if (x.w) { const p = x.w; x.w = null; x.key = ""; try { await (await p).terminate(); } catch { /* 忽略 */ } } }
     }
   };
 }

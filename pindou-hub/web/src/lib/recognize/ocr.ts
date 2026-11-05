@@ -17,7 +17,14 @@ export function setOcrBackend(b: OcrBackend | null): void { backend = b; G.__phO
 const activeBackend = (): OcrBackend | null => backend ?? G.__phOcrBackend ?? null;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let workerPromise: Promise<any> | null = null;
+type Slot = { p: Promise<any> | null; busy: boolean; key: string };
+/** 小型 worker 池：互相独立的识别可并发（桌面端 2 个，手机 App 1 个以省内存）；每个 worker 记住上次的参数，不变就不重复设置 */
+const POOL = (() => {
+  try { return !isNativeApp() && (navigator.hardwareConcurrency ?? 2) >= 4 ? 2 : 1; } catch { return 1; }
+})();
+const slots: Slot[] = Array.from({ length: POOL }, () => ({ p: null, busy: false, key: "" }));
+const waiters: Array<() => void> = [];
+let cache = new Map<string, OcrResult>();
 
 function ocrBase(): string {
   // 应用以相对 base './' 部署（Hub 托管或 Android http://localhost），资源相对 document.baseURI
@@ -25,13 +32,13 @@ function ocrBase(): string {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getWorker(): Promise<any> {
-  if (!workerPromise) {
-    workerPromise = (async () => {
+function makeWorker(slot: Slot): Promise<any> {
+  if (!slot.p) {
+    slot.p = (async () => {
       const mod = await import("tesseract.js");
       const base = ocrBase();
       const createWorker = (mod as any).createWorker ?? (mod as any).default?.createWorker;
-      const worker = await createWorker("eng", 1, {
+      return createWorker("eng", 1, {
         workerPath: base + "worker.min.js",
         corePath: base,
         langPath: base,
@@ -40,30 +47,36 @@ async function getWorker(): Promise<any> {
         gzip: !isNativeApp(),
         workerBlobURL: false
       });
-      try {
-        // 11 = SPARSE_TEXT：图例是零散排布的文字，不适合整页段落模式
-        await worker.setParameters({ tessedit_pageseg_mode: "11", user_defined_dpi: "300" });
-      } catch {
-        /* 参数不被接受时沿用默认分页模式 */
-      }
-      return worker;
     })();
-    workerPromise.catch(() => { workerPromise = null; });
+    slot.p.catch(() => { slot.p = null; });
   }
-  return workerPromise;
+  return slot.p;
 }
 
+async function acquire(): Promise<Slot> {
+  for (;;) {
+    const free = slots.find((x) => !x.busy);
+    if (free) { free.busy = true; return free; }
+    await new Promise<void>((res) => waiters.push(res));
+  }
+}
+function release(slot: Slot): void { slot.busy = false; waiters.shift()?.(); }
+
 export async function terminateOcr(): Promise<void> {
+  cache = new Map();
   const be = activeBackend();
   if (be) { try { await be.terminate?.(); } catch { /* 忽略 */ } return; }
-  const p = workerPromise;
-  workerPromise = null;
-  if (!p) return;
-  try {
-    const w = await p;
-    await w.terminate();
-  } catch {
-    /* 已经失败/已终止 */
+  for (const slot of slots) {
+    const p = slot.p;
+    slot.p = null;
+    slot.key = "";
+    if (!p) continue;
+    try {
+      const w = await p;
+      await w.terminate();
+    } catch {
+      /* 已经失败/已终止 */
+    }
   }
 }
 
@@ -117,12 +130,38 @@ function flatten(data: any, scale: number): OcrWord[] {
   return out;
 }
 
+/** 像素内容指纹（FNV-1a，按 32 位字）：相同的叠图 + 相同参数不重复识别 */
+function fingerprint(source: PixelSource | HTMLCanvasElement): string | null {
+  if (typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement) return null;
+  const d = (source as PixelSource).data;
+  let h = 2166136261 >>> 0;
+  if (d.byteOffset % 4 === 0 && d.byteLength % 4 === 0) {
+    const w = new Uint32Array(d.buffer, d.byteOffset, d.byteLength >> 2);
+    for (let i = 0; i < w.length; i += 1) h = Math.imul(h ^ w[i], 16777619) >>> 0;
+  } else for (let i = 0; i < d.length; i += 1) h = Math.imul(h ^ d[i], 16777619) >>> 0;
+  return `${source.width}x${source.height}:${h.toString(36)}`;
+}
+
 export async function ocrWords(
   source: PixelSource | HTMLCanvasElement,
   signal?: AbortSignal,
   opts: { scale?: number; psm?: string; whitelist?: string } = {}
 ): Promise<OcrResult> {
   if (signal?.aborted) throw abortError();
+  const fp = fingerprint(source);
+  const ck = fp ? `${fp}|${opts.scale ?? ""}|${opts.psm ?? ""}|${opts.whitelist ?? ""}` : null;
+  const hit = ck ? cache.get(ck) : undefined;
+  if (hit) return hit;
+  const res = await ocrWordsRaw(source, signal, opts);
+  if (ck) { if (cache.size >= 80) cache = new Map(); cache.set(ck, res); }
+  return res;
+}
+
+async function ocrWordsRaw(
+  source: PixelSource | HTMLCanvasElement,
+  signal: AbortSignal | undefined,
+  opts: { scale?: number; psm?: string; whitelist?: string }
+): Promise<OcrResult> {
   const be = activeBackend();
   if (be) return be.recognize(source, signal, opts);
   const maxSide = Math.max(source.width, source.height);
@@ -131,20 +170,25 @@ export async function ocrWords(
   const outW = source.width * scale, outH = source.height * scale;
   if (outW < 4 || outH < 4 || outW > 16000 || outH > 32000) throw new Error(`图像尺寸不适合识别 ${Math.round(outW)}x${Math.round(outH)}`);
   const { canvas } = toCanvas(source, scale);
-  const worker = await getWorker();
-  if (signal?.aborted) throw abortError();
-  // 每次调用设置版面模式（色块叠放图用 6 整块文字，其余用 11 稀疏文字）；dpi 固定，避免反复估计分辨率
-  try { await worker.setParameters({ tessedit_pageseg_mode: opts.psm ?? "11", user_defined_dpi: "300", tessedit_char_whitelist: opts.whitelist ?? "" }); } catch { /* 忽略 */ }
+  const slot = await acquire();
   let onAbort: (() => void) | undefined;
-  const aborted = new Promise<never>((_, reject) => {
-    onAbort = () => { void terminateOcr(); reject(abortError()); };
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
   try {
+    const worker = await makeWorker(slot);
+    if (signal?.aborted) throw abortError();
+    // 版面模式（色块叠放图用 6 整块文字，其余用 11 稀疏文字）+ 白名单；参数没变就不重复设置。dpi 固定，避免反复估计分辨率
+    const key = `${opts.psm ?? "11"}|${opts.whitelist ?? ""}`;
+    if (key !== slot.key) {
+      try { await worker.setParameters({ tessedit_pageseg_mode: opts.psm ?? "11", user_defined_dpi: "300", tessedit_char_whitelist: opts.whitelist ?? "" }); slot.key = key; } catch { /* 忽略 */ }
+    }
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => { void terminateOcr(); reject(abortError()); };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
     const result = await Promise.race([worker.recognize(canvas, {}, { blocks: true, text: true }), aborted]);
     const data = (result as any)?.data ?? result;
     return { text: String(data?.text ?? ""), words: flatten(data, scale) };
   } finally {
     if (onAbort) signal?.removeEventListener("abort", onAbort);
+    release(slot);
   }
 }

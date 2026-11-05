@@ -215,7 +215,37 @@ function linearFit(pts: Array<[number, number]>): { a: number; b: number } {
   return { a: (sx - b * sk) / n, b };
 }
 
-function findLattice(P: Float64Array, lineLen: number, hint?: number, cov?: (pos: number) => number, like?: (pos: number, pitch: number) => boolean): Lattice | null {
+/**
+ * 小格子（低清 JPEG）：格内的色号文字 / 色块边缘会让“能量梳”锁到半格外的次峰。真格线横贯整行，哪怕很淡（低阈值覆盖率）
+ * 在线位处也明显高于半格处；文字边缘在半格处同样有。按“线位 − 半格处”的低阈值覆盖率差，在整个相位范围里重选相位。
+ * 仅当新相位明显更好、且与当前相位相差超过 0.15 格时才改。
+ */
+function lowCovPhase(P: Float64Array, Pm: Float64Array, fit: CombFit, lowCov: (pos: number) => number): CombFit {
+  const n = Pm.length;
+  const p = fit.pitch;
+  const score = (ph: number) => {
+    const d: number[] = [];
+    for (let k = 0; ph + (k + 0.5) * p < n - 2; k += 1) d.push(lowCov(ph + k * p) - lowCov(ph + (k + 0.5) * p));
+    if (d.length < 8) return -Infinity;
+    d.sort((x, y) => y - x);
+    const h = Math.max(4, d.length >> 1);
+    let s = 0;
+    for (let i = 0; i < h; i += 1) s += d[i];
+    return s / h;
+  };
+  const step = Math.max(0.25, p / 36);
+  const sc: number[] = [];
+  const phs: number[] = [];
+  for (let ph = 0; ph < p; ph += step) { phs.push(ph); sc.push(score(ph)); }
+  let bi = 0;
+  for (let i = 1; i < sc.length; i += 1) if (sc[i] > sc[bi]) bi = i;
+  const cur = score(fit.phase);
+  const dph = ((phs[bi] - fit.phase) % p + p) % p;
+  if (Math.min(dph, p - dph) < 0.15 * p || !(sc[bi] > 0.2) || sc[bi] < 1.3 * Math.max(cur, 0.02)) return fit;
+  return refineFit(P, Pm, { ...fit, phase: phs[bi] });
+}
+
+function findLattice(P: Float64Array, lineLen: number, hint?: number, cov?: (pos: number) => number, like?: (pos: number, pitch: number) => boolean, lowCov?: (pos: number) => number): Lattice | null {
   const n = P.length;
   if (n < 24 || lineLen < 8) return null;
   const Pm = max3(P);
@@ -285,6 +315,7 @@ function findLattice(P: Float64Array, lineLen: number, hint?: number, cov?: (pos
     }
   }
 
+  if (lowCov && fit.pitch < SMALL_PITCH) fit = lowCovPhase(P, Pm, fit, lowCov);
   const p = fit.pitch;
   const phase = fit.phase;
   const K = Math.floor((n - 1 - phase) / p) + 1;
@@ -347,6 +378,8 @@ function findLattice(P: Float64Array, lineLen: number, hint?: number, cov?: (pos
   const pts: Array<[number, number]> = [];
   for (let kk = ka; kk <= kb; kk += 1) {
     if (!strong[kk]) continue;
+    // 细线看不见（粗线外推）：只有粗线位置上有真实的线，其余齿位的质心是噪声，会把相位带偏半格
+    if (boldExt && ((kk - boldR) % 5 + 5) % 5 !== 0) continue;
     const c = Math.round(phase + kk * p);
     let sw = 0;
     let sx = 0;
@@ -561,11 +594,13 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
   const covY = (a: number, b: number) => (pos: number) => toothCoverage(src, "row", pos + 1 + y0, a, b, edgeT);
   const likeX = (a: number, b: number) => (pos: number, pitch: number) => lineLike(src, "col", pos + 1 + x0, pitch, a, b);
   const likeY = (a: number, b: number) => (pos: number, pitch: number) => lineLike(src, "row", pos + 1 + y0, pitch, a, b);
-  let lx = findLattice(first.colP, H, pitchHint, covX(y0, y1), likeX(y0, y1));
-  let ly = findLattice(first.rowP, W, pitchHint, covY(x0, x1), likeY(x0, x1));
+  const lowX = (a: number, b: number) => (pos: number) => toothCoverage(src, "col", pos + 1 + x0, a, b, 14);
+  const lowY = (a: number, b: number) => (pos: number) => toothCoverage(src, "row", pos + 1 + y0, a, b, 14);
+  let lx = findLattice(first.colP, H, pitchHint, covX(y0, y1), likeX(y0, y1), lowX(y0, y1));
+  let ly = findLattice(first.rowP, W, pitchHint, covY(x0, x1), likeY(x0, x1), lowY(x0, x1));
   if (!lx && !ly) return null;
-  if (!lx && ly) lx = findLattice(first.colP, H, ly.pitch, covX(y0, y1), likeX(y0, y1));
-  if (!ly && lx) ly = findLattice(first.rowP, W, lx.pitch, covY(x0, x1), likeY(x0, x1));
+  if (!lx && ly) lx = findLattice(first.colP, H, ly.pitch, covX(y0, y1), likeX(y0, y1), lowX(y0, y1));
+  if (!ly && lx) ly = findLattice(first.rowP, W, lx.pitch, covY(x0, x1), likeY(x0, x1), lowY(x0, x1));
   if (!lx || !ly) return null;
 
   // 交替：只在对方找到的范围内重算投影，去掉标题/图例带来的干扰
@@ -577,8 +612,8 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
     if (xb - xa < 24 || yb - ya < 24) break;
     const colP = profiles(src, x0, ya, x1, yb, "col").colP;
     const rowP = profiles(src, xa, y0, xb, y1, "row").rowP;
-    const nx = findLattice(colP, yb - ya, lx.pitch, covX(ya, yb), likeX(ya, yb));
-    const ny = findLattice(rowP, xb - xa, ly.pitch, covY(xa, xb), likeY(xa, xb));
+    const nx = findLattice(colP, yb - ya, lx.pitch, covX(ya, yb), likeX(ya, yb), lowX(ya, yb));
+    const ny = findLattice(rowP, xb - xa, ly.pitch, covY(xa, xb), likeY(xa, xb), lowY(xa, xb));
     // 提示模式只会微调周期；若 profile 变得更干净则采纳
     if (nx && nx.score >= lx.score * 0.9) lx = nx;
     if (ny && ny.score >= ly.score * 0.9) ly = ny;
@@ -592,8 +627,8 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
       if (e < bestE && Math.min(a, b) >= 8) { bestE = e; q = (a + b) / 2; }
     }
     if (q > 0) {
-      const rx = findLattice(profiles(src, x0, y0, x1, y1, "col").colP, H, q, covX(y0, y1), likeX(y0, y1));
-      const ry = findLattice(profiles(src, x0, y0, x1, y1, "row").rowP, W, q, covY(x0, x1), likeY(x0, x1));
+      const rx = findLattice(profiles(src, x0, y0, x1, y1, "col").colP, H, q, covX(y0, y1), likeX(y0, y1), lowX(y0, y1));
+      const ry = findLattice(profiles(src, x0, y0, x1, y1, "row").rowP, W, q, covY(x0, x1), likeY(x0, x1), lowY(x0, x1));
       if (rx && ry && Math.abs(rx.pitch - ry.pitch) / Math.max(rx.pitch, ry.pitch) < 0.05) { lx = rx; ly = ry; }
     }
   }
@@ -602,8 +637,8 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
     // 两轴周期差太大：用更可信的一轴作为提示重找另一轴
     const hint = lx.score >= ly.score ? lx.pitch : ly.pitch;
     const redo = lx.score >= ly.score
-      ? findLattice(profiles(src, x0, y0, x1, y1, "row").rowP, W, hint, covY(x0, x1), likeY(x0, x1))
-      : findLattice(profiles(src, x0, y0, x1, y1, "col").colP, H, hint, covX(y0, y1), likeX(y0, y1));
+      ? findLattice(profiles(src, x0, y0, x1, y1, "row").rowP, W, hint, covY(x0, x1), likeY(x0, x1), lowY(x0, x1))
+      : findLattice(profiles(src, x0, y0, x1, y1, "col").colP, H, hint, covX(y0, y1), likeX(y0, y1), lowX(y0, y1));
     if (!redo) return null;
     if (lx.score >= ly.score) ly = redo; else lx = redo;
   }
@@ -636,10 +671,19 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
   fillToEdge(ly, y0, y1);
   if ((lx.boldExt && lx.pitch < SMALL_PITCH) || (ly.boldExt && ly.pitch < SMALL_PITCH)) {
     const bg = pageColor(src);
-    if (lx.boldExt && lx.pitch < SMALL_PITCH) { const ey = extentOf(ly, y0); extendByContent(lx, src, "col", x0, ey[0], ey[1], bg); }
-    if (ly.boldExt && ly.pitch < SMALL_PITCH) { const ex = extentOf(lx, x0); extendByContent(ly, src, "row", y0, ex[0], ex[1], bg); }
+    if (lx.boldExt && lx.pitch < SMALL_PITCH) { const ey = extentOf(ly, y0); extendByContent(lx, src, "col", x0, ey[0], ey[1], bg, ly.boldExt && lx.kb - lx.ka < 0.9 * (ly.kb - ly.ka)); }
+    if (ly.boldExt && ly.pitch < SMALL_PITCH) { const ex = extentOf(lx, x0); extendByContent(ly, src, "row", y0, ex[0], ex[1], bg, lx.boldExt && ly.kb - ly.ka < 0.9 * (lx.kb - lx.ka)); }
     else if (lx.boldExt && ly.pitch < SMALL_PITCH && ly.kb - ly.ka < 0.8 * (lx.kb - lx.ka)) { const ex = extentOf(lx, x0); extendByContent(ly, src, "row", y0, ex[0], ex[1], bg, true); }
     if (!lx.boldExt && ly.boldExt && lx.pitch < SMALL_PITCH && lx.kb - lx.ka < 0.8 * (ly.kb - ly.ka)) { const ey = extentOf(ly, y0); extendByContent(lx, src, "col", x0, ey[0], ey[1], bg, true); }
+  }
+  // 板子（含标尺圈）与页面底色不同：沿两轴把外沿补到“整格条带都被板子铺满”为止（至多 3 格），
+  // 这样相位 / 粗线外推 / 梳齿端点差一两格时，范围仍然是“板子 + 标尺圈”，后面的标尺剥离才有确定的输入
+  {
+    const bg = pageColor(src);
+    if ((lx.boldExt || ly.boldExt) && bg[0] + bg[1] + bg[2] >= 600) {
+      const ey = extentOf(ly, y0); extendByContent(lx, src, "col", x0, ey[0], ey[1], bg, true, 3);
+      const ex = extentOf(lx, x0); extendByContent(ly, src, "row", y0, ex[0], ex[1], bg, true, 3);
+    }
   }
   const score = (lx.score + ly.score) / 2;
   if (score < 0.3) return null;
@@ -739,7 +783,7 @@ function pageColor(src: PixelSource): [number, number, number] {
  * 粗线结构外推出的范围（boldExtend）两端的补全：细线 / 外框线看不见时，按“这一格宽的条带里有没有与页面底色不同的内容”
  * 判断板子（以及外圈标尺格）延伸到哪里。左 / 上端：粗线从板子边框起算，边框在第一条粗线之前 5 格；右 / 下端：最多再补 5 格。
  */
-function extendByContent(l: Lattice, src: PixelSource, axis: "col" | "row", offset: number, a: number, b: number, bg: [number, number, number], filled = false) {
+function extendByContent(l: Lattice, src: PixelSource, axis: "col" | "row", offset: number, a: number, b: number, bg: [number, number, number], filled = false, maxGrow = 400) {
   const f = regress(l);
   const ka0 = l.ka;
   const pos = (k: number) => f.a + (k - ka0) * f.pitch + offset;
@@ -765,9 +809,9 @@ function extendByContent(l: Lattice, src: PixelSource, axis: "col" | "row", offs
   if (filled) {
     // 另一轴已由粗线结构确认是“细线看不见的低清板”：沿这一轴，只要条带基本被格子底色铺满就继续（填色格 / 空格底色），再补一格标尺
     let guard = 0;
-    while (frac(l.ka - 1) >= 0.6 && guard++ < 400) l.ka -= 1;
+    while (frac(l.ka - 1) >= 0.6 && guard++ < maxGrow) l.ka -= 1;
     guard = 0;
-    while (frac(l.kb) >= 0.6 && guard++ < 400) l.kb += 1;
+    while (frac(l.kb) >= 0.6 && guard++ < maxGrow) l.kb += 1;
     return;
   }
   // 外推的条带内容密度要与边缘内侧几格相当：只有几笔文字（图例 / 说明 / 标尺数字）的条带不算格子

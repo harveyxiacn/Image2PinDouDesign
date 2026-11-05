@@ -220,7 +220,9 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     }
     // 低清放大后（rf > 1）格子被插值抹糊、JPEG 噪点又把颜色簇推到几百个，纯色占比 / 簇数都不可信；
     // 但能走到这里说明细格线已经被边缘能量证实（格线上有边缘、半格处没有），这本身就是规整网格的证据
-    const plausible = !!r0 && (rf > 1 || !!grid?.faint || r0.inkChart || (r0.flatFrac ?? 0) >= 0.55 && (r0.clusters?.length ?? 999) <= 150);
+    // 置信度很高、格数足够多的规整格阵本身就是图纸的证据（低清 JPEG 上纯色占比 / 簇数会被噪点拉坏）
+    const strongLattice = !!grid && grid.score >= 0.8 && Math.min(grid.cols, grid.rows) >= 30;
+    const plausible = !!r0 && (rf > 1 || !!grid?.faint || strongLattice || r0.inkChart || (r0.flatFrac ?? 0) >= 0.55 && (r0.clusters?.length ?? 999) <= 150);
     // 只有 1–2 个“色号 + 数字”的零散文字（插画里的字、水印）不足以证明是图纸：没网格、没抬头时，图例至少要 3 色。
     const legendEvidence = !!legend && (!!grid || legend.items.length >= 3);
     const chartLike = !!header || legendEvidence || options.forceCols || options.forceRows || (grid && (r0 ? plausible : true));
@@ -381,7 +383,9 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     // 图例“只读了个大概”的程度：没读清的数量 + 漏读的色号 + 被校正的数字，占全部色号的比例
     const patchRatio = (legendPatchy + added.length) / Math.max(1, codes.size);
     // 刚读出来的图例合计与逐格计数差了一成以上：数字整体读得不可靠（校正后看起来吻合只是被网格拉回来的）
-    const rawOff = legendRawSum > 0 && Math.abs(legendRawSum - gt) / Math.max(1, gt) >= 0.1;
+    const rawOff = legendPatchy > 0 && legendRawSum > 0 && Math.abs(legendRawSum - gt) / Math.max(1, gt) >= 0.1;
+    // 图例读得很完整：每个色块都读出了数量、没有数字被校正，补上的只是网格里零星的假色号——图例是作者写的数，比网格可靠
+    const legendClean = legendPatchy === 0 && added.every((c) => (counts[c] ?? 0) < 0.02 * Math.max(1, lt));
     const patchy = patchRatio >= 0.3 || rawOff;
     const codesStrong = !!cellCodesRead && !!cellCodeStats && cellCodeStats.read / Math.max(1, cellCodeStats.clusters) >= 0.75;
     const agreement = Math.max(0, 1 - abs / Math.max(lt, gt, 1));
@@ -403,7 +407,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       // 两边总数对不上：谁更可信？有总数（抬头 / 图上标注）就看谁更接近；没有就看网格是否“可信”
       // （规整、平涂、平均色差小）——小图里图例数字 OCR 常读错位，而网格计数是确定性的
       const target = header?.total ?? legendUsed.statedTotal ?? null;
-      const useGrid = target ? Math.abs(gt - target) < Math.abs(lt - target) : gridTrusted || (codesStrong && patchy) || patchRatio >= 0.6;
+      const useGrid = target ? Math.abs(gt - target) < Math.abs(lt - target) : !legendClean && (gridTrusted || (codesStrong && patchy) || patchRatio >= 0.6);
       if (useGrid) {
         counts = { ...reading.counts };
         method = agreement >= 0.5 ? "legend+grid" : "grid";
@@ -413,8 +417,11 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       } else {
         method = "legend";
         confidence = 0.5 + 0.25 * agreement;
+        // 图例完整：网格里零星多出来的色号多半是 JPEG 噪点造成的假色，不计入
+        const dropped = legendClean && !target ? added.filter((c) => c in counts) : [];
+        for (const c of dropped) delete counts[c];
         step("compare", "图例与网格对照", "warn",
-          `图例合计 ${fmt(lt)} 颗，网格数出 ${fmt(gt)} 颗，差异较大，有 ${mismatch} 个色号不一致；已采用图例数字`);
+          `图例合计 ${fmt(sum(counts))} 颗，网格数出 ${fmt(gt)} 颗，差异较大，有 ${mismatch} 个色号不一致；已采用图例数字${dropped.length ? `（图例读得完整，网格里零星的 ${dropped.join("、")} 视为噪点，不计入）` : ""}`);
       }
     }
     if (legendUsed.statedTotal && Math.abs(legendUsed.statedTotal - lt) / Math.max(lt, 1) <= 0.01) confidence += 0.05;
@@ -1236,16 +1243,19 @@ function trimRulers(src: PixelSource, grid0: GridDetection, treatEmpty: boolean)
       if (side === "r") for (let y = 0; y < rows; y += 1) idx.push(y * cols + cols - 1);
       return idx;
     };
-    const isRuler = (side: "t" | "b" | "l" | "r") => {
+    // relaxed：对边已判定是标尺时（标尺总是四边对称）放宽门槛——JPEG 压缩后一侧的数字可能糊掉
+    const isRuler = (side: "t" | "b" | "l" | "r", relaxed = false) => {
       // 去掉两端的角格（角上常是别的颜色）
       const idx = strip(side).slice(1, -1);
       const rl = idx.filter((i) => cc[i] >= 0 && rulerLike[cc[i]]).length / idx.length;
-      if (rl >= 0.75) return true;
+      if (rl >= (relaxed ? 0.3 : 0.75)) return true;
       const inkRate = idx.filter((i) => ink[i]).length / idx.length;
       const bg = idx.filter((i) => cc[i] >= 0 && cl[cc[i]].empty && innerInk[cc[i]] < 0.15).length / idx.length;
-      return inkRate >= 0.7 && bg >= 0.8;
+      return relaxed ? inkRate >= 0.35 && bg >= 0.6 : inkRate >= 0.7 && bg >= 0.8;
     };
-    const t = isRuler("t"), b = isRuler("b"), l = isRuler("l"), rr = isRuler("r");
+    let t = isRuler("t"), b = isRuler("b"), l = isRuler("l"), rr = isRuler("r");
+    if (t !== b) { if (t) b = isRuler("b", true); else t = isRuler("t", true); }
+    if (l !== rr) { if (l) rr = isRuler("r", true); else l = isRuler("l", true); }
     if (!t && !b && !l && !rr) break;
     const g = { ...grid };
     if (t) { g.y0 += g.pitchY; g.rows -= 1; trimmed += 1; }

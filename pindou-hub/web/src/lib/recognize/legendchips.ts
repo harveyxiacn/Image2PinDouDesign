@@ -420,12 +420,25 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   if (twoLine.size >= Math.max(3, 0.5 * entries.filter((e) => !e.synthetic).length)) {
     const list = [...twoLine.keys()];
     for (const e of entries) e.codeTexts.length = 0;
-    const mk2 = (pick: (sp: { top: Rc; bottom: Rc }) => Rc, tag: (e: Entry) => number) => list.map((e) => { const r = pick(twoLine.get(e)!); return { x: r.x, y: r.y, width: r.width, height: r.height, r: e.chip.r, g: e.chip.g, b: e.chip.b, bg: [bg[0], bg[1], bg[2]] as [number, number, number], tag: tag(e) }; });
-    for (const [target, thr, bin] of [[40, 0.5, false], [48, -1, false], [32, 0.4, true]] as const) {
-      const st = chipStack(img, mk2((sp) => sp.top, (e) => list.indexOf(e)).map((c) => ({ ...c, inkThr: thr })), 1, target, thr, bin, true);
-      if (st.rows.length) { const res = await runOcr(st.image, "ABCDEFGHMPQRTYZ0123456789"); for (const row of st.rows) list[row.chip.tag ?? -1].codeTexts.push(rowText(res.words, row.y0, row.y1)); }
-      const st2 = chipStack(img, mk2((sp) => sp.bottom, (e) => list.indexOf(e)).map((c) => ({ ...c, inkThr: thr })), 1, target, thr, bin, true);
-      if (st2.rows.length) { const res = await runOcr(st2.image, "0123456789xX*"); for (const row of st2.rows) list[row.chip.tag ?? -1].countTexts.push(rowText(res.words, row.y0, row.y1)); }
+    const mk2 = (sub: Entry[], pick: (sp: { top: Rc; bottom: Rc }) => Rc, tag: (e: Entry) => number) => sub.map((e) => { const r = pick(twoLine.get(e)!); return { x: r.x, y: r.y, width: r.width, height: r.height, r: e.chip.r, g: e.chip.g, b: e.chip.b, bg: [bg[0], bg[1], bg[2]] as [number, number, number], tag: tag(e) }; });
+    // 第三遍只给前两遍还没“色号两遍读成同一个、数量两遍读成同一个”的块（其余再读一遍只是 2-0 变 3-0，结论不变）
+    const normT = (t: string) => t.toUpperCase().replace(/[^0-9A-Z]/g, "");
+    const needMore = (e: Entry) => {
+      const cs = e.codeTexts.map(normT).filter(Boolean);
+      return !(new Set(cs).size < cs.length) || !agreed(e.countTexts.map((t) => parseCountPattern(t)));
+    };
+    for (const [pi, [target, thr, bin]] of ([[40, 0.5, false], [48, -1, false], [32, 0.4, true]] as const).entries()) {
+      const sub = pi === 2 ? list.filter(needMore) : list;
+      if (!sub.length) break;
+      const st = chipStack(img, mk2(sub, (sp) => sp.top, (e) => list.indexOf(e)).map((c) => ({ ...c, inkThr: thr })), 1, target, thr, bin, true);
+      const st2 = chipStack(img, mk2(sub, (sp) => sp.bottom, (e) => list.indexOf(e)).map((c) => ({ ...c, inkThr: thr })), 1, target, thr, bin, true);
+      // 色号行 / 数量行互相独立：并发识别（worker 池）
+      const [resTop, resBot] = await Promise.all([
+        st.rows.length ? runOcr(st.image, "ABCDEFGHMPQRTYZ0123456789") : null,
+        st2.rows.length ? runOcr(st2.image, "0123456789xX*") : null
+      ]);
+      if (resTop) for (const row of st.rows) list[row.chip.tag ?? -1].codeTexts.push(rowText(resTop.words, row.y0, row.y1));
+      if (resBot) for (const row of st2.rows) list[row.chip.tag ?? -1].countTexts.push(rowText(resBot.words, row.y0, row.y1));
       for (const e of entries) e.code = null;
       resolveCodes(entries);
     }
@@ -489,8 +502,7 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   const hasInline2 = (e: Entry) => e.codeTexts.some((x) => parseCodeCountText(x, VALID).count !== null || parseCodeCountText(x, VALID).glued.length);
   const inlineLayout = entries.filter(hasInline2).length >= 0.5 * entries.length;
   const skipRegions = labelLayout || inlineLayout;
-  const rb = skipRegions ? new Map<Entry, string>() : await readCounts(entries, (e) => e.below, 40, 0.5, false);
-  const rr = skipRegions ? new Map<Entry, string>() : await readCounts(entries, (e) => e.right, 40, 0.5, false);
+  const [rb, rr] = skipRegions ? [new Map<Entry, string>(), new Map<Entry, string>()] : await Promise.all([readCounts(entries, (e) => e.below, 40, 0.5, false), readCounts(entries, (e) => e.right, 40, 0.5, false)]);
   const useBelow = parsedN(rb) >= parsedN(rr);
   // 下方 / 右侧都读不出数量、色块里也没有数量：只有色号的色板，不是带数量的图例
   if (!skipRegions && Math.max(parsedN(rb), parsedN(rr)) < Math.max(2, 0.3 * entries.length)
@@ -530,7 +542,7 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     for (const v of vals) tally.set(v, (tally.get(v) ?? 0) + 1);
     // OCR 常把连着的两个相同数字读成一个（66→6）：长读数的得票加上“去掉一个重复数字就等于它”的短读数的票
     const score = new Map(tally);
-    for (const [v, n] of tally) { const sv = String(v); for (let i = 1; i < sv.length; i += 1) if (sv[i] === sv[i - 1]) { const u = Number(sv.slice(0, i) + sv.slice(i + 1)); if (tally.has(u) && u !== v) score.set(v, (score.get(v) ?? 0) + (tally.get(u) ?? 0)); } void n; }
+    for (const [v, n] of tally) { const sv = String(v); for (let i = 1; i < sv.length; i += 1) if (sv[i] === sv[i - 1] && !(i === 1 && sv[0] === "1" && sv.length >= 4)) { const u = Number(sv.slice(0, i) + sv.slice(i + 1)); if (tally.has(u) && u !== v) score.set(v, (score.get(v) ?? 0) + (tally.get(u) ?? 0)); } void n; }
     const ranked = [...tally.entries()].sort((a, b) => (score.get(b[0]) ?? 0) - (score.get(a[0]) ?? 0) || vals.indexOf(a[0]) - vals.indexOf(b[0]));
     e.count = ranked[0][0];
     e.votes = ranked[0][1];
