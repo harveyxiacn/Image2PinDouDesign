@@ -371,16 +371,25 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     return out;
   };
   const codeWl = "ABCDEFGHMPQRTYZ0123456789():.";
-  const readCodes = async (list: Entry[], target: number, thr: number, bin: boolean, wl: string = codeWl) => {
+  const readCodesRaw = async (list: Entry[], target: number, thr: number, bin: boolean, wl: string = codeWl): Promise<Array<[Entry, string]>> => {
     const chs = list.map((e, i) => {
       // 内缩：色块边缘（抗锯齿 / 圆角 / 描边）不是文字，否则会被当成墨迹撑大字高
       const k = Math.max(2, Math.round(0.14 * e.chip.height));
       return { ...e.chip, x: e.chip.x + k, y: e.chip.y + k, width: Math.max(4, e.chip.width - 2 * k), height: Math.max(4, e.chip.height - 2 * k), tag: i, inkThr: thr };
     });
     const st = chipStack(img, chs, 1, target, thr, bin, true);
-    if (!st.rows.length) return;
+    if (!st.rows.length) return [];
     const res = await runOcr(st.image, wl);
-    for (const row of st.rows) list[row.chip.tag ?? -1].codeTexts.push(rowText(res.words, row.y0, row.y1));
+    return st.rows.map((row) => [list[row.chip.tag ?? -1], rowText(res.words, row.y0, row.y1)] as [Entry, string]);
+  };
+  const readCodes = async (list: Entry[], target: number, thr: number, bin: boolean, wl: string = codeWl) => {
+    for (const [e, t] of await readCodesRaw(list, target, thr, bin, wl)) e.codeTexts.push(t);
+  };
+  /** 两组互相独立的参数并发读（worker 池），结果按顺序并入（平票取先读的那遍） */
+  const readCodesPair = async (list: Entry[], a: readonly [number, number, boolean], b: readonly [number, number, boolean]) => {
+    const [ra, rb2] = await Promise.all([readCodesRaw(list, a[0], a[1], a[2]), readCodesRaw(list, b[0], b[1], b[2])]);
+    for (const [e, t] of ra) e.codeTexts.push(t);
+    for (const [e, t] of rb2) e.codeTexts.push(t);
   };
   const resolveCodes = (list: Entry[]) => {
     for (const e of list) {
@@ -411,8 +420,7 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   resolveCodes(entries);
   // 数量写在色块里 / 旁边（“A26 (871)”）：多读两遍参数不同的，数量投票（括号常被认成 1，一遍不可靠）
   if (entries.filter((e) => e.codeTexts.some((t) => parseCodeCountText(t, VALID).count !== null || parseCodeCountText(t, VALID).glued.length)).length >= 0.4 * entries.length) {
-    await readCodes(entries, 56, 0.4, true);
-    await readCodes(entries, 32, 0.6, false);
+    await readCodesPair(entries, [56, 0.4, true], [32, 0.6, false]);
   }
   // 色块里是两行字（上 色号 / 下 ×数量）：分行各读一遍（色号白名单 / 数字白名单），比整块混读准得多
   const twoLine = new Map<Entry, { top: Rc; bottom: Rc }>();
@@ -459,6 +467,17 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     const withText = entries.filter((e) => e.below || e.right || e.label || hasInline(e) || e.countTexts.some((x) => parseCountPattern(x) !== null)).length;
     if (withText < 0.4 * entries.length) return gaveUp();
   }
+  // 色块上方的抬头条带（读总数）与下面的读数互不相干：现在就开始识别，让它和后面的几遍并行（worker 池里另一个 worker）
+  const topY = Math.min(...rows.map((r) => Math.min(...r.map((c) => c.y))));
+  let stripP: Promise<{ text: string } | null> | null = null;
+  if (topY >= 14 && !signal.aborted) {
+    // 抬头文字紧贴在色块上方：条带很高（> 120）说明上面是图纸 / 标尺（读上几秒也读不出总数），只取紧邻色块的 80 行
+    const h0 = topY - 1, W = img.width;
+    const h = h0 > 120 ? 80 : h0;
+    const strip = new Uint8ClampedArray(W * h * 4);
+    strip.set(img.data.subarray((h0 - h) * W * 4, h0 * W * 4));
+    stripP = ocrWords({ width: W, height: h, data: strip }, signal, { scale: h < 40 ? 2 : 1 }).then((r) => r, () => null);
+  }
   // 色块里没有字（小方块 + 右边写“H7 (735)”的版式）：读色块右侧的整段文字，同时得到色号和数量（多遍识别，数量投票）
   const labelLayout = unresolved().length >= 0.4 * entries.length && entries.some((e) => e.label);
   if (labelLayout) {
@@ -492,9 +511,12 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     }
   }
   const late = () => performance.now() - t0 > 3000;
-  if (unresolved().length && !late()) { const u = unresolved(); await readCodes(u, 56, 0.4, true); resolveCodes(u); }
-  if (unresolved().length && !late()) { const u = unresolved(); await readCodes(u, 32, 0.6, false); resolveCodes(u); }
-  if (unresolved().length && !late()) { const u = unresolved(); await readCodes(u, 72, 0.3, true); resolveCodes(u); }
+  // 色块里一个字母都没读到（没有印色号的图例）：换几组参数再读色号也读不出来，省掉这几遍
+  const noLetters = entries.every((e) => !e.codeTexts.some((t) => /[A-Za-z]/.test(t)));
+  if (unresolved().length && !late() && !(noLetters && unresolved().length === entries.length)) {
+    const u = unresolved(); await readCodesPair(u, [56, 0.4, true], [32, 0.6, false]); resolveCodes(u);
+    if (unresolved().length && !late()) { const u2 = unresolved(); await readCodes(u2, 72, 0.3, true); resolveCodes(u2); }
+  }
 
   // 4) 数量字段：下方 / 右侧两种版式各读一遍，看哪边读得出“数量”（整张图例版式一致），再对胜出的版式用另一组参数补读一遍留备选
   const parsedN = (m: Map<Entry, string>) => [...m.values()].filter((t) => parseCountPattern(t) !== null).length;
@@ -519,12 +541,13 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     const t2 = other.get(e);
     if (t2 !== undefined && parseCountPattern(t2) !== null) { e.where = useBelow ? "right" : "below"; e.countRect = useBelow ? e.right : e.below; e.countTexts.push(t2); }
   }
-  for (const [target, thr, bin] of [[56, 0.4, true], [36, -1, false]] as const) {
-    // 补读只给读数还没有两遍一致的色块
+  {
+    // 补读只给读数还没有两遍一致的色块；两组参数互相独立，并发读
     const need = entries.filter((e) => e.countRect && !(hurry() && agreed(e.countTexts.map((t) => parseCountPattern(t)))));
-    if (!need.length) break;
-    const second = skipRegions ? new Map<Entry, string>() : await readCounts(need, (e) => e.countRect, target, thr, bin);
-    for (const [e, t] of second) e.countTexts.push(t);
+    if (need.length && !skipRegions) {
+      const [m1, m2] = await Promise.all([readCounts(need, (e) => e.countRect, 56, 0.4, true), readCounts(need, (e) => e.countRect, 36, -1, false)]);
+      for (const m of [m1, m2]) for (const [e, t] of m) e.countTexts.push(t);
+    }
   }
   for (const e of entries) {
     const vals: number[] = [];
@@ -612,12 +635,8 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   // 色块上方的一条抬头（“颜色图例 | 共 10 色 | 总计 2127 颗”）：读出图上写的总数，供上层对账
   let statedTotal: number | null = null;
   {
-    const topY = Math.min(...rows.map((r) => Math.min(...r.map((c) => c.y))));
-    if (topY >= 14 && items.length >= 3 && !signal.aborted) {
-      const h = topY - 1, W = img.width;
-      const strip = new Uint8ClampedArray(W * h * 4);
-      strip.set(img.data.subarray(0, W * h * 4));
-      try { const res = await ocrWords({ width: W, height: h, data: strip }, signal, { scale: h < 40 ? 2 : 1 }); statedTotal = findStatedTotal(res.text);
+    if (stripP && items.length >= 3 && !signal.aborted) {
+      try { const res = await stripP; if (!res) throw new Error("none"); statedTotal = findStatedTotal(res.text);
         // 汉字读坏了（“总计 2127 颗”读成 “Bit 2127 %”）：取行尾的 3–5 位数字，且必须比已读到的各色之和大一点点（有的色没读到）而不是离谱
         if (statedTotal === null) {
           const m = /(\d{3,5})\D{0,3}\s*$/.exec(res.text.trim().split("\n").pop() ?? "");

@@ -8,6 +8,12 @@ const MIN_PITCH = 4;
 const MAX_LAG = 250;
 /** 被轮廓围住的浅色区域至少多少格才算豆子（白豆 H2）；更小的是图形内部的缝隙 */
 const ENCLOSED_MIN = 10;
+/** 浅色格与格内页面底色的色差小于它才算背景候选；奶油 / 米白豆子（H19，ΔE≈10）在 JPEG 里会漂到 9.8，所以要收紧 */
+const LIGHT_BG_DE = 8.5;
+/** 泛洪可跨过的杂色格：所在颜色簇不超过这么多格 */
+const HALO_N = 12;
+const SOFT_INK_D = 40;
+const SOFT_CHART_FRAC = 0.6;
 
 // ───────────────────────── 边缘投影 ─────────────────────────
 
@@ -1040,12 +1046,15 @@ export function readGrid(
   const { cols, rows, pitchX, pitchY } = grid;
   const cells: Array<{ lab: Lab; r: number; g: number; b: number } | null> = new Array(cols * rows).fill(null);
   const cellInk = new Uint8Array(cols * rows);
+  /** 宽松的“格内有字”标记（阈值低）：低清 JPEG 里字被抹糊，严格阈值看不到 */
+  const softInk = new Uint8Array(cols * rows);
   /** 格内部“浅色低彩度”像素占比（白 / 浅灰 / 棋盘格两种浅色都算）：智能去背景用 */
   const lightFrac = new Float32Array(cols * rows);
   let flatCells = 0;
   const d = src.data;
   // 小格（≤12 px）：JPEG 在色块交界处有晕边，只取格子中心部分，避开边缘一圈
-  const insetF = Math.min(pitchX, pitchY) <= 10 ? 0.3 : 0.22;
+  const smallCells = Math.min(pitchX, pitchY) <= 10; // 小格 + JPEG：格内色号常被抹糊，下面的“宽松有字”判断只在这种情况下启用
+  const insetF = smallCells ? 0.3 : 0.22;
   for (let cy = 0; cy < rows; cy += 1) {
     for (let cx = 0; cx < cols; cx += 1) {
       const insX = Math.max(1, pitchX * insetF);
@@ -1082,16 +1091,19 @@ export function readGrid(
       if (c) {
         cells[cy * cols + cx] = { ...c, lab: rgbToLab(c) };
         // 文字墨迹：中央文字带内与格子底色差异明显的像素
-        let band = 0, ink = 0;
+        let band = 0, ink = 0, soft = 0;
         for (let y = py0; y <= py1; y += 1) {
           if (Math.abs((y + 0.5 - my) / pitchY) >= 0.24) continue;
           let i = (y * src.width + px0) * 4;
           for (let x = px0; x <= px1; x += 1, i += 4) {
             band += 1;
-            if (Math.abs(d[i] - c.r) + Math.abs(d[i + 1] - c.g) + Math.abs(d[i + 2] - c.b) > 90) ink += 1;
+            const dd = Math.abs(d[i] - c.r) + Math.abs(d[i + 1] - c.g) + Math.abs(d[i + 2] - c.b);
+            if (dd > 90) ink += 1;
+            if (dd > SOFT_INK_D) soft += 1;
           }
         }
         if (band >= 6 && ink >= Math.max(3, 0.05 * band)) cellInk[cy * cols + cx] = 1;
+        if (band >= 6 && soft >= Math.max(2, 0.04 * band)) softInk[cy * cols + cx] = 1;
       }
     }
   }
@@ -1197,11 +1209,13 @@ export function readGrid(
   // 格内色号：按簇统计“有墨迹的格子”比例。≥50% 为有字簇，≤10% 为无字簇，其余为混合簇（照片 / 噪点）。
   const members: number[][] = clusters.map(() => []);
   const inkCount: number[] = clusters.map(() => 0);
+  const softCount: number[] = clusters.map(() => 0);
   for (let i = 0; i < cellCluster.length; i += 1) {
     const ci = cellCluster[i];
     if (ci < 0) continue;
     members[ci].push(i);
     if (cellInk[i]) inkCount[ci] += 1;
+    if (softInk[i]) softCount[ci] += 1;
   }
   let inkedCells = 0, mixedCells = 0;
   const kind = clusters.map((c, j) => {
@@ -1219,7 +1233,8 @@ export function readGrid(
   if (perCellInk) {
     clusters.forEach((_, j) => {
       if (bgLike[j]) empty[j] = false; // 逐格判断，见下方 matrix 构建
-      else if (kind[j] === "plain") empty[j] = true;
+      // 严格阈值下没字的簇才当空白；但低清 JPEG 把字抹糊了的豆子簇，宽松阈值下多数格子仍有字，不能丢
+      else if (kind[j] === "plain") empty[j] = !(smallCells && softCount[j] >= 0.5 * clusters[j].n);
       else empty[j] = false;
     });
   }
@@ -1247,10 +1262,11 @@ export function readGrid(
       if (ci < 0 || distinctBead[ci]) continue;
       // “格子里大多是浅色低彩度像素”也算背景候选，但色相明显偏离页面底色的簇（奶油 / 米白豆子）除外
       const gb = gridBg as Lab | null;
-      const lightOk = lightFrac[i] >= 0.7 && (gb === null || clusters[ci].n < 12 || chroma(clusters[ci].lab) <= 3.5 || de76(clusters[ci].lab, gb) < 10.2);
+      const lightOk = lightFrac[i] >= 0.7 && (gb === null || clusters[ci].n < 12 || chroma(clusters[ci].lab) <= 3.5 || de76(clusters[ci].lab, gb) < LIGHT_BG_DE);
       if (bgLike[ci] || lightOk) cand[i] = 1;
     }
     const stack: number[] = [];
+    const haloOk = legend.length < 2;
     // 带色号的图纸：边缘的浅色格大多没有字 → 字是“这是豆子”的强信号，泛洪不穿过有字的格子（图形里的白豆 H2 不会被连成背景）；
     // 若边缘浅色格本身就印着字（画像素把 H2 印在背景格里），则忽略墨迹
     let edgeLight = 0, edgeInk = 0;
@@ -1263,6 +1279,14 @@ export function readGrid(
     const seed = (i: number) => { if (cand[i] && !bgMask[i] && !(inkBlocks && cellInk[i])) { bgMask[i] = 1; stack.push(i); } };
     for (let x = 0; x < cols; x += 1) { seed(x); seed((rows - 1) * cols + x); }
     for (let y = 0; y < rows; y += 1) { seed(y * cols); seed(y * cols + cols - 1); }
+    // 小格 JPEG 的晕边：夹在背景格与背景格之间、颜色只出现几格的“杂色格”会把背景细通道堵死，
+    // 让图形里的背景空洞被误当成“围住的白区”。泛洪可以跨过一格这样的杂色格（杂色格本身不算背景）。
+    const haloLab = (gridBg as Lab | null) ?? bgLab;
+    const isHalo = (j: number) => {
+      const cj = cellCluster[j];
+      if (cj < 0 || cand[j] || distinctBead[cj] || !haloLab) return false;
+      return clusters[cj].n <= HALO_N && de76(clusters[cj].lab, haloLab) <= 30;
+    };
     while (stack.length) {
       const i = stack.pop()!;
       const x = i % cols, y = (i - x) / cols;
@@ -1270,6 +1294,17 @@ export function readGrid(
       if (x < cols - 1) seed(i + 1);
       if (y > 0) seed(i - cols);
       if (y < rows - 1) seed(i + cols);
+      if (haloOk) {
+        for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const hx = x + dx, hy = y + dy;
+          if (hx < 0 || hy < 0 || hx >= cols || hy >= rows) continue;
+          const h = hy * cols + hx;
+          if (!isHalo(h)) continue;
+          const kx = hx + dx, ky = hy + dy;
+          if (kx < 0 || ky < 0 || kx >= cols || ky >= rows) continue;
+          seed(ky * cols + kx);
+        }
+      }
     }
   }
   // 无图例时被围住的浅色格也是豆子（有图例但没有浅色色号时，仍按旧规则当空格）
@@ -1292,6 +1327,14 @@ export function readGrid(
     }
   }
 
+  // 低清 JPEG 把格内色号抹糊时，严格的 inkChart 判定失效；用宽松阈值再看一次：豆子格里大多有“字”，说明这是带色号的图纸，
+  // 被围住的背景色区域没有字 → 是空洞，不是白豆
+  let softChart = false;
+  if (!inkChart && keepEnclosed && smallCells) {
+    let withInk = 0, beadN = 0;
+    for (let i = 0; i < cand.length; i += 1) if (cellCluster[i] >= 0 && !cand[i]) { beadN += 1; withInk += softInk[i]; }
+    softChart = beadN >= 30 && withInk >= SOFT_CHART_FRAC * beadN;
+  }
   const matrix: Array<Array<string | null>> = [];
   const counts: Record<string, number> = {};
   const stat = new Map<string, { n: number; de: number; r: number; g: number; b: number }>();
@@ -1305,7 +1348,7 @@ export function readGrid(
       if (ci < 0) { row.push(null); emptyCells += 1; continue; }
       if (bgMask[idx]) { row.push(null); emptyCells += 1; backgroundCells += 1; continue; }
       const inkOk = !(perCellInk && bgLike[ci] && !cellInk[idx]);
-      const enclosedLight = keepEnclosed && enclosedBead[idx] === 1 && inkOk && !(inkChart && !cellInk[idx]);
+      const enclosedLight = keepEnclosed && enclosedBead[idx] === 1 && inkOk && !(inkChart && !cellInk[idx]) && !(softChart && !softInk[idx]);
       if ((empty[ci] && !enclosedLight) || !inkOk) { row.push(null); emptyCells += 1; continue; }
       const c = clusters[ci];
       const cell = cells[idx]!;

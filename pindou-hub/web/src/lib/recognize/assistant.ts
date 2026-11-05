@@ -721,8 +721,10 @@ async function readLegend(src: PixelSource, hi: PixelSource, grid: GridDetection
       const perChip = new Map<import("./legend").Chip, { code: string | null; count: number | null }>();
       let stated: number | null = null;
       let raw = "";
-      for (const [target, bin] of [[110, false], [150, true]] as const) {
-        const scale = Math.min(4, Math.max(1, target / medH));
+      // 色块本身已经很大（字高早超过 ~40px）：不必再放大，缩小到 0.6 倍更快（叠图高度减半）
+      const big = medH > 90;
+      for (const [target, bin] of (big ? [[66, false], [90, true]] : [[110, false], [150, true]]) as Array<[number, boolean]>) {
+        const scale = Math.min(4, Math.max(big ? 0.6 : 1, target / medH));
         const stack = chipStack(crop.img, chips, scale, undefined, 0.5, bin);
         const res = await ocrWords(stack.image, signal, { scale: 1, psm: "6" });
         const rows = stack.rows.map((r) => ({
@@ -1015,10 +1017,11 @@ async function readCellCodes(
   };
 
   // 1) 簇平均字形：同色格子对齐平均后整体识别（抗水印 / JPEG 噪点）；2) 没读出的簇再退回逐格投票
-  const rest = eligible.filter((c) => !gv[c.id]);
+  // 逐格投票只给最大的 60 个簇（零碎的小簇多是水印 / JPEG 噪点碎片，后面会并进大簇；读它们很费时）
+  const rest = eligible.filter((c) => !gv[c.id]).sort((a, b) => b.count - a.count).slice(0, 60);
   if (rest.length) await runRound(rest.map((c) => c.id), perCluster);
   const unresolved = rest.filter((c) => decide(c.id) === null && c.count > (picked.get(c.id) ?? 0)).map((c) => c.id);
-  if (unresolved.length) await runRound(unresolved.slice(0, 40), Math.min(5, perCluster + 2));
+  if (unresolved.length) await runRound(unresolved.slice(0, 20), Math.min(5, perCluster + 2));
   const votes: Record<number, string> = {};
   for (const c of eligible) {
     const v = gv[c.id] ?? decide(c.id);
