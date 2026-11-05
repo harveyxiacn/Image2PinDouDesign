@@ -906,14 +906,11 @@ function trimEnds(l: Lattice, src: PixelSource, axis: "col" | "row", offset: num
     && !(small && lineLike(src, axis, pos(k), regress(l).pitch, a, b));
   // 末端 / 起点附近“弱齿 + 1~2 条强齿”：强齿是图例色块 / 标尺的边缘，弱齿之外的都不属于网格
   // 孤立的强齿（紧挨着一条弱齿）多半是图例色块 / 标尺的边缘，连同弱齿一起去掉
-  // 端线是强线、隔 2 条弱线后又接上强线：弱线是空白格间的淡细线（低清图），不是图例 / 标尺的幽灵线，不剪
-  const strongCov = (k: number) => toothCoverage(src, axis, pos(k), a, b, edgeT) >= END_STRONG * ref;
-  const gapEnd = (k0: number, dir: 1 | -1) => small && strongCov(k0) && weak(k0 + dir) && weak(k0 + 2 * dir) && strongCov(k0 + 3 * dir);
-  while (l.kb - l.ka > 8 && !gapEnd(l.kb, -1) && (weak(l.kb) || weak(l.kb - 1))) {
+  while (l.kb - l.ka > 8 && (weak(l.kb) || weak(l.kb - 1))) {
     l.kb -= weak(l.kb) ? 1 : 2;
     l.pts = l.pts.filter(([k]) => k <= l.kb);
   }
-  while (l.kb - l.ka > 8 && !gapEnd(l.ka, 1) && (weak(l.ka) || weak(l.ka + 1))) {
+  while (l.kb - l.ka > 8 && (weak(l.ka) || weak(l.ka + 1))) {
     l.ka += weak(l.ka) ? 1 : 2;
     l.pts = l.pts.filter(([k]) => k >= l.ka);
   }
