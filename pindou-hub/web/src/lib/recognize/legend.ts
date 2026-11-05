@@ -761,6 +761,55 @@ export function countAlternatives(n: number): number[] {
 }
 
 /**
+ * 相邻色块之间只隔 1–2 像素（缝里是一道浅色的描边 / 阴影，同样被当成色块像素）时会连成一个宽块。
+ * 逐列取“最常见的颜色”（文字笔画是少数，不影响），相邻列的主色突变（三通道绝对差之和 > 60）并且新颜色持续 ≥ 6 列，
+ * 就是换了一个色块：返回各色块的列范围（含缝：缝归后一个，随后的收边步骤会按颜色把它去掉）。只有一个色块返回 null。
+ */
+function splitMergedChips(members: number[], w: number, d: ArrayLike<number>, minX: number, maxX: number, bh: number): Array<[number, number]> | null {
+  const nc = maxX - minX + 1;
+  const hist: Array<Map<number, number[]>> = Array.from({ length: nc }, () => new Map());
+  for (const p of members) {
+    const i = p * 4, k = ((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4);
+    const m = hist[(p % w) - minX];
+    const e = m.get(k);
+    if (e) { e[0] += 1; e[1] += d[i]; e[2] += d[i + 1]; e[3] += d[i + 2]; } else m.set(k, [1, d[i], d[i + 1], d[i + 2]]);
+  }
+  const mode = hist.map((m) => {
+    let best: number[] | null = null;
+    for (const e of m.values()) if (!best || e[0] > best[0]) best = e;
+    return best && best[0] >= 6 ? [best[1] / best[0], best[2] / best[0], best[3] / best[0]] : null;
+  });
+  const dist = (a: number[], b: number[]) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+  const starts: number[] = [0];
+  let prev: number[] | null = null;
+  for (let x = 0; x < nc; x += 1) {
+    const c = mode[x];
+    if (!c) continue;
+    if (!prev) { prev = c; continue; }
+    if (dist(c, prev) <= 60) { prev = c; continue; }
+    // 新颜色要持续 ≥ 6 列（且这些列彼此接近）才算换了色块；浅色缝 / 笔画只有 1–3 列
+    let ok = true;
+    for (let k = 1; k < 6; k += 1) { const n = mode[x + k]; if (!n || dist(n, c) > 40 || dist(n, prev) <= 60) { ok = false; break; } }
+    if (ok) { starts.push(x); prev = c; }
+  }
+  if (starts.length < 2) return null;
+  const ranges: Array<[number, number]> = [];
+  starts.forEach((s0, i) => {
+    const r: [number, number] = [minX + s0, minX + (i + 1 < starts.length ? starts[i + 1] - 1 : nc - 1)];
+    const prev = ranges[ranges.length - 1];
+    // 过窄的一段（缝 / 色块边缘的阴影）并入前一段
+    if (prev && r[1] - r[0] + 1 < 0.5 * bh) prev[1] = r[1]; else ranges.push(r);
+  });
+  // 第一段过窄（最左一列的描边）并入后一段
+  if (ranges.length >= 2 && ranges[0][1] - ranges[0][0] + 1 < 0.5 * bh) { ranges[1][0] = ranges[0][0]; ranges.shift(); }
+  if (ranges.length < 2) return null;
+  // 合并的是同样大小的色块：各段宽度相近（最宽 ≤ 1.6 × 最窄），否则不是“相邻色块”，不拆
+  const ws = ranges.map(([a, b]) => b - a + 1);
+  if (Math.max(...ws) > 1.6 * Math.min(...ws)) return null;
+  return ranges;
+}
+
+/**
  * 平涂色块查找（版式无关）：与页面底色明显不同的像素连成块（4 连通），块的外接矩形足够“实心”（内部的文字空洞允许）。
  * 色块颜色取块内像素的逐通道中位数（文字像素是少数，中位数就是底色）。浅到几乎和纸一样的色块（如白色 H1 / H2）
  * 找不到——由调用方按排列规律补全。
@@ -816,9 +865,10 @@ export function findFlatBlobs(src: PixelSrc, diffThr = 45): Chip[] {
       if (y > 0 && mask[p - w] === 1) { mask[p - w] = 2; stack.push(p - w); }
       if (y < h - 1 && mask[p + w] === 1) { mask[p + w] = 2; stack.push(p + w); }
     }
+    const emit = (members: number[], minX: number, maxX: number, minY: number, maxY: number): void => {
     const bw = maxX - minX + 1, bh = maxY - minY + 1;
     const n = members.length;
-    if (bw < 8 || bh < 8 || n < 40 || n / (bw * bh) < 0.45 || bw / bh < 0.6 || bw / bh > 9 || bw * bh > 0.3 * w * h) continue;
+    if (bw < 8 || bh < 8 || n < 40 || n / (bw * bh) < 0.45 || bw / bh < 0.6 || bw / bh > 9 || bw * bh > 0.3 * w * h) return;
     const rs: number[] = [], gs: number[] = [], bs: number[] = [];
     const step = Math.max(1, Math.floor(n / 600));
     for (let k = 0; k < n; k += step) { const i = members[k] * 4; rs.push(d[i]); gs.push(d[i + 1]); bs.push(d[i + 2]); }
@@ -843,6 +893,18 @@ export function findFlatBlobs(src: PixelSrc, diffThr = 45): Chip[] {
       if (cl >= 8 && rl >= 8) { tx = minX + cx0; tw = cl; ty = minY + ry0; th = rl; }
     }
     out.push({ x: tx - 1, y: ty - 1, width: tw + 2, height: th + 2, r: cr, g: cg, b: cb, bg: [br, bg, bb] });
+    };
+    const bw0 = maxX - minX + 1, bh0 = maxY - minY + 1;
+    // 相邻色块之间只隔 1 像素（甚至粘在一起）时会连成一个宽块：按缝（几乎没有色块像素的列）拆成各自的色块
+    const parts = members.length >= 150 && members.length >= 0.85 * bw0 * bh0 && bw0 >= 1.9 * bh0 && bw0 <= 9 * bh0 && bw0 * bh0 <= 0.3 * w * h ? splitMergedChips(members, w, d, minX, maxX, bh0) : null;
+    if (parts) {
+      for (const [a0, a1] of parts) {
+        const sub = members.filter((p) => { const x = p % w; return x >= a0 && x <= a1; });
+        let y0 = h, y1 = 0;
+        for (const p of sub) { const y = (p - (p % w)) / w; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        emit(sub, a0, a1, y0, y1);
+      }
+    } else emit(members, minX, maxX, minY, maxY);
   }
   return out;
 }

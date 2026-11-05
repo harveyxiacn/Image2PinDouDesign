@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MARD_PALETTE } from "@engine/palette";
 import { countAlternatives, findFlatBlobs, splitGlued, nearestCodesByColor, parseCodeCountText, parseCountPattern, validateCodeCandidates } from "../lib/recognize/legend";
-import { fitToTotal, reconcileCounts } from "../lib/recognize/reconcile";
+import { fitLegendToTotal, fitOrderedCounts, fitToTotal, reconcileCounts } from "../lib/recognize/reconcile";
 
 const VALID = new Set(MARD_PALETTE.map((c) => c.code));
 const colorOf = (code: string) => MARD_PALETTE.find((c) => c.code === code)?.rgb ?? null;
@@ -136,5 +136,35 @@ describe("多来源核对 reconcile", () => {
   it("没有总数时保持原读数", () => {
     const r = reconcileCounts({ current: { A1: 10 }, legend: null, grid: { A1: 10 }, total: null, colors: null });
     expect(r.counts).toEqual({ A1: 10 });
+  });
+});
+
+describe("图例合计 = 总数 的补救", () => {
+  it("fitLegendToTotal：OCR 漏读一位（67→671）、网格数佐证时，凑出总数", () => {
+    const items = [
+      { code: "A1", count: 67, source: "x", votes: 2 },
+      { code: "B2", count: 366, source: "x", votes: 2 },
+      { code: "C3", count: 309, source: "x", votes: 2 },
+      { code: "D4", count: 243, source: "x", votes: 2 }
+    ];
+    const fit = fitLegendToTotal(items, { A1: 671, B2: 366, C3: 309, D4: 243 }, 671 + 366 + 309 + 243);
+    expect(fit?.A1).toBe(671);
+    expect(fit?.B2).toBe(366);
+  });
+  it("fitLegendToTotal：合计已对、或无解时不乱改", () => {
+    const items = [{ code: "A1", count: 10, source: "x" }, { code: "B2", count: 20, source: "x" }, { code: "C3", count: 30, source: "x" }];
+    expect(fitLegendToTotal(items, null, 60)?.A1).toBe(10);
+    expect(fitLegendToTotal(items, null, 5_000_000)).toBeNull();
+  });
+  it("fitOrderedCounts：数量不增 + 合计等于总数，从带噪的候选里挑出一组", () => {
+    // 真值 500 300 200 100 50 40 30 20 10 5；其中几个读数被读错（括号读成 1：1300 / 1200）
+    const truth = [500, 300, 200, 100, 50, 40, 30, 20, 10, 5];
+    const reads = [500, 1300, 200, 100, 50, 40, 30, 1200, 10, 5];
+    const cands = reads.map((v, i) => [{ value: v, cost: 0 }, { value: truth[i], cost: 2 }]);
+    expect(fitOrderedCounts(cands, 1255, 20)).toEqual(truth);
+    // 一个色块什么都没读到（null）：由合计和顺序定出
+    const withFree = cands.map((c, i) => (i === 6 ? null : c));
+    const v6 = fitOrderedCounts(withFree, 1255, 20)?.[6] ?? 0;
+    expect(v6 >= 29 && v6 <= 31).toBe(true); // 合计允许 ±1 的误差
   });
 });

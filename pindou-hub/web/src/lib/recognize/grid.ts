@@ -1007,6 +1007,8 @@ export function readGrid(
     legendColors?: Record<string, { r: number; g: number; b: number }> | null;
     /** 格内色号投票（颜色簇编号 → 色号）：覆盖该簇的颜色匹配结果 */
     cellVotes?: Record<number, string> | null;
+    /** 逐格色号（格序号 → 色号）：覆盖该格所属簇的色号（近色组按字形逐格区分）；空串 = 该格是空格（水印压出来的假“有字格”） */
+    cellCodes?: Record<number, string> | null;
     /** 图纸格内印有色号时，按“有无文字”判定空格 / 豆子（默认 true） */
     useInk?: boolean;
     /** 闭集色板：图例色块已找全，格子只在 legendCodes 里匹配；图例之外的色号只有“很大一簇且与所有色块都差很远”才允许 */
@@ -1352,11 +1354,13 @@ export function readGrid(
       if ((empty[ci] && !enclosedLight) || !inkOk) { row.push(null); emptyCells += 1; continue; }
       const c = clusters[ci];
       const cell = cells[idx]!;
-      row.push(c.code);
-      counts[c.code] = (counts[c.code] ?? 0) + 1;
-      const s = stat.get(c.code) ?? { n: 0, de: 0, r: 0, g: 0, b: 0 };
+      const code = opts.cellCodes?.[idx] ?? c.code;
+      if (code === "") { row.push(null); emptyCells += 1; continue; }
+      row.push(code);
+      counts[code] = (counts[code] ?? 0) + 1;
+      const s = stat.get(code) ?? { n: 0, de: 0, r: 0, g: 0, b: 0 };
       s.n += 1; s.de += c.de; s.r += cell.r; s.g += cell.g; s.b += cell.b;
-      stat.set(c.code, s);
+      stat.set(code, s);
     }
     matrix.push(row);
   }

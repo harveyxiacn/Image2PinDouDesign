@@ -330,7 +330,7 @@ export async function readGlyphCodes(
   }
   const votes: Record<number, GlyphVote> = {};
   if (!glyphs.length) return { votes, glyphs: 0 };
-  const allowed = opts.allowed && opts.allowed.length >= 3 ? opts.allowed : MARD_PALETTE.map((c) => c.code);
+  const allowed = opts.allowed && opts.allowed.length >= 2 ? opts.allowed : MARD_PALETTE.map((c) => c.code);
   const pal = new Map(MARD_PALETTE.map((p) => [p.code, p]));
   const labOf = (code: string) => {
     const lc = opts.legendColors?.[code];
@@ -389,4 +389,214 @@ export async function readGlyphCodes(
     votes[id] = { code: best.code, cost: best.cost, textCost: best.textCost, colorDe: best.colorDe, text: (texts.get(id) ?? []).join("|"), margin: second ? second.cost - best.cost : 9 };
   }
   return { votes, glyphs: glyphs.length };
+}
+
+// ── 近色色号逐格区分 ──
+// 白 / 米白 / 浅粉这类色块互相只差 ΔE 2~6：JPEG 与水印下颜色聚类分不开（H2 / H12 / H19 混成一簇或被切碎），
+// 但格内印的字不同（H2 两个字，H12 三个字…）。对这类“近色组”里的有字格，按字形做余弦 k-means，每个字形组整体 OCR 命名。
+
+const SIG_W = 16, SIG_H = 8;
+
+/** 一个格子中央文字带的墨迹签名（L2 归一化），格子基线 = 带内中位亮度。 */
+function cellSignature(lum: Lum, grid: GlyphGrid, f: number, cell: number): Float32Array | null {
+  const pw = grid.pitchX * f, ph = grid.pitchY * f;
+  if (pw < 8 || ph < 8) return null;
+  const ox = (grid.x0 + (cell % grid.cols) * grid.pitchX) * f, oy = (grid.y0 + Math.floor(cell / grid.cols) * grid.pitchY) * f;
+  const raw = new Float32Array(SIG_W * SIG_H);
+  for (let j = 0; j < SIG_H; j += 1) for (let i = 0; i < SIG_W; i += 1) {
+    raw[j * SIG_W + i] = bil(lum, ox + (0.1 + 0.8 * (i + 0.5) / SIG_W) * pw, oy + (0.25 + 0.5 * (j + 0.5) / SIG_H) * ph);
+  }
+  const base = median(raw);
+  const dev = raw.map((v) => Math.abs(v - base));
+  // 3×3 盒式模糊：容忍 1px 内的错位
+  const out = new Float32Array(dev.length);
+  let nn = 0;
+  for (let j = 0; j < SIG_H; j += 1) for (let i = 0; i < SIG_W; i += 1) {
+    let s = 0, c = 0;
+    for (let dj = -1; dj <= 1; dj += 1) for (let di = -1; di <= 1; di += 1) {
+      const jj = j + dj, ii = i + di;
+      if (jj < 0 || ii < 0 || jj >= SIG_H || ii >= SIG_W) continue;
+      s += dev[jj * SIG_W + ii]; c += 1;
+    }
+    out[j * SIG_W + i] = s / c;
+    nn += out[j * SIG_W + i] * out[j * SIG_W + i];
+  }
+  if (nn < 1) return null;
+  const inv = 1 / Math.sqrt(nn);
+  for (let p = 0; p < out.length; p += 1) out[p] *= inv;
+  return out;
+}
+
+const dot = (a: Float32Array, b: Float32Array) => { let s = 0; for (let p = 0; p < a.length; p += 1) s += a[p] * b[p]; return s; };
+
+/** 余弦 k-means：种子取“比较典型”的点里彼此最不像的 k 个。返回每个点的组号。 */
+function cosKMeans(sigs: Float32Array[], k: number): number[] {
+  const n = sigs.length;
+  const mean = new Float32Array(sigs[0].length);
+  for (const s of sigs) for (let p = 0; p < mean.length; p += 1) mean[p] += s[p];
+  const typ = sigs.map((s) => dot(s, mean));
+  const cut = median(typ);
+  const pool = sigs.map((_, i) => i).filter((i) => typ[i] >= cut);
+  const seeds: number[] = [pool.reduce((b, i) => (typ[i] > typ[b] ? i : b), pool[0])];
+  while (seeds.length < k) {
+    let bi = -1, bs = Infinity;
+    for (const i of pool) {
+      const m = Math.max(...seeds.map((s) => dot(sigs[i], sigs[s])));
+      if (m < bs) { bs = m; bi = i; }
+    }
+    if (bi < 0) break;
+    seeds.push(bi);
+  }
+  let cents = seeds.map((s) => Float32Array.from(sigs[s]));
+  const lab = new Array<number>(n).fill(0);
+  for (let it = 0; it < 15; it += 1) {
+    let moved = false;
+    for (let i = 0; i < n; i += 1) {
+      let bj = 0, bs = -Infinity;
+      for (let j = 0; j < cents.length; j += 1) { const s = dot(sigs[i], cents[j]); if (s > bs) { bs = s; bj = j; } }
+      if (lab[i] !== bj) { lab[i] = bj; moved = true; }
+    }
+    cents = cents.map((c, j) => {
+      const m = new Float32Array(c.length);
+      let cnt = 0;
+      for (let i = 0; i < n; i += 1) if (lab[i] === j) { cnt += 1; for (let p = 0; p < m.length; p += 1) m[p] += sigs[i][p]; }
+      if (!cnt) return c;
+      const nr = Math.sqrt(dot(m, m)) || 1;
+      for (let p = 0; p < m.length; p += 1) m[p] /= nr;
+      return m;
+    });
+    if (!moved) break;
+  }
+  return lab;
+}
+
+/** 一组格子平均字形的字宽（占裁剪宽度的比例）；没有可信字形返回 null。 */
+function glyphWidthFrac(lum: Lum, grid: GlyphGrid, f: number, reading: GridReading, cells: number[]): number | null {
+  const ids = pickGlyphCells(reading, { id: 0, rgb: { r: 0, g: 0, b: 0 }, count: cells.length, cells, members: [], colorCode: "" }, 48);
+  if (ids.length < 3) return null;
+  const g = averageGlyph(lum, grid, f, ids);
+  if (!g?.bbox) return null;
+  return (g.bbox.x1 - g.bbox.x0 + 1) / g.w;
+}
+
+/**
+ * 近色组逐格定色号。返回 格序号 → 色号（只含有把握的格子）。
+ * allowed：图例色号全集（必须）。只处理“图例里互相 ΔE2000 ≤ 7、且字数不全相同”的色号组（H2 / H12 / H19：两字与三字），
+ * 组内有字格 ≥ 12 个。字形太小、OCR 读不出时，字数（平均字形的宽度，用已读出的色号簇标定两字 / 三字的宽度）加颜色就能定色号。
+ * votes：已读出的簇 → 色号（用来标定字宽）。
+ */
+export function readNearColorCells(
+  hi: PixelSource, f: number, grid: GlyphGrid, reading: GridReading, votes: Record<number, string>,
+  opts: GlyphReadOptions
+): Record<number, string> {
+  const out: Record<number, string> = {};
+  const allowed = opts.allowed ?? [];
+  if (allowed.length < 3 || !reading.clusters || !reading.cellInk || !reading.cellCluster) return out;
+  const pal = new Map(MARD_PALETTE.map((p) => [p.code, p]));
+  const labOf = (code: string) => { const lc = opts.legendColors?.[code]; return lc ? rgbToLab(lc) : pal.get(code)?.lab ?? null; };
+  // 只处理浅色（白 / 米白 / 浅粉 / 浅灰，L ≥ 80）：浅色之间 JPEG 与水印足以让颜色互相混淆；深色 / 饱和色颜色匹配与簇级 OCR 本来就可靠
+  const codes = allowed.filter((c) => { const l = labOf(c); return l && l.l >= 80; });
+  // 近色组：并查集
+  const par = new Map(codes.map((c) => [c, c]));
+  const find = (c: string): string => { let r = c; while (par.get(r) !== r) r = par.get(r)!; par.set(c, r); return r; };
+  for (let i = 0; i < codes.length; i += 1) for (let j = i + 1; j < codes.length; j += 1) {
+    if (ciede2000(labOf(codes[i])!, labOf(codes[j])!) <= 7) par.set(find(codes[i]), find(codes[j]));
+  }
+  const sets = new Map<string, string[]>();
+  for (const c of codes) { const r = find(c); sets.set(r, [...(sets.get(r) ?? []), c]); }
+  const multi = [...sets.values()].filter((s) => s.length >= 2 && new Set(s.map((c) => c.length)).size >= 2);
+  if (!multi.length) return out;
+  const setOf = new Map<string, number>();
+  multi.forEach((s, i) => s.forEach((c) => setOf.set(c, i)));
+  // 每个簇的归属：最近的图例色号在某个近色组里，且颜色够近
+  const clusterSet = new Map<number, number>();
+  for (const c of reading.clusters) {
+    const lab = rgbToLab(c.rgb);
+    let bd = Infinity, bc = "";
+    for (const code of codes) { const d = ciede2000(lab, labOf(code)!); if (d < bd) { bd = d; bc = code; } }
+    const si = setOf.get(bc);
+    if (si !== undefined && bd <= 6.5) clusterSet.set(c.id, si);
+  }
+  const lum = lumOf(hi);
+  // 标定字宽：已读出色号的簇（排除近色组里的簇），两字 / 三字各取中位数
+  const w2: number[] = [], w3: number[] = [];
+  for (const c of [...reading.clusters].sort((a, b) => b.count - a.count)) {
+    const code = votes[c.id];
+    if (!code || clusterSet.has(c.id) || c.count < 8 || (w2.length >= 8 && w3.length >= 8)) continue;
+    const L = code.length;
+    if ((L !== 2 && L !== 3) || (L === 2 ? w2 : w3).length >= 8) continue;
+    const wf = glyphWidthFrac(lum, grid, f, reading, c.cells);
+    if (wf !== null) (L === 2 ? w2 : w3).push(wf);
+  }
+  if (w2.length < 2 || w3.length < 2) return out;
+  const m2 = median(w2), m3 = median(w3);
+  if (m3 - m2 < 0.08) return out;
+  const thr = (m2 + m3) / 2;
+  for (let si = 0; si < multi.length; si += 1) {
+    const cells: number[] = [];
+    for (const c of reading.clusters) {
+      if (clusterSet.get(c.id) !== si) continue;
+      for (const i of c.cells) if (reading.cellInk[i] && !reading.backgroundMask?.[i]) cells.push(i);
+    }
+    if (cells.length < 12) continue;
+    const sigs: Float32Array[] = [], used: number[] = [];
+    for (const i of cells) { const s = cellSignature(lum, grid, f, i); if (s) { sigs.push(s); used.push(i); } }
+    if (sigs.length < 12) continue;
+    const k = Math.min(4, multi[si].length + 1);
+    const lab = cosKMeans(sigs, k);
+    for (let j = 0; j < k; j += 1) {
+      const gc = used.filter((_, t) => lab[t] === j);
+      if (gc.length < 3) continue;
+      const wf = glyphWidthFrac(lum, grid, f, reading, gc);
+      if (wf === null) continue;
+      const nc = wf > thr ? 3 : 2;
+      let r = 0, g = 0, b = 0;
+      for (const i of gc) { const cl = reading.clusters[reading.cellCluster[i]]; r += cl.rgb.r; g += cl.rgb.g; b += cl.rgb.b; }
+            // 同字数的候选只差在白 / 米白的细微色调上：RGB 距离（对偏黄 / 偏粉的色调更敏感）比 ΔE2000 拉得开
+      const rgb0 = { r: r / gc.length, g: g / gc.length, b: b / gc.length };
+      const rgbOf = (c: string) => opts.legendColors?.[c] ?? pal.get(c)?.rgb ?? { r: 0, g: 0, b: 0 };
+      const cand = multi[si].filter((c) => c.length === nc).map((c) => { const q = rgbOf(c); return { c, de: Math.hypot(rgb0.r - q.r, rgb0.g - q.g, rgb0.b - q.b) }; }).sort((x, y) => x.de - y.de);
+      if (!cand.length || cand[0].de > 20) continue;
+      if (cand.length > 1 && cand[1].de < 1.3 * cand[0].de) continue;
+      for (const i of gc) out[i] = cand[0].c;
+    }
+  }
+  return out;
+}
+
+/**
+ * 水印 / 杂物压在空白格上造成的“假有字格”：浅色（白）簇里的有字格，字形与簇里多数格子的字形完全不像 → 判为空格。
+ * 返回要当成空格的格序号。
+ */
+export function outlierInkCells(hi: PixelSource, f: number, grid: GlyphGrid, reading: GridReading): number[] {
+  const out: number[] = [];
+  if (!reading.clusters || !reading.cellInk) return out;
+  const lum = lumOf(hi);
+  for (const c of reading.clusters) {
+    const lab = rgbToLab(c.rgb);
+    if (c.empty || lab.l < 88 || Math.hypot(lab.a, lab.b) > 8) continue;
+    const cells = c.cells.filter((i) => reading.cellInk![i] && !reading.backgroundMask?.[i]);
+    if (cells.length < 8) continue;
+    const sigs: Float32Array[] = [], used: number[] = [];
+    for (const i of cells) { const s = cellSignature(lum, grid, f, i); if (s) { sigs.push(s); used.push(i); } }
+    if (sigs.length < 8) continue;
+    let cen = new Float32Array(sigs[0].length);
+    for (const s of sigs) for (let p = 0; p < cen.length; p += 1) cen[p] += s[p];
+    let nr = Math.sqrt(dot(cen, cen)) || 1;
+    cen = cen.map((v) => v / nr);
+    for (let it = 0; it < 3; it += 1) {
+      const m = new Float32Array(cen.length);
+      for (const s of sigs) if (dot(s, cen) >= 0.5) for (let p = 0; p < m.length; p += 1) m[p] += s[p];
+      nr = Math.sqrt(dot(m, m));
+      if (nr < 1e-6) break;
+      cen = m.map((v) => v / nr);
+    }
+    const cs = sigs.map((s) => dot(s, cen));
+    // 多数格子字形高度一致（中位数 ≥ 0.9）、只有极少数（≤ 20%）明显不像（< 0.75）才算杂物
+    if (median(cs) < 0.9) continue;
+    const bad = used.filter((_, t) => cs[t] < 0.75);
+    if (bad.length > 0.2 * used.length) continue;
+    out.push(...bad);
+  }
+  return out;
 }

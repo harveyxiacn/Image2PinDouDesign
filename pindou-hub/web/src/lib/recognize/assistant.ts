@@ -6,8 +6,8 @@ import { refineLattice } from "./lattice";
 import { trimRulerBands } from "./ruler";
 import { assignBelowBands, cellCodeCandidates, chipStack, findChips, findStatedTotal, parseChipTexts, parseHeaderText, parseLegendWords } from "./legend";
 import type { HeaderInfo } from "./legend";
-import { readChipLegend } from "./legendchips";
-import { reconcileCounts } from "./reconcile";
+import { fitEntriesToTotal, readChipLegend } from "./legendchips";
+import { fitLegendToTotal, reconcileCounts } from "./reconcile";
 import type { ReconcileResult } from "./reconcile";
 import { enhanceImage, summarizeEnhance, assessQuality } from "../enhance";
 import type { EnhanceResult } from "../enhance";
@@ -287,7 +287,8 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
             legendCodes: legend ? legendCodeList(legend) : null,
             closedPalette: closedOf(legend),
             legendColors: legend?.colors ?? null,
-            cellVotes: r.votes
+            cellVotes: r.votes,
+            cellCodes: r.cellCodes ?? null
           });
           const overrides = (next.clusters ?? []).filter((c) => c.overridden).length;
           // 整体数量差异大得离谱（如投票把背景簇当成豆子）时不采用
@@ -855,7 +856,47 @@ function reconcileLegend(legend: LegendReading, reading: GridReading, statedTota
   const grid = reading.counts;
   // 图例各色相加恰好等于图上写的总数：数字整体可信，网格数（颜色相近的色号会互相串）不能再去“校正”
   const legendSum = Object.values(legend.counts).reduce((a, b) => a + b, 0);
-  if (statedTotal && Math.abs(legendSum - statedTotal) <= Math.max(1, Math.round(0.002 * statedTotal))) return 0;
+  if (statedTotal && Math.abs(legendSum - statedTotal) <= Math.max(1, Math.round(0.002 * statedTotal))) {
+    // 合计在 0.2% 以内但不是恰好相等：差几颗多半是某个数字读错一位（海马濑人 C16 的 11 读成 17）。
+    // 只在“改一个数字就恰好凑成总数、且改成的值有网格数 / 备选读法佐证”时才改，否则保持原样
+    if (legendSum !== statedTotal) {
+      const fit = fitLegendToTotal(legend.items, reading.counts, statedTotal, 2, 1.1);
+      if (fit) {
+        let n = 0;
+        for (const it of legend.items) if (fit[it.code] !== undefined && fit[it.code] !== it.count) { it.count = fit[it.code]; legend.counts[it.code] = it.count; it.votes = 0; n += 1; }
+        return n;
+      }
+    }
+    return 0;
+  }
+  // 合计与图上写的总数对不上：在各色号的读数 / 备选 / 常见 OCR 误读变体里找“合计恰为总数、改动最少”的组合
+  if (statedTotal) {
+    const fit = fitLegendToTotal(legend.items, reading.counts, statedTotal);
+    if (fit) {
+      let n = 0;
+      for (const it of legend.items) if (fit[it.code] !== undefined && fit[it.code] !== it.count) { it.count = fit[it.code]; legend.counts[it.code] = it.count; it.votes = 0; n += 1; }
+      if (n) return n;
+    }
+    // 数量从大到小排列的图例、读得很乱（括号读成 1 等）：用“数量不增 + 合计 = 总数”定出每个色块的数
+    const ent = (legend as Partial<import("./legendchips").ChipLegendResult>).entries;
+    if (ent && ent.length >= 8) {
+      const fit = fitEntriesToTotal(ent, statedTotal);
+      if (fit) {
+        let n = 0;
+        ent.forEach((e, i) => {
+          const v = fit[i];
+          if (v === e.count) return;
+          const it = legend.items.find((x) => x.code === e.code);
+          if (it) { it.count = v; it.votes = 0; } else legend.items.push({ code: e.code, count: v, source: "色块图例", votes: 0 });
+          legend.counts[e.code] = v;
+          const pe = legend.palette?.find((x) => x.code === e.code);
+          if (pe) pe.count = v;
+          n += 1;
+        });
+        if (n) return n;
+      }
+    }
+  }
   // 网格整体可信吗：图例与网格在绝大多数色号上吻合（≥ 85%）时，个别不吻合的多半是图例数字读错；
   // 大面积对不上（颜色相近的色号互相串、背景被误并）时，网格数不可信，不能拿它推翻图例上读到的数
   const cmp = legend.items.filter((it) => (reading.counts[it.code] ?? 0) >= 5);
@@ -930,7 +971,7 @@ function pickCells(reading: GridReading, clusterId: number, n: number, used: Set
 async function readCellCodes(
   src: PixelSource, hi: PixelSource, grid: GridDetection, reading: GridReading, signal: AbortSignal,
   gopts: { allowed?: string[] | null; legendColors?: Record<string, { r: number; g: number; b: number }> | null } = {}
-): Promise<{ votes: Record<number, string>; total: number; recovered: number; glyph: number; merged: number }> {
+): Promise<{ votes: Record<number, string>; total: number; recovered: number; glyph: number; merged: number; cellCodes?: Record<number, string> }> {
   const { ocrWords } = await import("./ocr");
   const f = hi.width / src.width;
   const clusters = reading.clusters!;
@@ -1064,7 +1105,20 @@ async function readCellCodes(
       if (bi >= 0 && bd <= 5) { votes[c.id] = votes[bi]; merged += 1; }
     }
   }
-  return { votes, total: Math.max(eligible.length, Object.keys(votes).length - merged), recovered, glyph: glyphGroups, merged };
+  // 4) 近色组（白 / 米白 / 浅粉）：颜色分不开，按字形逐格区分
+  let cellCodes: Record<number, string> | undefined;
+  if (gopts.allowed && gopts.allowed.length >= 3) {
+    try {
+      const { readNearColorCells } = await import("./glyph");
+      const cc = readNearColorCells(hi, f, grid, reading, votes, gopts);
+      const { outlierInkCells } = await import("./glyph");
+      for (const i of outlierInkCells(hi, f, grid, reading)) cc[i] = "";
+      if (Object.keys(cc).length) cellCodes = cc;
+    } catch (err) {
+      if (signal.aborted) throw err;
+    }
+  }
+  return { votes, total: Math.max(eligible.length, Object.keys(votes).length - merged), recovered, glyph: glyphGroups, merged, cellCodes };
 }
 
 /**

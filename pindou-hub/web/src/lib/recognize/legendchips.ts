@@ -7,11 +7,14 @@ import type { PixelSource } from "@engine/types";
 import { MARD_PALETTE } from "@engine/palette";
 import { findFlatBlobs, findStatedTotal, chipStack, cellCodeCandidates, nearestCodesByColor, countAlternatives, parseCodeCountText, parseCountPattern, validateCodeCandidates } from "./legend";
 import type { Chip } from "./legend";
+import { fitOrderedCounts } from "./reconcile";
 import type { LegendItem, LegendReading } from "./types";
 
 const VALID = new Set(MARD_PALETTE.map((c) => c.code));
 const PAL = new Map(MARD_PALETTE.map((c) => [c.code, c]));
 const colorOf = (code: string) => PAL.get(code)?.rgb ?? null;
+/** OCR 常把这些数字互相读混 */
+const SWAP_DIGITS: Record<string, string[]> = { "0": ["8", "6"], "1": ["7"], "3": ["8"], "5": ["6"], "6": ["5", "8", "0"], "7": ["1"], "8": ["3", "0", "6"], "9": ["8"] };
 
 type Rc = { x: number; y: number; width: number; height: number };
 type Entry = {
@@ -46,7 +49,7 @@ export type ChipLegendResult = LegendReading & {
   /** 色号由文字读出（非按颜色猜）且数量也读到的条目数——判断这次读取是否可信 */
   confirmed: number;
   /** 每个条目的来源 / 把握（给 reconcile 用） */
-  entries: Array<{ code: string; count: number | null; countAlts: number[]; codeAlts: string[]; dE: number | null; guessed: boolean; where: string | null }>;
+  entries: Array<{ code: string; count: number | null; countAlts: number[]; codeAlts: string[]; dE: number | null; guessed: boolean; where: string | null; /** 各遍识别读到的数量候选（带代价），没读到为 null；给“数量不增 + 合计 = 总数”的补救用 */ cands?: Array<{ value: number; cost: number }> | null }>;
 };
 
 function rowText(words: Array<{ text: string; bbox: { x0: number; y0: number; x1: number; y1: number } }>, y0: number, y1: number): string {
@@ -434,6 +437,16 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
           if (best && best.code !== e.code) { e.codeAlts = [best.code, ...e.codeAlts.filter((c) => c !== best.code)]; e.code = best.code; e.dE = best.dE; }
         }
       }
+      // 形近数字读混（F6 读成 F8、C20 读成 C28）：色号颜色对得不够好（ΔE > 5）时，把其中一位换成形近的数字，若得到的色号颜色吻合得多（ΔE 小 4 以上）就换
+      if (e.code && !e.synthetic && (e.dE ?? 0) > 5) {
+        const vars = new Set<string>();
+        const m = /^([A-Z]+)(\d+)$/.exec(e.code);
+        if (m) {
+          for (let i = 0; i < m[2].length; i += 1) for (const p of SWAP_DIGITS[m[2][i]] ?? []) { const v = m[1] + m[2].slice(0, i) + p + m[2].slice(i + 1); if (VALID.has(v) && !(i === 0 && p === "0")) vars.add(v); }
+        }
+        const best = nearestCodesByColor(rgb, vars, colorOf, 6, 1)[0];
+        if (best && best.dE + 4 < (e.dE ?? 99)) { e.codeAlts = [best.code, ...e.codeAlts.filter((c) => c !== best.code)]; e.code = best.code; e.dE = best.dE; }
+      }
       // 读出的某段字多了一笔（“C239” 其实是 C29）：去掉一个字符后得到的色号若与色块颜色吻合得多，取它（C9 与 C29 都是蓝，靠颜色区分）
       if (!e.synthetic && (e.code === null || (e.dE ?? 0) > 4)) {
         const vars = new Set<string>();
@@ -456,8 +469,22 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   }
   // 色块里是两行字（上 色号 / 下 ×数量）：分行各读一遍（色号白名单 / 数字白名单），比整块混读准得多
   const twoLine = new Map<Entry, { top: Rc; bottom: Rc }>();
-  for (const e of entries) { if (e.synthetic) continue; const sp = splitTwoLines(img, e.chip); if (sp) twoLine.set(e, sp); }
+  for (const e of entries) { const sp = splitTwoLines(img, e.chip); if (sp && !(e.synthetic && sp.top.width < 0.3 * medW)) twoLine.set(e, sp); }
   if (twoLine.size >= Math.max(3, 0.5 * entries.filter((e) => !e.synthetic).length)) {
+    // 个别色块没切出两行（水印压在字上 / 白色隐形块太淡）：按其余色块里“上下两行字相对色块的位置”（取中位数）补上，版式是一致的
+    {
+      const med = (a: number[]) => [...a].sort((x, y) => x - y)[a.length >> 1];
+      const geo = (pick: (sp: { top: Rc; bottom: Rc }) => Rc) => {
+        const rs = [...twoLine.entries()].map(([e, sp]) => ({ dx: pick(sp).x - e.chip.x, dy: pick(sp).y - e.chip.y, w: pick(sp).width, h: pick(sp).height }));
+        return { dx: med(rs.map((r) => r.dx)), dy: med(rs.map((r) => r.dy)), w: med(rs.map((r) => r.w)), h: med(rs.map((r) => r.h)) };
+      };
+      const gt = geo((sp) => sp.top), gb = geo((sp) => sp.bottom);
+      for (const e of entries) {
+        if (twoLine.has(e) || Math.abs(e.chip.height - medH) > 0.15 * medH || Math.abs(e.chip.width - medW) > 0.2 * medW) continue;
+        const at = (g: typeof gt): Rc => ({ x: e.chip.x + g.dx, y: e.chip.y + g.dy, width: Math.min(g.w, e.chip.width - g.dx), height: g.h });
+        twoLine.set(e, { top: at(gt), bottom: at(gb) });
+      }
+    }
     const list = [...twoLine.keys()];
     for (const e of entries) e.codeTexts.length = 0;
     const mk2 = (sub: Entry[], pick: (sp: { top: Rc; bottom: Rc }) => Rc, tag: (e: Entry) => number) => sub.map((e) => { const r = pick(twoLine.get(e)!); return { x: r.x, y: r.y, width: r.width, height: r.height, r: e.chip.r, g: e.chip.g, b: e.chip.b, bg: [bg[0], bg[1], bg[2]] as [number, number, number], tag: tag(e) }; });
@@ -663,7 +690,7 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     const rgb = e.synthetic ? (colorOf(e.code) ?? { r: e.chip.r, g: e.chip.g, b: e.chip.b }) : { r: e.chip.r, g: e.chip.g, b: e.chip.b };
     colors[e.code] = rgb;
     palette.push({ code: e.code, rgb, count: e.count, ...(e.guessed ? { guessed: true } : {}) });
-    detail.push({ code: e.code, count: e.count, countAlts: e.countAlts, codeAlts: e.codeAlts, dE: e.dE, guessed: e.guessed, where: e.where });
+    detail.push({ code: e.code, count: e.count, countAlts: e.countAlts, codeAlts: e.codeAlts, dE: e.dE, guessed: e.guessed, where: e.where, cands: entryCands(e) });
     if (e.count !== null && e.count > 0) {
       items.push({ code: e.code, count: e.count, source: "色块图例", votes: e.votes, ...(e.countAlts.length ? { alts: e.countAlts } : {}) });
       counts[e.code] = e.count;
@@ -685,6 +712,66 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     }
   }
   return { items, counts, statedTotal, rawText: raw, colors, palette, chipCount: entries.length, confirmed: entries.filter((e) => e.code && !e.guessed && e.count !== null).length, entries: detail };
+}
+
+/** “H12(416)”之类整段文字里数量的部分（数字串）：有“(”取最后一个“(”之后，否则去掉开头的色号（可能只读到一半）后取数字。 */
+function labelDigits(text: string, code: string | null): string | null {
+  const t = text.normalize("NFKC").toUpperCase();
+  const lp = t.lastIndexOf("(");
+  if (lp >= 0) { const d = t.slice(lp + 1).replace(/[^0-9]/g, ""); return d || null; }
+  if (!code) return null;
+  const letter = code.match(/^[A-Z]+/)?.[0] ?? "", dd = code.slice(letter.length);
+  for (let k = dd.length; k >= 1; k -= 1) {
+    const i = t.indexOf(letter + dd.slice(0, k));
+    if (i >= 0) { const d = t.slice(i + letter.length + k).replace(/[^0-9]/g, ""); return d || null; }
+  }
+  return null;
+}
+
+/** 一个数字串改一位（替换 / 插入 / 删除）能得到的数。 */
+function oneEdit(n: number): number[] {
+  const s = String(n);
+  const out = new Set<number>();
+  for (let i = 0; i < s.length; i += 1) {
+    for (let d = 0; d <= 9; d += 1) if (String(d) !== s[i] && !(i === 0 && d === 0)) out.add(Number(s.slice(0, i) + d + s.slice(i + 1)));
+    if (s.length > 1) out.add(Number(s.slice(0, i) + s.slice(i + 1)));
+  }
+  for (let i = 0; i <= s.length; i += 1) for (let d = 0; d <= 9; d += 1) if (!(i === 0 && d === 0)) out.add(Number(s.slice(0, i) + d + s.slice(i)));
+  out.delete(n);
+  return [...out].filter((v) => v >= 1);
+}
+
+/** 每个色块的数量候选读数（各遍识别读到的、括号误读成 1 的去头变体、改一位的变体）及代价；一个数都没读到返回 null。 */
+function entryCands(e: Entry): Array<{ value: number; cost: number }> | null {
+  const w = new Map<number, number>();
+  let W = 0;
+  const add = (v: number, wt: number) => { if (v >= 1 && v <= 20000) w.set(v, (w.get(v) ?? 0) + wt); };
+  const addRead = (v: number) => { W += 1; add(v, 1); if (v >= 100 && String(v)[0] === "1") add(Number(String(v).slice(1)), 0.6); };
+  for (const n of e.splitCounts) addRead(n);
+  for (const t of e.countTexts) { const n = parseCountPattern(t); if (n !== null) addRead(n); }
+  for (const t of e.codeTexts) { const d = labelDigits(t, e.code); if (d && d.length <= 5) addRead(Number(d)); }
+  if (!w.size) return null;
+  const out = new Map<number, number>();
+  const put = (v: number, c: number) => { if (v >= 1 && (out.get(v) ?? 99) > c) out.set(v, c); };
+  for (const [v, x] of w) put(v, Math.max(0, 1 - x / Math.max(1, W)));
+  // 读数的一位之差：只对得票最高的两个读数生成，其余不再展开（候选数太多会拖慢动态规划）
+  for (const [v] of [...w.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2)) for (const u of oneEdit(v)) put(u, 2);
+  return [...out.entries()].map(([value, cost]) => ({ value, cost }));
+}
+
+/**
+ * 数量不增的图例（happy拼豆嘛 等）：各色块的候选读数里，挑“数量不增、合计恰为图上总数”的一组。
+ * 返回与 entries 同序的数量；排列不像从大到小、或总代价太高（读数太离谱）返回 null。
+ */
+export function fitEntriesToTotal(entries: ChipLegendResult["entries"], total: number): number[] | null {
+  if (entries.length < 8 || entries.some((e) => e.cands === undefined)) return null;
+  const cands = entries.map((e) => e.cands ?? null);
+  // 排列须大体是从大到小（读得最准的那个读数序列有一半以上相邻对不增）才用不增约束
+  const top = cands.map((c) => (c && c.length ? [...c].sort((a, b) => a.cost - b.cost)[0].value : null));
+  let ok = 0, tot = 0;
+  for (let i = 1; i < top.length; i += 1) if (top[i] !== null && top[i - 1] !== null) { tot += 1; if ((top[i] as number) <= (top[i - 1] as number)) ok += 1; }
+  if (tot < 6 || ok < 0.5 * tot) return null;
+  return fitOrderedCounts(cands, total, 0.75 * entries.length + 3);
 }
 
 /** 至少有两遍读出同一个数（非空）：读数已经可信，不必再多读 */
