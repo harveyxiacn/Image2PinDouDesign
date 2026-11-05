@@ -6,6 +6,7 @@ import { hubInfo, aiVision } from "../../lib/sync";
 import { loadPixelSource, saveImage } from "../../lib/images";
 import { METHOD_LABEL, totalOf, type Counts, type PatternStatus } from "../../lib/model";
 import { headerChecks } from "../../lib/batch";
+import { checkSize } from "../../lib/recognize/sizecheck";
 import { normalizeCode } from "../../lib/palette";
 import { DiffNumber, Icon, fmt, navigate, prefersReducedMotion, toast } from "../ui";
 import ImageDrop from "./ImageDrop";
@@ -83,6 +84,9 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const [hdUrl, setHdUrl] = useState<string | null>(null);
   const [useHdSource, setUseHdSource] = useState(false);
   const [tipsOpen, setTipsOpen] = useState(false);
+  const [sizeDismissed, setSizeDismissed] = useState<AnalyzeResult | null>(null);
+  const [ranForced, setRanForced] = useState(false);
+  const colsInput = useRef<HTMLInputElement>(null);
   const stitchInput = useRef<HTMLInputElement>(null);
   const enhRef = useRef<EnhanceResult | null>(null);
   const modeRef = useRef<HdMode>(hdMode);
@@ -108,6 +112,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
     try {
       const forceCols = Number(opts.cols) > 0 ? Math.round(Number(opts.cols)) : null;
       const forceRows = Number(opts.rows) > 0 ? Math.round(Number(opts.rows)) : null;
+      setRanForced(forceCols != null || forceRows != null);
       const res = await analyzePattern(px, {
         region: opts.region, ocr: opts.ocr || opts.cellCodes, legendOcr: opts.ocr, cellCodes: opts.cellCodes, treatBackgroundAsEmpty: opts.bgEmpty, forceCols, forceRows, signal: ctl.signal,
         enhance: modeRef.current === "off" ? "off" : "auto", enhanced: modeRef.current === "off" ? null : enhRef.current,
@@ -205,6 +210,10 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   };
 
   const rerun = () => void run({ region, ocr, cellCodes, bgEmpty, cols, rows });
+  const rerunWithSize = (sz: { cols: number; rows: number }) => {
+    setCols(String(sz.cols)); setRows(String(sz.rows));
+    void run({ region, ocr, cellCodes, bgEmpty, cols: String(sz.cols), rows: String(sz.rows) });
+  };
 
   const diff = useMemo<DiffMap | null>(() => {
     if (!result || !result.diff.length) return null;
@@ -271,6 +280,8 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const pick = (code: string) => setFocus((f) => (f === code ? null : code));
   const checks = result ? headerChecks(result) : [];
   const bgCount = result?.grid?.backgroundCells ?? 0;
+  // 尺寸存疑提示：识别中、用户已手动指定尺寸、或点过“尺寸没错”时不显示（换新结果自动恢复）
+  const sizeAsk = result && !notChart && !running && !ranForced && sizeDismissed !== result ? checkSize(result) : null;
   return (
     <div className="ap-grid">
       <section className="stack">
@@ -303,7 +314,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
           <label className="pt-check"><input type="checkbox" checked={cellCodes} onChange={(e) => setCellCodes(e.target.checked)} />读取格内色号（图纸每格印了色号时更准，白色豆也不会漏）</label>
           <label className="pt-check"><input type="checkbox" checked={bgEmpty} onChange={(e) => setBgEmpty(e.target.checked)} />背景格不计数</label>
           <div className="row">
-            <label className="field" style={{ width: 84 }}><span>列数</span><input className="input num" inputMode="numeric" placeholder="自动" value={cols} onChange={(e) => setCols(e.target.value)} /></label>
+            <label className="field" style={{ width: 84 }}><span>列数</span><input ref={colsInput} className="input num" inputMode="numeric" placeholder="自动" value={cols} onChange={(e) => setCols(e.target.value)} /></label>
             <label className="field" style={{ width: 84 }}><span>行数</span><input className="input num" inputMode="numeric" placeholder="自动" value={rows} onChange={(e) => setRows(e.target.value)} /></label>
             <button className="btn btn-primary" style={{ alignSelf: "flex-end" }} onClick={rerun} disabled={running || !pixels}>{running ? "识别中…" : "重新识别"}</button>
           </div>
@@ -340,6 +351,16 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
               </div>
             </div>
             {result.method === "none" ? <div className="notice iron" style={{ margin: 12 }}>没有读到图例，也没能确定网格。可以框选图纸区域、手动填列数和行数后重新识别，或直接在下表手动添加。</div> : null}
+            {sizeAsk ? (
+              <div className="notice st-hint" role="status" data-testid="size-check" style={{ margin: 12 }}>
+                <span><b>请确认尺寸：</b>{sizeAsk.reason}。</span>
+                <span className="row">
+                  {sizeAsk.suggested ? <button type="button" className="btn btn-sm btn-primary" onClick={() => rerunWithSize(sizeAsk.suggested!)}>按 {sizeAsk.suggested.cols}×{sizeAsk.suggested.rows} 重新识别</button> : null}
+                  <button type="button" className="btn btn-sm" onClick={() => colsInput.current?.focus()}>手动修改</button>
+                  <button type="button" className="btn btn-sm btn-ghost" onClick={() => setSizeDismissed(result)}>尺寸没错</button>
+                </span>
+              </div>
+            ) : null}
             {result.paletteWarning ? <div className="notice" role="note" style={{ margin: 12 }}><b>色号体系提示：</b>{result.paletteWarning}</div> : null}
             {checks.length ? (
               <div className="pt-header" aria-label="图上标注核对">

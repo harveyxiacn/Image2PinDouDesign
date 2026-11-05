@@ -174,6 +174,8 @@ export async function evaluate(mods, { dir, truth, only, ocr = true, lowres = 0,
       rec.counts = res.counts;
       rec.total = sumOf(res.counts);
       rec.legendTotal = res.legend ? sumOf(res.legend.counts) : null;
+      rec.statedTotal = res.legend?.statedTotal ?? null;
+      rec.sizeCheck = mods.checkSize ? mods.checkSize(res)?.reason ?? null : null;
       rec.paletteWarning = res.paletteWarning;
       rec.cellCodesRead = res.cellCodesRead;
       rec.cellNames = res.cellCodeStats?.names ?? null;
@@ -212,13 +214,13 @@ async function loadViaVite() {
     optimizeDeps: { noDiscovery: true, include: [] }
   });
   const ld = (p) => server.ssrLoadModule(p);
-  const [assistant, ocr, fx, legend] = await Promise.all([ld("/src/lib/recognize/assistant.ts"), ld("/src/lib/recognize/ocr.ts"), ld("/src/test/fixtures.ts"), ld("/src/lib/recognize/legend.ts")]);
+  const [assistant, ocr, fx, legend, sizecheck] = await Promise.all([ld("/src/lib/recognize/assistant.ts"), ld("/src/lib/recognize/ocr.ts"), ld("/src/test/fixtures.ts"), ld("/src/lib/recognize/legend.ts"), ld("/src/lib/recognize/sizecheck.ts")]);
   return {
     server,
     mods: {
       analyzePattern: assistant.analyzePattern, setOcrBackend: ocr.setOcrBackend, terminateOcr: ocr.terminateOcr,
       decodePng: fx.decodePng, encodePng: fx.encodePng, downscaleArea: fx.downscaleArea, createNodeOcrBackend: fx.createNodeOcrBackend,
-      normalizeCode: legend.normalizeCode
+      normalizeCode: legend.normalizeCode, checkSize: sizecheck.checkSize
     }
   };
 }
