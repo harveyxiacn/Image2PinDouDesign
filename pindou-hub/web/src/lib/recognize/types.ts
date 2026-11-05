@@ -17,6 +17,8 @@ export type GridDetection = {
   rows: number;
   /** 0–1，越高越像规则网格 */
   score: number;
+  /** 细线看不见、靠“每 5 格一条粗线”结构确认的低清网格（本身就是规整网格的证据） */
+  faint?: boolean;
 };
 
 export type CellColorStat = {

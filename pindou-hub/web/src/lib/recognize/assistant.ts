@@ -217,7 +217,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     }
     // 低清放大后（rf > 1）格子被插值抹糊、JPEG 噪点又把颜色簇推到几百个，纯色占比 / 簇数都不可信；
     // 但能走到这里说明细格线已经被边缘能量证实（格线上有边缘、半格处没有），这本身就是规整网格的证据
-    const plausible = !!r0 && (rf > 1 || r0.inkChart || (r0.flatFrac ?? 0) >= 0.55 && (r0.clusters?.length ?? 999) <= 150);
+    const plausible = !!r0 && (rf > 1 || !!grid?.faint || r0.inkChart || (r0.flatFrac ?? 0) >= 0.55 && (r0.clusters?.length ?? 999) <= 150);
     // 只有 1–2 个“色号 + 数字”的零散文字（插画里的字、水印）不足以证明是图纸：没网格、没抬头时，图例至少要 3 色。
     const legendEvidence = !!legend && (!!grid || legend.items.length >= 3);
     const chartLike = !!header || legendEvidence || options.forceCols || options.forceRows || (grid && (r0 ? plausible : true));
@@ -376,7 +376,8 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     const gridDeAll = reading.colors.reduce((s, c) => s + c.deltaE * c.count, 0) / Math.max(1, gtAll);
     const gridTrusted = reading.grid.score >= 0.7 && (reading.flatFrac ?? 0) >= 0.7 && gridDeAll <= 4;
     // 图例“只读了个大概”的程度：没读清的数量 + 漏读的色号 + 被校正的数字，占全部色号的比例
-    const patchy = (legendPatchy + added.length) / Math.max(1, codes.size) >= 0.35;
+    const patchRatio = (legendPatchy + added.length) / Math.max(1, codes.size);
+    const patchy = patchRatio >= 0.35;
     const codesStrong = !!cellCodesRead && !!cellCodeStats && cellCodeStats.read / Math.max(1, cellCodeStats.clusters) >= 0.8;
     const agreement = Math.max(0, 1 - abs / Math.max(lt, gt, 1));
     if (added.length) step("legend-missing", "补全图例", "warn", `图例漏读 ${added.length} 个色号（${added.join("、")}），已按网格统计补上`);
@@ -397,7 +398,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       // 两边总数对不上：谁更可信？有总数（抬头 / 图上标注）就看谁更接近；没有就看网格是否“可信”
       // （规整、平涂、平均色差小）——小图里图例数字 OCR 常读错位，而网格计数是确定性的
       const target = header?.total ?? legendUsed.statedTotal ?? null;
-      const useGrid = target ? Math.abs(gt - target) < Math.abs(lt - target) : gridTrusted || (codesStrong && patchy);
+      const useGrid = target ? Math.abs(gt - target) < Math.abs(lt - target) : gridTrusted || (codesStrong && patchy) || patchRatio >= 0.6;
       if (useGrid) {
         counts = { ...reading.counts };
         method = agreement >= 0.5 ? "legend+grid" : "grid";

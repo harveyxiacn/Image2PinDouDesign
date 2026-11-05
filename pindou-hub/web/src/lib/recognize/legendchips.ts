@@ -5,7 +5,7 @@
 // 相对色块底色二值化，深浅两种字都行），各识别一遍（带白名单）。色号用色块颜色与色卡色的 ΔE 校验，数量保留多次识别的备选。
 import type { PixelSource } from "@engine/types";
 import { MARD_PALETTE } from "@engine/palette";
-import { findFlatBlobs, chipStack, cellCodeCandidates, nearestCodesByColor, parseCodeCountText, parseCountPattern, validateCodeCandidates } from "./legend";
+import { findFlatBlobs, findStatedTotal, chipStack, cellCodeCandidates, nearestCodesByColor, parseCodeCountText, parseCountPattern, validateCodeCandidates } from "./legend";
 import type { Chip } from "./legend";
 import type { LegendItem, LegendReading } from "./types";
 
@@ -111,7 +111,7 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   const { ocrWords } = await import("./ocr");
   const t0 = performance.now();
   // 找到了色块但读下去发现不是“色块 + 数量”图例：返回空结果（chipCount > 0），调用方不必再换个裁剪重试
-  const gaveUp = (): ChipLegendResult => ({ items: [], counts: {}, statedTotal: null, rawText: "", chipCount: 1, confirmed: 0, entries: [] });
+  const gaveUp = (): ChipLegendResult => ({ items: [], counts: {}, statedTotal: null, rawText: "", chipCount: 1, confirmed: 0, entries: [] } as ChipLegendResult);
   // 贴着裁剪边缘的块是被截断的东西（图纸最后一行格子、标尺），不是图例色块
   const blobs = findFlatBlobs(img).filter((b) => b.x > 0 && b.y > 0 && b.x + b.width < img.width && b.y + b.height < img.height);
   const chips0 = dominantChips(blobs);
@@ -229,6 +229,11 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
       const ok = validateCodeCandidates(cands, rgb, colorOf, e.synthetic ? 14 : 11);
       e.codeAlts = ok.map((o) => o.code);
       if (ok.length) { e.code = ok[0].code; e.dE = ok[0].dE; }
+      // 读到的色号是某个更长色号的前缀（“D1”其实是 D11 掉了一笔），而色块颜色与更长的那个吻合得多：取更长的
+      if (e.code && !e.synthetic && (e.dE ?? 0) > 3) {
+        const longer = nearestCodesByColor(rgb, [...VALID].filter((c) => c.length > e.code!.length && c.startsWith(e.code!)), colorOf, 3, 1)[0];
+        if (longer) { e.codeAlts = [longer.code, ...e.codeAlts.filter((c) => c !== longer.code)]; e.code = longer.code; e.dE = longer.dE; }
+      }
     }
   };
   // 第一遍不加白名单：色块里常写“A1 · 154 颗”，白名单会把分隔符丢掉让色号和数量连成一串；不加白名单时分隔符能保留
@@ -254,12 +259,21 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
       for (const e of entries) e.code = null;
       resolveCodes(entries);
     }
+    // 数量读数互相矛盾（或一个都没读到）的块：换几组参数再读几遍，多数票
+    const countVals = (e: Entry) => e.countTexts.map((t) => parseCountPattern(t)).filter((n): n is number => n !== null);
+    const weak = list.filter((e) => { const v = countVals(e); return v.length < 2 || new Set(v).size > 1; });
+    if (weak.length) {
+      for (const [target, thr, bin] of [[64, 0.35, true], [24, -1, false], [44, 0.3, false], [56, 0.6, true]] as const) {
+        const st2 = chipStack(img, weak.map((e) => { const r = twoLine.get(e)!.bottom; return { x: r.x, y: r.y, width: r.width, height: r.height, r: e.chip.r, g: e.chip.g, b: e.chip.b, bg: [bg[0], bg[1], bg[2]] as [number, number, number], tag: weak.indexOf(e), inkThr: thr }; }), 1, target, thr, bin, true);
+        if (st2.rows.length) { const res = await runOcr(st2.image, "0123456789xX*"); for (const row of st2.rows) weak[row.chip.tag ?? -1].countTexts.push(rowText(res.words, row.y0, row.y1)); }
+      }
+    }
   }
   const unresolved = () => entries.filter((e) => !e.code);
   // 色块里没有数量、旁边 / 下面也没有字（只有色号的色板）：不是带数量的图例，立刻放弃，别浪费 OCR 时间
   {
     const hasInline = (e: Entry) => e.codeTexts.some((x) => parseCodeCountText(x, VALID).count !== null || parseCodeCountText(x, VALID).glued.length);
-    const withText = entries.filter((e) => e.below || e.right || e.label || hasInline(e)).length;
+    const withText = entries.filter((e) => e.below || e.right || e.label || hasInline(e) || e.countTexts.some((x) => parseCountPattern(x) !== null)).length;
     if (withText < 0.4 * entries.length) return gaveUp();
   }
   // 色块里没有字（小方块 + 右边写“H7 (735)”的版式）：读色块右侧的整段文字，同时得到色号和数量（多遍识别，数量投票）
@@ -290,7 +304,7 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   const useBelow = parsedN(rb) >= parsedN(rr);
   // 下方 / 右侧都读不出数量、色块里也没有数量：只有色号的色板，不是带数量的图例
   if (!skipRegions && Math.max(parsedN(rb), parsedN(rr)) < Math.max(2, 0.3 * entries.length)
-    && entries.filter((e) => e.codeTexts.some((x) => parseCodeCountText(x, VALID).count !== null || parseCodeCountText(x, VALID).glued.length)).length < 0.3 * entries.length) return gaveUp();
+    && entries.filter((e) => e.codeTexts.some((x) => parseCodeCountText(x, VALID).count !== null || parseCodeCountText(x, VALID).glued.length) || e.countTexts.some((x) => parseCountPattern(x) !== null)).length < 0.3 * entries.length) return gaveUp();
   const first = useBelow ? rb : rr, other = useBelow ? rr : rb;
   const pickWin = (e: Entry) => (useBelow ? e.below : e.right);
   for (const e of entries) {
@@ -320,7 +334,10 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     // 多数票；平票取第一遍
     const tally = new Map<number, number>();
     for (const v of vals) tally.set(v, (tally.get(v) ?? 0) + 1);
-    const ranked = [...tally.entries()].sort((a, b) => b[1] - a[1] || vals.indexOf(a[0]) - vals.indexOf(b[0]));
+    // OCR 常把连着的两个相同数字读成一个（66→6）：长读数的得票加上“去掉一个重复数字就等于它”的短读数的票
+    const score = new Map(tally);
+    for (const [v, n] of tally) { const sv = String(v); for (let i = 1; i < sv.length; i += 1) if (sv[i] === sv[i - 1]) { const u = Number(sv.slice(0, i) + sv.slice(i + 1)); if (tally.has(u) && u !== v) score.set(v, (score.get(v) ?? 0) + (tally.get(u) ?? 0)); } void n; }
+    const ranked = [...tally.entries()].sort((a, b) => (score.get(b[0]) ?? 0) - (score.get(a[0]) ?? 0) || vals.indexOf(a[0]) - vals.indexOf(b[0]));
     e.count = ranked[0][0];
     e.votes = ranked[0][1];
     e.countAlts = ranked.slice(1).map((r) => r[0]);
@@ -366,5 +383,23 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     }
   }
   const raw = entries.map((e) => `${e.code ?? "?"}|${e.codeTexts.join("/")}|${e.countTexts.join("/")}`).join("\n").slice(0, 2000);
-  return { items, counts, statedTotal: null, rawText: raw, colors, palette, chipCount: entries.length, confirmed: entries.filter((e) => e.code && !e.guessed && e.count !== null).length, entries: detail };
+  // 色块上方的一条抬头（“颜色图例 | 共 10 色 | 总计 2127 颗”）：读出图上写的总数，供上层对账
+  let statedTotal: number | null = null;
+  {
+    const topY = Math.min(...rows.map((r) => Math.min(...r.map((c) => c.y))));
+    if (topY >= 14 && items.length >= 3 && !signal.aborted) {
+      const h = topY - 1, W = img.width;
+      const strip = new Uint8ClampedArray(W * h * 4);
+      strip.set(img.data.subarray(0, W * h * 4));
+      try { const res = await ocrWords({ width: W, height: h, data: strip }, signal, { scale: h < 40 ? 2 : 1 }); statedTotal = findStatedTotal(res.text);
+        // 汉字读坏了（“总计 2127 颗”读成 “Bit 2127 %”）：取行尾的 3–5 位数字，且必须比已读到的各色之和大一点点（有的色没读到）而不是离谱
+        if (statedTotal === null) {
+          const m = /(\d{3,5})\D{0,3}\s*$/.exec(res.text.trim().split("\n").pop() ?? "");
+          const sum = items.reduce((t, it) => t + it.count, 0);
+          if (m && Number(m[1]) >= sum && Number(m[1]) <= 1.6 * sum + 300) statedTotal = Number(m[1]);
+        }
+      } catch { /* 读不到就没有 */ }
+    }
+  }
+  return { items, counts, statedTotal, rawText: raw, colors, palette, chipCount: entries.length, confirmed: entries.filter((e) => e.code && !e.guessed && e.count !== null).length, entries: detail };
 }
