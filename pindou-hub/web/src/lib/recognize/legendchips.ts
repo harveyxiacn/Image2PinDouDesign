@@ -16,6 +16,23 @@ const colorOf = (code: string) => PAL.get(code)?.rgb ?? null;
 /** OCR 常把这些数字互相读混 */
 const SWAP_DIGITS: Record<string, string[]> = { "0": ["8", "6"], "1": ["7"], "3": ["8"], "5": ["6"], "6": ["5", "8", "0"], "7": ["1"], "8": ["3", "0", "6"], "9": ["8"] };
 
+/** SWAP_DIGITS 的对称闭包（8 读成 9 与 9 读成 8 一样常见） */
+const SWAP_SYM: Record<string, string[]> = (() => {
+  const m: Record<string, Set<string>> = {};
+  for (const [a, bs] of Object.entries(SWAP_DIGITS)) for (const b of bs) { (m[a] ??= new Set()).add(b); (m[b] ??= new Set()).add(a); }
+  return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, [...v]]));
+})();
+/** 色号里某一位换成形近数字后仍是色卡里的色号 */
+function swapVariants(code: string): string[] {
+  const m = /^([A-Z]+)(\d+)$/.exec(code);
+  if (!m) return [];
+  const out: string[] = [];
+  for (let i = 0; i < m[2].length; i += 1) for (const p of SWAP_SYM[m[2][i]] ?? []) {
+    const v = m[1] + m[2].slice(0, i) + p + m[2].slice(i + 1);
+    if (VALID.has(v) && !(i === 0 && p === "0")) out.push(v);
+  }
+  return out;
+}
 type Rc = { x: number; y: number; width: number; height: number };
 type Entry = {
   chip: Chip;
@@ -457,6 +474,11 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
         }
         const best = nearestCodesByColor(rgb, vars, colorOf, 6, 1)[0];
         if (best && best.dE + 4 < (e.dE ?? 99)) { e.codeAlts = [best.code, ...e.codeAlts.filter((c) => c !== best.code)]; e.code = best.code; e.dE = best.dE; }
+      }
+      // 读到的几个候选都通过了颜色校验、但排第一的颜色吻合得不好（ΔE > 5）：另一个候选的颜色吻合得多（小 4 以上）且读到的票数不太少，取它（H3 / H4 读混）
+      if (!e.synthetic && e.code && (e.dE ?? 0) > 5 && ok.length > 1) {
+        const best = [...ok].sort((a, b) => a.dE - b.dE)[0];
+        if (best.code !== e.code && best.dE + 4 < (e.dE ?? 99) && 2 * (tally.get(best.code) ?? 0) >= (tally.get(e.code) ?? 0)) { e.codeAlts = [best.code, ...e.codeAlts.filter((c) => c !== best.code)]; e.code = best.code; e.dE = best.dE; }
       }
     }
   };

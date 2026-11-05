@@ -456,6 +456,19 @@ function boldExtend(covs: number[], K: number, ka: number, kb: number, like: (k:
   return { ka: lo, kb: end, r1 };
 }
 
+/** 格线位置处的边缘能量 / 半格处的边缘能量：真格线（每格都有边）远大于 1。 */
+function latticeContrast(P: Float64Array, l: Lattice): number {
+  const f = regress(l);
+  const Pm = max3(P);
+  let a = 0, na = 0, b = 0, nb = 0;
+  for (let k = l.ka; k <= l.kb; k += 1) {
+    const i = Math.round(f.a + (k - l.ka) * f.pitch - 1), m = Math.round(f.a + (k - l.ka + 0.5) * f.pitch - 1);
+    if (i < 0 || m < 0 || i >= Pm.length || m >= Pm.length) continue;
+    a += Pm[i]; na += 1; b += Pm[m]; nb += 1;
+  }
+  return na && nb && b > 0 ? a / na / (b / nb) : 0;
+}
+
 /** 对 pts 做线性回归 pos = a + (k-ka)*pitch；fixedPitch 时只拟合截距。 */
 function regress(l: Lattice, fixedPitch?: number): { a: number; pitch: number } {
   const pts = l.pts;
@@ -646,12 +659,17 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
     let q = 0, bestE = 0.03;
     for (let kx = 1; kx <= 8; kx += 1) for (let ky = 1; ky <= 8; ky += 1) {
       const a = lx.pitch / kx, b = ly.pitch / ky, e = Math.abs(a - b) / Math.max(a, b);
-      if (e < bestE && Math.min(a, b) >= 8) { bestE = e; q = (a + b) / 2; }
+      if (e < bestE && Math.min(a, b) >= 4.2) { bestE = e; q = (a + b) / 2; }
     }
     if (q > 0) {
-      const rx = findLattice(profiles(src, x0, y0, x1, y1, "col").colP, H, q, covX(y0, y1), likeX(y0, y1), lowX(y0, y1));
-      const ry = findLattice(profiles(src, x0, y0, x1, y1, "row").rowP, W, q, covY(x0, x1), likeY(x0, x1), lowY(x0, x1));
-      if (rx && ry && Math.abs(rx.pitch - ry.pitch) / Math.max(rx.pitch, ry.pitch) < 0.05) { lx = rx; ly = ry; }
+      const { colP: cp, rowP: rp } = profiles(src, x0, y0, x1, y1);
+      const rx = findLattice(cp, H, q, covX(y0, y1), likeX(y0, y1), lowX(y0, y1));
+      const ry = findLattice(rp, W, q, covY(x0, x1), likeY(x0, x1), lowY(x0, x1));
+      // 小于 8 px 的细周期（低清图里每 5 格粗线 / 隔一条的细线）要求两轴在细线位处的边缘能量都明显高于半格处
+      const fineOk = q >= 8 || (!!rx && !!ry && Math.min(latticeContrast(cp, rx), latticeContrast(rp, ry)) >= 1.4);
+      if (rx && ry && fineOk && Math.abs(rx.pitch - ry.pitch) / Math.max(rx.pitch, ry.pitch) < 0.05) {
+        lx = rx; ly = ry;
+      }
     }
   }
 
@@ -864,11 +882,14 @@ function trimEnds(l: Lattice, src: PixelSource, axis: "col" | "row", offset: num
     && !(small && lineLike(src, axis, pos(k), regress(l).pitch, a, b));
   // 末端 / 起点附近“弱齿 + 1~2 条强齿”：强齿是图例色块 / 标尺的边缘，弱齿之外的都不属于网格
   // 孤立的强齿（紧挨着一条弱齿）多半是图例色块 / 标尺的边缘，连同弱齿一起去掉
-  while (l.kb - l.ka > 8 && (weak(l.kb) || weak(l.kb - 1))) {
+  // 端线是强线、隔 2 条弱线后又接上强线：弱线是空白格间的淡细线（低清图），不是图例 / 标尺的幽灵线，不剪
+  const strongCov = (k: number) => toothCoverage(src, axis, pos(k), a, b, edgeT) >= END_STRONG * ref;
+  const gapEnd = (k0: number, dir: 1 | -1) => small && strongCov(k0) && weak(k0 + dir) && weak(k0 + 2 * dir) && strongCov(k0 + 3 * dir);
+  while (l.kb - l.ka > 8 && !gapEnd(l.kb, -1) && (weak(l.kb) || weak(l.kb - 1))) {
     l.kb -= weak(l.kb) ? 1 : 2;
     l.pts = l.pts.filter(([k]) => k <= l.kb);
   }
-  while (l.kb - l.ka > 8 && (weak(l.ka) || weak(l.ka + 1))) {
+  while (l.kb - l.ka > 8 && !gapEnd(l.ka, 1) && (weak(l.ka) || weak(l.ka + 1))) {
     l.ka += weak(l.ka) ? 1 : 2;
     l.pts = l.pts.filter(([k]) => k >= l.ka);
   }
