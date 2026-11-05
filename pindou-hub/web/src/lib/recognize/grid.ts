@@ -596,12 +596,28 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
 
   const edgeT = Math.max(45, 5 * noiseLevel(src, x0, y0, x1, y1));
   const first = profiles(src, x0, y0, x1, y1);
-  const covX = (a: number, b: number) => (pos: number) => toothCoverage(src, "col", pos + 1 + x0, a, b, edgeT);
-  const covY = (a: number, b: number) => (pos: number) => toothCoverage(src, "row", pos + 1 + y0, a, b, edgeT);
+  // 覆盖率只取决于取整后的线位：同一 (范围, 线位) 只算一次（相位搜索会把同一条线问几十遍，大图上占检测时间的大半）
+  const memoCov = (axis: "col" | "row", off: number, T: number) => {
+    const caches = new Map<string, Map<number, number>>();
+    return (a: number, b: number) => {
+      const key = `${a}|${b}`;
+      let m = caches.get(key);
+      if (!m) { m = new Map(); caches.set(key, m); }
+      const mm = m;
+      return (pos: number) => {
+        const t = Math.round(pos + 1 + off);
+        let v = mm.get(t);
+        if (v === undefined) { v = toothCoverage(src, axis, t, a, b, T); mm.set(t, v); }
+        return v;
+      };
+    };
+  };
+  const covX = memoCov("col", x0, edgeT);
+  const covY = memoCov("row", y0, edgeT);
   const likeX = (a: number, b: number) => (pos: number, pitch: number) => lineLike(src, "col", pos + 1 + x0, pitch, a, b);
   const likeY = (a: number, b: number) => (pos: number, pitch: number) => lineLike(src, "row", pos + 1 + y0, pitch, a, b);
-  const lowX = (a: number, b: number) => (pos: number) => toothCoverage(src, "col", pos + 1 + x0, a, b, 14);
-  const lowY = (a: number, b: number) => (pos: number) => toothCoverage(src, "row", pos + 1 + y0, a, b, 14);
+  const lowX = memoCov("col", x0, 14);
+  const lowY = memoCov("row", y0, 14);
   let lx = findLattice(first.colP, H, pitchHint, covX(y0, y1), likeX(y0, y1), lowX(y0, y1));
   let ly = findLattice(first.rowP, W, pitchHint, covY(x0, x1), likeY(x0, x1), lowY(x0, x1));
   if (!lx && !ly) return null;
