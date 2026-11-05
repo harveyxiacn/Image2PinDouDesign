@@ -53,6 +53,8 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   let upNote = "";
   /** 图例是否只读了个大概（有数量没读清 / 被按网格校正过 / 漏读色号）：这时格内色号读得全的网格计数比图例数字更可靠 */
   let legendPatchy = 0;
+  /** 图例刚读出来（未经网格校正）的合计 */
+  let legendRawSum = 0;
   if (enhMode !== "off" && !options.region && Math.max(src.width, src.height) <= 2000) {
     const sus = !grid0 || Math.min(grid0.cols, grid0.rows) <= 24 || grid0.score < 0.55;
     if (sus) {
@@ -188,6 +190,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
         const total = sum(parsed.counts);
         const pal = parsed.palette?.length ?? 0;
         if (pal > parsed.items.length) legendPatchy += pal - parsed.items.length;
+        legendRawSum = total;
         step("legend", "读取图例", parsed.items.length >= 2 ? "ok" : "warn", `读到图例 ${parsed.items.length} 色，合计 ${fmt(total)} 颗`
           + (pal > parsed.items.length ? `（色块共 ${pal} 个，${pal - parsed.items.length} 个的数量没读清，按网格统计补上）` : "")
           + (parsed.statedTotal ? `（图上标注总数 ${fmt(parsed.statedTotal)}）` : "")
@@ -377,8 +380,10 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     const gridTrusted = reading.grid.score >= 0.7 && (reading.flatFrac ?? 0) >= 0.7 && gridDeAll <= 4;
     // 图例“只读了个大概”的程度：没读清的数量 + 漏读的色号 + 被校正的数字，占全部色号的比例
     const patchRatio = (legendPatchy + added.length) / Math.max(1, codes.size);
-    const patchy = patchRatio >= 0.35;
-    const codesStrong = !!cellCodesRead && !!cellCodeStats && cellCodeStats.read / Math.max(1, cellCodeStats.clusters) >= 0.8;
+    // 刚读出来的图例合计与逐格计数差了一成以上：数字整体读得不可靠（校正后看起来吻合只是被网格拉回来的）
+    const rawOff = legendRawSum > 0 && Math.abs(legendRawSum - gt) / Math.max(1, gt) >= 0.1;
+    const patchy = patchRatio >= 0.3 || rawOff;
+    const codesStrong = !!cellCodesRead && !!cellCodeStats && cellCodeStats.read / Math.max(1, cellCodeStats.clusters) >= 0.75;
     const agreement = Math.max(0, 1 - abs / Math.max(lt, gt, 1));
     if (added.length) step("legend-missing", "补全图例", "warn", `图例漏读 ${added.length} 个色号（${added.join("、")}），已按网格统计补上`);
     if (Math.abs(lt - gt) / Math.max(lt, gt, 1) <= 0.03) {
@@ -673,6 +678,20 @@ async function readLegend(src: PixelSource, hi: PixelSource, grid: GridDetection
       if (cl0 && cl0.chipCount > 0) break; // 已经找到色块、只是不是带数量的图例：换个裁剪重试也一样
     }
   }
+  // 网格框被误检得很大（盖住了图例）时，上面按“网格外的条带”找不到图例：退而读整图最下面 ~1/3（图例几乎总在底部）
+  if (result.items.length < 2 && hi.height >= 400) {
+    throwIfAborted(signal);
+    const y0 = Math.floor(hi.height * 0.68);
+    const raw = cropSource(hi, { x: 0, y: y0, width: hi.width, height: hi.height - y0 });
+    const box = contentBox(raw);
+    if (box) {
+      try {
+        const cl = await readChipLegend(cropSource(raw, box), signal);
+        const clSum = cl ? cl.items.reduce((a, it) => a + it.count, 0) : 0;
+        if (cl && clSum <= hi.width * hi.height / 100 && cl.confirmed >= Math.max(3, Math.ceil(0.5 * cl.chipCount))) result = cl;
+      } catch (err) { if ((err as Error)?.name === "AbortError") throw err; }
+    }
+  }
   if (crop && result.items.length < 2) {
     throwIfAborted(signal);
     const chips = findChips(crop.img, Math.max(12, Math.round(0.015 * hi.width)), 0.9);
@@ -855,8 +874,8 @@ function reconcileLegend(legend: LegendReading, reading: GridReading, statedTota
     for (const c of cands) {
       if (c > 0 && Math.abs(c - g) / g <= 0.03 && (best === null || Math.abs(c - g) < Math.abs(best - g))) best = c;
     }
-    if (best === null) {
-      // 改一位也对不上：若该色号的图例色块颜色被网格精确匹配（ΔE≤2），以网格数为准（OCR 很可能读错了）
+    if (best === null && gridTrusted) {
+      // 改一位也对不上（且网格在绝大多数色号上与图例吻合，网格整体可信）：若该色号的图例色块颜色被网格精确匹配（ΔE≤2），以网格数为准（OCR 很可能读错了）
       const st = reading.colors.find((c) => c.code === item.code);
       if (legend.colors?.[item.code] && st && st.deltaE <= ((item.votes ?? 0) >= 2 && !item.alts?.length ? 1.5 : legend.palette ? 5 : 2)) best = g;
     }

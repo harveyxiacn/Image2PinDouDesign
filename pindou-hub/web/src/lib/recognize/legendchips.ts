@@ -5,7 +5,7 @@
 // 相对色块底色二值化，深浅两种字都行），各识别一遍（带白名单）。色号用色块颜色与色卡色的 ΔE 校验，数量保留多次识别的备选。
 import type { PixelSource } from "@engine/types";
 import { MARD_PALETTE } from "@engine/palette";
-import { findFlatBlobs, findStatedTotal, chipStack, cellCodeCandidates, nearestCodesByColor, parseCodeCountText, parseCountPattern, validateCodeCandidates } from "./legend";
+import { findFlatBlobs, findStatedTotal, chipStack, cellCodeCandidates, nearestCodesByColor, countAlternatives, parseCodeCountText, parseCountPattern, validateCodeCandidates } from "./legend";
 import type { Chip } from "./legend";
 import type { LegendItem, LegendReading } from "./types";
 
@@ -32,6 +32,10 @@ type Entry = {
   countAlts: number[];
   codeAlts: string[];
   votes: number;
+  /** 色号 / 数量分段读出的数量（比整段混读可靠） */
+  splitCounts: number[];
+  /** 色号分段读过：色号按得票重新排 */
+  splitCodes?: boolean;
 };
 
 export type ChipLegendResult = LegendReading & {
@@ -107,9 +111,167 @@ function splitTwoLines(img: PixelSource, c: Chip): { top: Rc; bottom: Rc } | nul
   return { top: { x: x0, y: y0 + a[0] - 1, width: x1 - x0, height: a[1] - a[0] + 3 }, bottom: { x: x0, y: y0 + b[0] - 1, width: x1 - x0, height: b[1] - b[0] + 3 } };
 }
 
+/**
+ * “色号 (数量)”写在同一段文字里（H12 (416)）：按墨迹列的最大空隙切成 色号 / 数量 两段。
+ * 两段分别用各自的白名单识别，比整段混读准得多（括号不会把色号和数量连成一串）。切不出返回 null。
+ */
+function splitLabel(img: PixelSource, r: Rc, bg: [number, number, number]): { code: Rc; count: Rc } | null {
+  const x0 = Math.max(0, Math.floor(r.x)), x1 = Math.min(img.width, Math.ceil(r.x + r.width));
+  const y0 = Math.max(0, Math.floor(r.y)), y1 = Math.min(img.height, Math.ceil(r.y + r.height));
+  if (x1 - x0 < 12 || y1 - y0 < 6) return null;
+  const diff = (x: number, y: number) => { const i = (y * img.width + x) * 4; return Math.abs(img.data[i] - bg[0]) + Math.abs(img.data[i + 1] - bg[1]) + Math.abs(img.data[i + 2] - bg[2]); };
+  let maxD = 0;
+  for (let y = y0; y < y1; y += 1) for (let x = x0; x < x1; x += 1) maxD = Math.max(maxD, diff(x, y));
+  if (maxD < 120) return null;
+  const thr = 0.4 * maxD;
+  const col = new Array<boolean>(x1 - x0).fill(false);
+  let ty0 = y1, ty1 = -1;
+  for (let y = y0; y < y1; y += 1) for (let x = x0; x < x1; x += 1) if (diff(x, y) > thr) { col[x - x0] = true; if (y < ty0) ty0 = y; if (y > ty1) ty1 = y; }
+  const a = col.indexOf(true), b = col.lastIndexOf(true);
+  if (a < 0 || b - a < 10) return null;
+  let bestStart = -1, bestLen = 0;
+  for (let i = a; i <= b;) {
+    if (col[i]) { i += 1; continue; }
+    let j = i; while (j <= b && !col[j]) j += 1;
+    if (j - i > bestLen) { bestLen = j - i; bestStart = i; }
+    i = j;
+  }
+  if (bestLen < 2 || bestStart - a < 4 || b - (bestStart + bestLen) < 3) return null;
+  const h = ty1 - ty0 + 3;
+  return {
+    code: { x: x0 + a - 2, y: ty0 - 1, width: bestStart - a + 3, height: h },
+    // 数量段两头各是一个括号（约 2 像素宽 + 1 像素空隙）：括号会被读成数字 1 / 7，宽度够时直接去掉
+    count: (() => { const cx0 = bestStart + bestLen, cw = b - cx0 + 1, trim = 0; return { x: x0 + cx0 + trim - 1, y: ty0 - 1, width: cw - 2 * trim + 2, height: h }; })()
+  };
+}
+
+/** 把若干矩形里的字（相对底色二值化 / 灰度）叠成一张图识别，返回每个矩形读到的文字。 */
+async function ocrRects(img: PixelSource, rects: Rc[], bg: [number, number, number], wl: string, target: number, thr: number, bin: boolean, signal: AbortSignal): Promise<string[]> {
+  const { ocrWords } = await import("./ocr");
+  const out: string[] = rects.map(() => "");
+  const pseudo = rects.map((r, i) => {
+    const x = Math.max(0, Math.floor(r.x)), y = Math.max(0, Math.floor(r.y));
+    return { x, y, width: Math.max(6, Math.min(Math.floor(r.width), img.width - x)), height: Math.max(6, Math.min(Math.floor(r.height), img.height - y)), r: bg[0], g: bg[1], b: bg[2], bg, tag: i, inkThr: thr };
+  });
+  const st = chipStack(img, pseudo, 1, target, thr, bin, true);
+  if (!st.rows.length) return out;
+  const res = await ocrWords(st.image, signal, { scale: 1, psm: "6", whitelist: wl });
+  for (const row of st.rows) out[row.chip.tag ?? -1] = rowText(res.words, row.y0, row.y1);
+  return out;
+}
+
+/**
+ * 表格式图例：一列小色块，每块同一行上写着 颜色名 | 数量 | 色号（列顺序不定，色号可能零填充 H01）。
+ * 按墨迹空隙把每行切成“字段”，取最右两段各读几遍（色号 / 数字混合白名单，汉字名称列不读），
+ * 以字段内容区分谁是色号（字母开头）谁是数量；色号用色块颜色校验。
+ */
+async function readTableLegend(img: PixelSource, chips: Chip[], bg: [number, number, number], signal: AbortSignal): Promise<ChipLegendResult | null> {
+  // 同一列（x 基本对齐）的色块才是表格的色块列；列外的是插图 / 水印里恰好同尺寸的块
+  let colChips: Chip[] = [];
+  for (const a of chips) { const g = chips.filter((b) => Math.abs(b.x - a.x) <= 0.5 * a.width); if (g.length > colChips.length) colChips = g; }
+  if (colChips.length < 3) return null;
+  let sorted = [...colChips].sort((a, b) => a.y - b.y);
+  const medW = [...sorted.map((c) => c.width)].sort((a, b) => a - b)[sorted.length >> 1];
+  const medH = [...sorted.map((c) => c.height)].sort((a, b) => a - b)[sorted.length >> 1];
+  const dys0 = sorted.slice(1).map((c, i) => c.y - sorted[i].y);
+  if (dys0.some((d) => d < 0.8 * medH)) return null;
+  // 行距规律：间隔是整数倍行距的地方补出隐形（和纸同色 / 白色）色块
+  const pitch = [...dys0].sort((a, b) => a - b)[0];
+  const filled: Chip[] = [];
+  sorted.forEach((c, i) => {
+    filled.push(c);
+    if (i + 1 >= sorted.length) return;
+    const dy = sorted[i + 1].y - c.y, k = Math.round(dy / pitch);
+    if (k >= 2 && Math.abs(dy - k * pitch) <= 0.2 * pitch) for (let j = 1; j < k; j += 1) filled.push({ x: c.x, y: Math.round(c.y + (dy * j) / k), width: c.width, height: c.height, r: bg[0], g: bg[1], b: bg[2], bg });
+  });
+  sorted = filled;
+  const dys = sorted.slice(1).map((c, i) => c.y - sorted[i].y);
+  if (dys.some((d) => d < 0.8 * medH)) return null;
+  // 表格右边界：第一条贯穿全部行带的竖线（面板边框）之前
+  const top = sorted[0].y - 2, bottom = sorted[sorted.length - 1].y + sorted[sorted.length - 1].height + 2;
+  const x0 = sorted[0].x + sorted[0].width + 2;
+  const diffAt = (x: number, y: number) => { const i = (y * img.width + x) * 4; return Math.abs(img.data[i] - bg[0]) + Math.abs(img.data[i + 1] - bg[1]) + Math.abs(img.data[i + 2] - bg[2]); };
+  let edge = img.width;
+  for (let x = x0 + 4 * medW; x < img.width; x += 1) {
+    let n = 0;
+    for (let y = top; y < Math.min(img.height, bottom); y += 1) if (diffAt(x, y) > 60) n += 1;
+    if (n >= 0.9 * (bottom - top)) { edge = x; break; }
+  }
+  if (edge - x0 < 6 * medW) return null;
+  const segsOf = (c: Chip): Rc[] => {
+    const ry0 = Math.max(0, c.y - 2), ry1 = Math.min(img.height, c.y + c.height + 2);
+    let maxD = 0;
+    for (let y = ry0; y < ry1; y += 1) for (let x = x0; x < edge; x += 1) maxD = Math.max(maxD, diffAt(x, y));
+    if (maxD < 120) return [];
+    const thr = 0.4 * maxD;
+    const col = new Array<boolean>(edge - x0).fill(false);
+    let ty0 = ry1, ty1 = ry0;
+    for (let y = ry0; y < ry1; y += 1) for (let x = x0; x < edge; x += 1) if (diffAt(x, y) > thr) { col[x - x0] = true; if (y < ty0) ty0 = y; if (y > ty1) ty1 = y; }
+    const H = Math.max(4, ty1 - ty0 + 1);
+    const gapMin = Math.max(6, Math.round(0.8 * H));
+    const segs: Rc[] = [];
+    let st = -1, last = -1;
+    for (let i = 0; i < col.length; i += 1) {
+      if (!col[i]) continue;
+      if (st < 0) { st = i; last = i; } else if (i - last > gapMin) { segs.push({ x: x0 + st - 2, y: ty0 - 2, width: last - st + 5, height: H + 4 }); st = i; }
+      last = i;
+    }
+    if (st >= 0) segs.push({ x: x0 + st - 2, y: ty0 - 2, width: last - st + 5, height: H + 4 });
+    return segs;
+  };
+  const rowSegs = sorted.map(segsOf);
+  if (rowSegs.filter((sg) => sg.length >= 2).length < Math.max(3, 0.6 * sorted.length)) return null;
+  const A: Rc[] = [], B: Rc[] = [];
+  rowSegs.forEach((sg) => { const n = sg.length; A.push(n >= 2 ? sg[n - 2] : { x: 0, y: 0, width: 6, height: 6 }); B.push(n >= 2 ? sg[n - 1] : { x: 0, y: 0, width: 6, height: 6 }); });
+  const wl = "ABCDEFGHMPQRTYZ0123456789";
+  const codeVotes = sorted.map(() => new Map<string, number>());
+  const countVotes = sorted.map(() => new Map<number, number>());
+  const texts: string[] = sorted.map(() => "");
+  for (const [target, thr, bin] of [[36, -1, false], [48, 0.4, true], [28, 0.5, false]] as const) {
+    if (signal.aborted) break;
+    for (const rects of [A, B]) {
+      const rd = await ocrRects(img, rects, bg, wl, target, thr, bin, signal);
+      rd.forEach((t, i) => {
+        if (rowSegs[i].length < 2) return;
+        texts[i] += `${t}|`;
+        const tok = t.replace(/\s+/g, "");
+        if (/^[A-Z]/.test(tok) && /[0-9OIL]/.test(tok)) {
+          for (const c of cellCodeCandidates(tok, VALID)) codeVotes[i].set(c, (codeVotes[i].get(c) ?? 0) + 1);
+        } else {
+          const n = parseCountPattern(tok);
+          if (n !== null) countVotes[i].set(n, (countVotes[i].get(n) ?? 0) + 1);
+        }
+      });
+    }
+  }
+  const items: LegendItem[] = [];
+  const counts: Record<string, number> = {};
+  const colors: Record<string, { r: number; g: number; b: number }> = {};
+  const palette: NonNullable<LegendReading["palette"]> = [];
+  const detail: ChipLegendResult["entries"] = [];
+  let confirmed = 0;
+  sorted.forEach((c, i) => {
+    const cands = [...codeVotes[i].entries()].sort((a, b) => b[1] - a[1]).map((x) => x[0]);
+    const ok = validateCodeCandidates(cands, { r: c.r, g: c.g, b: c.b }, colorOf, 16);
+    // 色块颜色与色卡对不上（有的图纸自己编了一套色号）：文字多遍读到同一个有效色号就照文字采用
+    const strong = codeVotes[i].size && Math.max(...codeVotes[i].values()) >= 2 ? cands[0] : null;
+    const code = ok[0]?.code ?? strong;
+    if (!code) return;
+    const cn = [...countVotes[i].entries()].sort((a, b) => b[1] - a[1]);
+    const count = cn.length ? cn[0][0] : null;
+    colors[code] = { r: c.r, g: c.g, b: c.b };
+    palette.push({ code, rgb: { r: c.r, g: c.g, b: c.b }, count });
+    detail.push({ code, count, countAlts: cn.slice(1).map((x) => x[0]), codeAlts: ok.map((o) => o.code), dE: ok[0]?.dE ?? null, guessed: false, where: "table" });
+    if (count !== null && count > 0 && !(code in counts)) { items.push({ code, count, source: "色块图例", votes: cn[0][1], ...(cn.length > 1 ? { alts: cn.slice(1).map((x) => x[0]) } : {}) }); counts[code] = count; confirmed += 1; }
+  });
+  return { items, counts, statedTotal: null, rawText: texts.join("\n").slice(0, 2000), colors, palette, chipCount: sorted.length, confirmed, entries: detail };
+}
+
 export async function readChipLegend(img: PixelSource, signal: AbortSignal): Promise<ChipLegendResult | null> {
   const { ocrWords } = await import("./ocr");
   const t0 = performance.now();
+  /** 图例已经读了 1.2 秒以上：读数两遍一致的就不再多读（快的图照常读满，留备选读法） */
+  const hurry = () => performance.now() - t0 > 1200;
   // 找到了色块但读下去发现不是“色块 + 数量”图例：返回空结果（chipCount > 0），调用方不必再换个裁剪重试
   const gaveUp = (): ChipLegendResult => ({ items: [], counts: {}, statedTotal: null, rawText: "", chipCount: 1, confirmed: 0, entries: [] } as ChipLegendResult);
   // 贴着裁剪边缘的块是被截断的东西（图纸最后一行格子、标尺），不是图例色块
@@ -121,10 +283,15 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   const medH = [...chips0.map((c) => c.height)].sort((a, b) => a - b)[chips0.length >> 1];
   const bg = chips0[0].bg ?? ([255, 255, 255] as [number, number, number]);
   const rows = groupRows(chips0);
+  // 表格式图例（一列色块，每行 颜色名 | 数量 | 色号）：先试表格读法，读得出就不再走下面的色块 + 标签读法
+  if (rows.length >= 3 && rows.length >= 0.5 * chips0.length) {
+    const tr = await readTableLegend(img, chips0, bg, signal);
+    if (tr && tr.confirmed >= Math.max(3, Math.ceil(0.6 * tr.chipCount))) return tr;
+  }
 
   // 1) 按排列规律补出隐形色块（和纸同色的白色块）：行内间距为整数倍时补中间的；行首 / 行尾若有字也补
   const entries: Entry[] = [];
-  const mk = (chip: Chip, synthetic: boolean): Entry => ({ chip, synthetic, countRect: null, below: null, right: null, label: null, where: null, codeTexts: [], countTexts: [], code: null, dE: null, guessed: false, count: null, countAlts: [], codeAlts: [], votes: 0 });
+  const mk = (chip: Chip, synthetic: boolean): Entry => ({ chip, synthetic, countRect: null, below: null, right: null, label: null, where: null, codeTexts: [], countTexts: [], code: null, dE: null, guessed: false, count: null, countAlts: [], codeAlts: [], votes: 0, splitCounts: [] });
   const rowEntries: Entry[][] = [];
   const allPitches: number[] = [];
   for (const r of rows) for (let i = 1; i < r.length; i += 1) allPitches.push(r[i].x - r[i - 1].x);
@@ -217,13 +384,16 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   };
   const resolveCodes = (list: Entry[]) => {
     for (const e of list) {
-      if (e.code) continue;
+      e.code = null; e.dE = null;
       const cands: string[] = [];
+      const tally = new Map<string, number>();
       for (const t of e.codeTexts) {
         const p = parseCodeCountText(t, VALID);
-        for (const c of p.codes) if (!cands.includes(c)) cands.push(c);
+        for (const c of p.codes) { if (!cands.includes(c)) cands.push(c); tally.set(c, (tally.get(c) ?? 0) + 1); }
         for (const g of p.glued) if (!cands.includes(g.code)) cands.push(g.code);
       }
+      // 色号 / 数量分段读出过：按得票排序（整段混读常把色号读歪）
+      cands.sort((x, y) => (tally.get(y) ?? 0) - (tally.get(x) ?? 0));
       // 隐形（白）块没有颜色信息：色号文字读到什么就是什么，但必须是浅色号
       const rgb = { r: e.chip.r, g: e.chip.g, b: e.chip.b };
       const ok = validateCodeCandidates(cands, rgb, colorOf, e.synthetic ? 14 : 11);
@@ -280,7 +450,9 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   const labelLayout = unresolved().length >= 0.4 * entries.length && entries.some((e) => e.label);
   if (labelLayout) {
     for (const [target, thr, bin] of [[24, -1, false], [28, -1, false], [20, -1, false]] as const) {
-      const u = entries.filter((e) => e.label);
+      // 已经有两遍读法一致的就不再读（省 OCR 时间）
+      const u = entries.filter((e) => e.label && !(target === 20 && hurry() && agreed(e.codeTexts.map((t) => parseCodeCountText(t, VALID).count))));
+      if (!u.length) break;
       const m = await readCounts(u, (e) => e.label, target, thr, bin, codeWl + "xX*");
       for (const [e, t] of m) e.codeTexts.push(t);
       resolveCodes(u);
@@ -288,7 +460,25 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
       if (target === 24 && entries.filter((e) => e.codeTexts.some((x) => parseCodeCountText(x, VALID).count !== null || parseCodeCountText(x, VALID).glued.length)).length < 0.3 * entries.length) return gaveUp();
     }
   }
-  const late = () => performance.now() - t0 > 6000;
+  // 色号 (数量) 写在一起的标签：按墨迹空隙切成两段，色号用色号白名单、数量用数字白名单各读几遍（多数票）
+  if (labelLayout) {
+    const parts = new Map<Entry, { code: Rc; count: Rc }>();
+    for (const e of entries) if (e.label) { const sp = splitLabel(img, e.label, bg); if (sp) parts.set(e, sp); }
+    if (parts.size >= Math.max(3, 0.5 * entries.filter((e) => e.label).length)) {
+      const all = [...parts.keys()];
+      for (const [target, thr, bin] of [[36, -1, false], [48, 0.4, true], [28, 0.5, false]] as const) {
+        // 第三遍只给前两遍数量没对上的
+        const list = target === 28 && hurry() ? all.filter((e) => !agreed(e.splitCounts)) : all;
+        if (!list.length) break;
+        const mc = await readCounts(list, (e) => parts.get(e)!.code, target, thr, bin, "ABCDEFGHMPQRTYZ0123456789");
+        for (const [e, t] of mc) { e.codeTexts.push(t); e.splitCodes = true; }
+        const mn = await readCounts(list, (e) => parts.get(e)!.count, target, thr, bin, "0123456789()");
+        for (const [e, t] of mn) { const n = parseCountPattern(t); if (n !== null) e.splitCounts.push(n); }
+      }
+      resolveCodes(all);
+    }
+  }
+  const late = () => performance.now() - t0 > 3000;
   if (unresolved().length && !late()) { const u = unresolved(); await readCodes(u, 56, 0.4, true); resolveCodes(u); }
   if (unresolved().length && !late()) { const u = unresolved(); await readCodes(u, 32, 0.6, false); resolveCodes(u); }
   if (unresolved().length && !late()) { const u = unresolved(); await readCodes(u, 72, 0.3, true); resolveCodes(u); }
@@ -318,14 +508,18 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     if (t2 !== undefined && parseCountPattern(t2) !== null) { e.where = useBelow ? "right" : "below"; e.countRect = useBelow ? e.right : e.below; e.countTexts.push(t2); }
   }
   for (const [target, thr, bin] of [[56, 0.4, true], [36, -1, false]] as const) {
-    const second = skipRegions ? new Map<Entry, string>() : await readCounts(entries.filter((e) => e.countRect), (e) => e.countRect, target, thr, bin);
+    // 补读只给读数还没有两遍一致的色块
+    const need = entries.filter((e) => e.countRect && !(hurry() && agreed(e.countTexts.map((t) => parseCountPattern(t)))));
+    if (!need.length) break;
+    const second = skipRegions ? new Map<Entry, string>() : await readCounts(need, (e) => e.countRect, target, thr, bin);
     for (const [e, t] of second) e.countTexts.push(t);
   }
   for (const e of entries) {
     const vals: number[] = [];
     for (const t of e.countTexts) { const n = parseCountPattern(t); if (n !== null) vals.push(n); }
     // 色块里 / 旁边的整段文字（“A26 (871)”“B13 315”）里带的数量
-    for (const t of e.codeTexts) {
+    if (e.splitCounts.length >= 2) vals.length = 0, vals.push(...e.splitCounts);
+    else for (const t of e.codeTexts) {
       const p = parseCodeCountText(t, VALID);
       if (p.count !== null) vals.push(p.count);
       else { const g = p.glued.find((x) => x.code === e.code); if (g) vals.push(g.count); }
@@ -341,6 +535,26 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     e.count = ranked[0][0];
     e.votes = ranked[0][1];
     e.countAlts = ranked.slice(1).map((r) => r[0]);
+  }
+
+  // 图例按数量从大到小排列的版式（happy拼豆嘛 等）：数量读数违反这个顺序的，换成顺序内可行的备选读法
+  {
+    const seq = entries.filter((e) => e.count !== null);
+    let ok = 0;
+    for (let i = 1; i < seq.length; i += 1) if ((seq[i].count as number) <= (seq[i - 1].count as number)) ok += 1;
+    if (seq.length >= 6 && ok >= 0.8 * (seq.length - 1)) {
+      for (let i = 0; i < seq.length; i += 1) {
+        const e = seq[i];
+        const hi = i > 0 ? (seq[i - 1].count as number) : Infinity;
+        let lo = 0;
+        for (let k = i + 1; k < seq.length; k += 1) if ((seq[k].count as number) <= hi) { lo = seq[k].count as number; break; }
+        const n = e.count as number;
+        if (n <= hi && n >= lo) continue;
+        const strip = String(n).length === 4 ? [Number(String(n).slice(1)), Number(String(n).slice(0, 3))] : [];
+        const alts = [...e.countAlts, ...strip, ...countAlternatives(n)].filter((v, k, a) => v >= lo && v <= hi && a.indexOf(v) === k);
+        if (alts.length) { e.countAlts = [n, ...e.countAlts.filter((v) => v !== alts[0])]; e.count = alts[0]; }
+      }
+    }
   }
 
   // 5) 没读出色号的：按色块颜色找最近且未占用的色号（只对真实色块；隐形块不猜）
@@ -402,4 +616,11 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     }
   }
   return { items, counts, statedTotal, rawText: raw, colors, palette, chipCount: entries.length, confirmed: entries.filter((e) => e.code && !e.guessed && e.count !== null).length, entries: detail };
+}
+
+/** 至少有两遍读出同一个数（非空）：读数已经可信，不必再多读 */
+function agreed(vals: Array<number | null | undefined>): boolean {
+  const seen = new Set<number>();
+  for (const v of vals) { if (v === null || v === undefined) continue; if (seen.has(v)) return true; seen.add(v); }
+  return false;
 }

@@ -336,8 +336,10 @@ function findLattice(P: Float64Array, lineLen: number, hint?: number, cov?: (pos
   let [ka, kb, strongCount] = bestRun;
   let boldExt = false;
   let boldR = 0;
-  if (cov && like && p < SMALL_PITCH && K >= 30) {
-    const ext = boldExtend(covs, K, ka, kb, (k) => like(phase + k * p, p));
+  if (cov && like && K >= 30 && (p < SMALL_PITCH || hint)) {
+    let ext = boldExtend(covs, K, ka, kb, (k) => like(phase + k * p, p), p >= SMALL_PITCH);
+    // 格子较大时（空白处只剩每 5 格一条的粗线）：只在粗线序列明显比已找到的强齿序列长得多时才采用
+    if (ext && p >= SMALL_PITCH && ext.kb - ext.ka < 1.5 * (kb - ka)) ext = null;
     if (ext) { ka = ext.ka; kb = ext.kb; for (let kk = ka; kk <= kb; kk += 1) strong[kk] = true; strongCount = kb - ka + 1; boldExt = true; boldR = ext.r1; }
   }
   // 实测每个强齿的质心，后面做线性回归得到亚像素周期
@@ -386,7 +388,7 @@ function findLattice(P: Float64Array, lineLen: number, hint?: number, cov?: (pos
  * 低清 JPEG 图：空白格之间的细线几乎看不见，但每 5 格一条的粗线（以及外框）仍然横贯全图。
  * 找出 k ≡ r (mod 5) 的粗线序列，沿它向两端延伸（粗线位置上有线就继续），得到完整的网格范围。
  */
-function boldExtend(covs: number[], K: number, ka: number, kb: number, like: (k: number) => boolean): { ka: number; kb: number; r1: number } | null {
+function boldExtend(covs: number[], K: number, ka: number, kb: number, like: (k: number) => boolean, bigPitch = false): { ka: number; kb: number; r1: number } | null {
   const meds: number[] = [];
   for (let r = 0; r < 5; r += 1) {
     const v: number[] = [];
@@ -403,13 +405,15 @@ function boldExtend(covs: number[], K: number, ka: number, kb: number, like: (k:
   if (!isBold(c) && isBold(c - 5)) c -= 5;
   if (!isBold(c)) return null;
   let lo = c, hi = c;
-  while (isBold(lo - 5)) lo -= 5;
-  while (isBold(hi + 5)) hi += 5;
+  // JPEG 压缩后个别粗线会被冲淡：允许跳过 1 条（后面还能接上才算）
+  const skipTo = (k: number, dir: 1 | -1) => { for (let m = 2; m <= 3; m += 1) if (isBold(k + 5 * m * dir)) return m; return 0; };
+  for (;;) { if (isBold(lo - 5)) lo -= 5; else { const m = skipTo(lo, -1); if (!m) break; lo -= 5 * m; } }
+  for (;;) { if (isBold(hi + 5)) hi += 5; else { const m = skipTo(hi, 1); if (!m) break; hi += 5 * m; } }
   if ((hi - lo) / 5 < 8) return null;
   // 右 / 下端：最后一条粗线之后到外框之间还有 0~4 格（外框线本身也是线位）
   let end = hi;
   let bestC = 0;
-  for (let j = 1; j <= 4; j += 1) if (hi + j < K && covs[hi + j] >= 0.25 && covs[hi + j] > bestC && like(hi + j)) { bestC = covs[hi + j]; end = hi + j; }
+  for (let j = 1; j <= 4; j += 1) if (hi + j < K && covs[hi + j] >= 0.25 && (bigPitch ? covs[hi + j] > 1.15 * covs[hi] && covs[hi + j] > bestC : covs[hi + j] > bestC) && like(hi + j)) { bestC = covs[hi + j]; end = hi + j; }
   return { ka: lo, kb: end, r1 };
 }
 
@@ -580,6 +584,20 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
     if (ny && ny.score >= ly.score * 0.9) ly = ny;
   }
 
+  // 两轴周期之比不是 1 但近似小整数比（如 4:5）：各轴锁在了不同倍数的粗线上，按公共的细周期 q 重找两轴
+  if (!pitchHint && Math.max(lx.pitch, ly.pitch) / Math.min(lx.pitch, ly.pitch) > 1.08) {
+    let q = 0, bestE = 0.03;
+    for (let kx = 1; kx <= 8; kx += 1) for (let ky = 1; ky <= 8; ky += 1) {
+      const a = lx.pitch / kx, b = ly.pitch / ky, e = Math.abs(a - b) / Math.max(a, b);
+      if (e < bestE && Math.min(a, b) >= 8) { bestE = e; q = (a + b) / 2; }
+    }
+    if (q > 0) {
+      const rx = findLattice(profiles(src, x0, y0, x1, y1, "col").colP, H, q, covX(y0, y1), likeX(y0, y1));
+      const ry = findLattice(profiles(src, x0, y0, x1, y1, "row").rowP, W, q, covY(x0, x1), likeY(x0, x1));
+      if (rx && ry && Math.abs(rx.pitch - ry.pitch) / Math.max(rx.pitch, ry.pitch) < 0.05) { lx = rx; ly = ry; }
+    }
+  }
+
   if (Math.max(lx.pitch, ly.pitch) / Math.min(lx.pitch, ly.pitch) > 1.3) {
     // 两轴周期差太大：用更可信的一轴作为提示重找另一轴
     const hint = lx.score >= ly.score ? lx.pitch : ly.pitch;
@@ -605,10 +623,21 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
     else balanceGhosts(ly, src, "row", y0, ex[0], ex[1], edgeT);
   }
 
-  if (lx.boldExt || ly.boldExt) {
+  // 大格子的粗线序列：右 / 下外框线若在图像边缘被裁掉（线位处没有线），按“左 / 上边距 = 右 / 下边距”补回整格
+  const fillToEdge = (l: Lattice, offset: number, lim: number) => {
+    if (!l.boldExt || l.pitch < SMALL_PITCH) return;
+    const f = regress(l);
+    const m0 = f.a + offset;
+    if (m0 < 0 || m0 >= l.pitch) return;
+    const pos = (k: number) => f.a + (k - l.ka) * f.pitch + offset;
+    for (let j = 0; j < 4 && pos(l.kb + 1) <= lim - m0 + 0.35 * l.pitch; j += 1) l.kb += 1;
+  };
+  fillToEdge(lx, x0, x1);
+  fillToEdge(ly, y0, y1);
+  if ((lx.boldExt && lx.pitch < SMALL_PITCH) || (ly.boldExt && ly.pitch < SMALL_PITCH)) {
     const bg = pageColor(src);
-    if (lx.boldExt) { const ey = extentOf(ly, y0); extendByContent(lx, src, "col", x0, ey[0], ey[1], bg); }
-    if (ly.boldExt) { const ex = extentOf(lx, x0); extendByContent(ly, src, "row", y0, ex[0], ex[1], bg); }
+    if (lx.boldExt && lx.pitch < SMALL_PITCH) { const ey = extentOf(ly, y0); extendByContent(lx, src, "col", x0, ey[0], ey[1], bg); }
+    if (ly.boldExt && ly.pitch < SMALL_PITCH) { const ex = extentOf(lx, x0); extendByContent(ly, src, "row", y0, ex[0], ex[1], bg); }
     else if (lx.boldExt && ly.pitch < SMALL_PITCH && ly.kb - ly.ka < 0.8 * (lx.kb - lx.ka)) { const ex = extentOf(lx, x0); extendByContent(ly, src, "row", y0, ex[0], ex[1], bg, true); }
     if (!lx.boldExt && ly.boldExt && lx.pitch < SMALL_PITCH && lx.kb - lx.ka < 0.8 * (ly.kb - ly.ka)) { const ey = extentOf(ly, y0); extendByContent(lx, src, "col", x0, ey[0], ey[1], bg, true); }
   }
@@ -953,8 +982,11 @@ export function readGrid(
   const bgLab = bgRgb ? rgbToLab(bgRgb) : null;
   // 背景是浅色中性（或未知）时，浅灰/白棋盘格也视为空格
   const lightRule = !bgLab || (bgLab.l >= 85 && chroma(bgLab) <= 8);
+  // 格内的“页面底色”（最大的浅色簇，聚类后确定）：奶油 / 米白豆子（H19…）与它色相不同，不能因为“浅色低彩度”就当背景
+  let gridBg: Lab | null = null;
   const isEmpty = (lab: Lab) =>
-    (bgLab !== null && de76(lab, bgLab) < 6) || (lightRule && lab.l >= 86 && chroma(lab) <= 10);
+    (bgLab !== null && de76(lab, bgLab) < 6) || (gridBg !== null && de76(lab, gridBg) < 6.5) ||
+    (lightRule && lab.l >= 86 && (chroma(lab) <= 3.5 || (chroma(lab) <= 10 && (gridBg === null || de76(lab, gridBg) < 7.5))));
   // 图例里存在与背景几乎同色的色号（如白色 H2）：这类格子要保留
   const protectedLabs = calibrated
     .filter((c) => legend.includes(c.code))
@@ -968,10 +1000,12 @@ export function readGrid(
   const lightFrac = new Float32Array(cols * rows);
   let flatCells = 0;
   const d = src.data;
+  // 小格（≤12 px）：JPEG 在色块交界处有晕边，只取格子中心部分，避开边缘一圈
+  const insetF = Math.min(pitchX, pitchY) <= 10 ? 0.3 : 0.22;
   for (let cy = 0; cy < rows; cy += 1) {
     for (let cx = 0; cx < cols; cx += 1) {
-      const insX = Math.max(1, pitchX * 0.22);
-      const insY = Math.max(1, pitchY * 0.22);
+      const insX = Math.max(1, pitchX * insetF);
+      const insY = Math.max(1, pitchY * insetF);
       const ax = grid.x0 + cx * pitchX + insX, bx = grid.x0 + (cx + 1) * pitchX - insX;
       const ay = grid.y0 + cy * pitchY + insY, by = grid.y0 + (cy + 1) * pitchY - insY;
       let px0 = Math.ceil(ax - 0.5), px1 = Math.floor(bx - 0.5);
@@ -1043,6 +1077,11 @@ export function readGrid(
       cellCluster[i] = bi;
     }
   }
+  {
+    let bn = 0;
+    for (const c of clusters) if (c.lab.l >= 86 && chroma(c.lab) <= 10 && c.n > bn) { bn = c.n; gridBg = c.lab; }
+    if (bn < 0.05 * cells.length || legend.length >= 2) gridBg = null; // 有图例时由图例色号保护浅色豆子，沿用旧规则
+  }
   const empty: boolean[] = clusters.map(() => false);
   const colorCode: string[] = [];
   clusters.forEach((c, j) => {
@@ -1071,6 +1110,46 @@ export function readGrid(
     }
   });
 
+  // 色板收拢（无图例、簇很多时）：JPEG 晕边 / 噪点会产生一堆只有几格的零碎色号。
+  // 用量很小的色号，若与某个大色号很接近（ΔE2000 ≤ 22），并入它；真正的小众色（离所有大色都远）保留。
+  if (legend.length < 2 && !opts.cellVotes && clusters.length > 60) {
+    const byCode = new Map<string, number>();
+    clusters.forEach((c, j) => { if (!empty[j]) byCode.set(c.code, (byCode.get(c.code) ?? 0) + c.n); });
+    const live = [...byCode.values()].reduce((x, y) => x + y, 0);
+    const small = Math.max(4, 0.0035 * live), big = Math.max(24, 0.0045 * live);
+    const bigs = clusters.map((c, j) => ({ c, j })).filter(({ c, j }) => !empty[j] && (byCode.get(c.code) ?? 0) >= big && c.n >= 8);
+    // 混色格：夹在两个大色之间（落在两色连线附近）的中等用量色，多半是色块交界处的 JPEG 晕边，并入离得更近的那个大色
+    const mid = 0.015 * live, bigB = Math.max(60, 0.03 * live);
+    const bigB2 = clusters.filter((c, j) => !empty[j] && (byCode.get(c.code) ?? 0) >= bigB && c.n >= 20);
+    clusters.forEach((c, j) => {
+      const cc = byCode.get(c.code) ?? 0;
+      if (empty[j] || cc >= mid || bigB2.includes(c)) return;
+      let best = 4.5, pick: Cluster | null = null;
+      for (let u = 0; u < bigB2.length; u += 1) {
+        for (let v = u + 1; v < bigB2.length; v += 1) {
+          const A = bigB2[u].lab, B = bigB2[v].lab;
+          const ab = [B.l - A.l, B.a - A.a, B.b - A.b];
+          const len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+          if (len2 < 100) continue;
+          const t = ((c.lab.l - A.l) * ab[0] + (c.lab.a - A.a) * ab[1] + (c.lab.b - A.b) * ab[2]) / len2;
+          if (t < 0.1 || t > 0.9) continue;
+          const dist = Math.hypot(c.lab.l - (A.l + t * ab[0]), c.lab.a - (A.a + t * ab[1]), c.lab.b - (A.b + t * ab[2]));
+          if (dist < best) { best = dist; pick = t < 0.5 ? bigB2[u] : bigB2[v]; }
+        }
+      }
+      if (pick) { c.code = pick.code; c.de = ciede2000(c.lab, pick.lab); }
+    });
+    clusters.forEach((c, j) => {
+      if (empty[j] || (byCode.get(c.code) ?? 0) >= small) return;
+      let bd = 45, bc: Cluster | null = null;
+      for (const { c: t } of bigs) {
+        const de = ciede2000(c.lab, t.lab);
+        if (de < bd) { bd = de; bc = t; }
+      }
+      if (bc) { c.code = bc.code; c.de = bd; }
+    });
+  }
+
   // 格内色号：按簇统计“有墨迹的格子”比例。≥50% 为有字簇，≤10% 为无字簇，其余为混合簇（照片 / 噪点）。
   const members: number[][] = clusters.map(() => []);
   const inkCount: number[] = clusters.map(() => 0);
@@ -1083,6 +1162,8 @@ export function readGrid(
   let inkedCells = 0, mixedCells = 0;
   const kind = clusters.map((c, j) => {
     const f = inkCount[j] / Math.max(1, c.n);
+    // 背景色类的簇天然“空白格 + 带字的白豆”混在一起：不算混合簇，其中有字的格子算作有字格
+    if (treatEmpty && isEmpty(c.lab) && f > 0.1 && f < 0.5) { inkedCells += inkCount[j]; return "plain"; }
     if (f >= 0.5) { inkedCells += c.n; return "ink"; }
     if (f > 0.1) { mixedCells += c.n; return "mixed"; }
     return "plain";
@@ -1119,7 +1200,11 @@ export function readGrid(
   if (treatEmpty) {
     for (let i = 0; i < cand.length; i += 1) {
       const ci = cellCluster[i];
-      if (ci >= 0 && (bgLike[ci] || lightFrac[i] >= 0.7) && !distinctBead[ci]) cand[i] = 1;
+      if (ci < 0 || distinctBead[ci]) continue;
+      // “格子里大多是浅色低彩度像素”也算背景候选，但色相明显偏离页面底色的簇（奶油 / 米白豆子）除外
+      const gb = gridBg as Lab | null;
+      const lightOk = lightFrac[i] >= 0.7 && (gb === null || clusters[ci].n < 12 || chroma(clusters[ci].lab) <= 3.5 || de76(clusters[ci].lab, gb) < 10.2);
+      if (bgLike[ci] || lightOk) cand[i] = 1;
     }
     const stack: number[] = [];
     // 带色号的图纸：边缘的浅色格大多没有字 → 字是“这是豆子”的强信号，泛洪不穿过有字的格子（图形里的白豆 H2 不会被连成背景）；
