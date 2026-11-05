@@ -1963,6 +1963,18 @@ body {
   flex: 0 0 auto;
 }
 
+.warehouse-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 6px 10px;
+  color: var(--brand-dark);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+}
+
 .topbar-stats span {
   display: inline-flex;
   align-items: baseline;

@@ -1,0 +1,29 @@
+[Unit]
+Description=Pindou private warehouse API
+After=network.target
+
+[Service]
+Type=simple
+User=pindou-cloud
+Group=pindou-cloud
+WorkingDirectory=/opt/pindou-cloud/current
+EnvironmentFile=/etc/pindou-cloud.env
+Environment=NODE_OPTIONS=--max-old-space-size=96
+ExecStart=/usr/bin/node /opt/pindou-cloud/current/server.mjs
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pindou-cloud
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryHigh=120M
+MemoryMax=180M
+CPUQuota=50%
+TasksMax=32
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

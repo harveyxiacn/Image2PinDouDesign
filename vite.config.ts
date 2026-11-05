@@ -46,6 +46,8 @@ export default defineConfig({
         ]
       },
       workbox: {
+        // Keep the separate warehouse and all API routes outside the workshop fallback.
+        navigateFallbackDenylist: [new RegExp('^/(warehouse|cloud-api|api)(/|$)')],
         globPatterns: ["**/*.{js,css,html,svg,png,woff2}"],
         // 抠图用的 onnxruntime + 24MB WASM 是按需懒加载，别塞进首屏预缓存；
         // 用到时再下载，并交给浏览器/Cloudflare 缓存。

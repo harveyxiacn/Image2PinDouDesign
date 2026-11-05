@@ -790,6 +790,7 @@ export default function App() {
             ))}
           </ol>
           <div className="topbar-stats" aria-label={`${STATS_SOURCE_LABELS[sourceFilter]}统计`}>
+            <a className="warehouse-link" href="/warehouse/#/settings">私人豆仓</a>
             <span><strong>{filteredDesignCount}</strong> 张图纸</span>
             <span><strong>{totalBeads}</strong> 颗豆</span>
           </div>

@@ -6,10 +6,10 @@ Status: implementation contract, not a release claim. Owner: Astra. Baseline b61
 
 User explicitly resumed development and deployment. Maximum two implementation sessions concurrently. No Oracle sessions. Workers must preserve other edits, stay within ownership, never commit/push/deploy, and return changed files, verification, residual risks and blockers.
 
-- Terra: new pindou-hub/server/cloud/** including backend tests. No existing LAN server changes; no frontend, package manifests, deploy or shared docs edits.
-- Sol: pindou-hub/web/src/{lib,components,pages} account/inventory/order integration and necessary frontend tests, main.tsx, App.tsx, web/vite.config.ts. Preserve recognition/generation/enhancement/stitch code. No server, package manifest, deploy or shared docs edits.
-- Astra: this contract, dependency/package changes if necessary, deployment assets, integration and review. Consult before any protocol change.
-- DeepSeek later: explicitly handed-off test/doc files after implementation ownership is released. Independent Sol review is read-only.
+- Latest user routing supersedes initial assignments: local Claude Code CLI / DeepSeek exclusively owns pindou-hub/server/cloud/**, pindou-hub/web/src/**, web/vite.config.ts and corresponding tests/documentation. Preserve recognition/generation/enhancement/stitch algorithms and unrelated edits. Its existing session is fb37ce5b-8644-4a63-b559-4adcd4b734fa, model default, explicit implementation mode auto.
+- Former Terra and implementation Sol sessions are canceled; they have no write ownership and must not be resumed.
+- Astra owns this contract, package/lock changes, deploy/**, root src/** and vite.config.ts, integration, commits/push and deployment.
+- Independent Sol session cf11665c-6c38-4c1d-a9e4-d5c1f09f3778 remains strictly read-only. Oracle is disabled. Consult Astra before protocol or ownership changes.
 
 ## Security and limits
 
@@ -40,7 +40,7 @@ Operation variants (exact field names):
 - {type:"receiveOrder",orderId}: saved order snapshot -> received plus generated inventory txns atomically. Repeated receipt with a new mutation id returns no additional stock. Reject deleted/missing orders. No partial receipt this release.
 - {type:"completePattern",patternId,deduct:boolean}: done status, optional stock deduction atomically; already consumed cannot deduct again. Use stored counts/copies.
 - {type:"stocktake",code,actual}: server computes difference from current balance after baseRevision check.
-- {type:"import",records:CloudRecord[]}: explicit user-requested backup restore/guest migration; validate entire batch, stable IDs, no partial import; protect already-received/consumed identities and existing immutable txns. Must not provide a loophole to repeat receipt/consume or overwrite unrelated new server data. Conflict fails with actionable message. Export/import roundtrip includes orders.
+- {type:"import",records:CloudRecord[]}: explicit full restore into an empty cloud account. Nonempty accounts accept only semantically identical existing records as a no-op; any new/different record rejects the entire import with 409. Normalize key order and absent/false deleted fields. Validate the whole batch and business associations; roundtrip includes orders. This release does not merge backups into an existing cloud warehouse.
 
 Workers may propose a simpler safe import restriction if needed, but must report and obtain main-agent integration decision before changing this contract. Cloud destructive undo of received/completed business operations can be unavailable with clear copy; never implement partial undo. Preserve local-mode undo and existing behavior.
 

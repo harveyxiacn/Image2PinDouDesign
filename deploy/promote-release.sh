@@ -4,6 +4,12 @@ set -Eeuo pipefail
 release_dir="${1:?Usage: promote-release.sh <release-dir> [site-dir]}"
 site_dir="${2:-/var/www/image2pindou}"
 
+# Cloud warehouse releases require their own reviewed combined deployment path.
+if [[ -d "$site_dir/warehouse" || -f /etc/nginx/snippets/pindou-cloud.conf ]]; then
+  echo 'Cloud warehouse is installed; legacy root-only promotion is disabled.' >&2
+  exit 1
+fi
+
 if [[ ! -d "$release_dir" || ! -f "$release_dir/index.html" ]]; then
   echo "Release directory must contain index.html: $release_dir" >&2
   exit 1

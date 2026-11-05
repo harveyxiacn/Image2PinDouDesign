@@ -13,7 +13,9 @@
     "build": "tsc -p web/tsconfig.json --noEmit && vite build --config web/vite.config.ts",
     "start": "node server/hub.mjs",
     "test": "vitest --run --config web/vite.config.ts",
-    "test:server": "node --test server/store.test.mjs server/hub.test.mjs",
+    "test:server": "node --test server/store.test.mjs server/hub.test.mjs server/cloud/server.test.mjs",
+    "test:cloud": "node --test server/cloud/server.test.mjs",
+    "test:browser": "node web/scripts/cloud-browser-check.mjs",
     "android:sync": "npm run build && cap sync android",
     "android:open": "cap open android"
   },
@@ -33,6 +35,7 @@
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^5.2.0",
     "jpeg-js": "^0.4.4",
+    "playwright-core": "1.64.1",
     "typescript": "^5.9.3",
     "vite": "^7.3.5",
     "vitest": "^4.1.8"
