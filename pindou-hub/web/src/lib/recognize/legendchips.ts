@@ -414,6 +414,7 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
     for (const [e, t] of rb2) e.codeTexts.push(t);
   };
   const resolveCodes = (list: Entry[]) => {
+    const stranded: Array<{ e: Entry; cands: string[]; tally: Map<string, number>; rgb: { r: number; g: number; b: number } }> = [];
     for (const e of list) {
       e.code = null; e.dE = null;
       const cands: string[] = [];
@@ -429,6 +430,7 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
       const rgb = { r: e.chip.r, g: e.chip.g, b: e.chip.b };
       const ok = validateCodeCandidates(cands, rgb, colorOf, e.synthetic ? 14 : 11);
       e.codeAlts = ok.map((o) => o.code);
+      if (!ok.length && !e.synthetic && cands.length) stranded.push({ e, cands, tally, rgb });
       if (ok.length) { e.code = ok[0].code; e.dE = ok[0].dE; }
       // 读到的色号是某个更长色号的前缀（“D1”其实是 D11 掉了一笔），而色块颜色与更长的那个吻合得多：取更长的
       if (e.code && !e.synthetic && (e.dE ?? 0) > 3) {
@@ -480,6 +482,19 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
         const best = [...ok].sort((a, b) => a.dE - b.dE)[0];
         if (best.code !== e.code && best.dE + 4 < (e.dE ?? 99) && 2 * (tally.get(best.code) ?? 0) >= (tally.get(e.code) ?? 0)) { e.codeAlts = [best.code, ...e.codeAlts.filter((c) => c !== best.code)]; e.code = best.code; e.dE = best.dE; }
       }
+    }
+    // 几遍 OCR 一致读到同一个色号（≥ 3 遍），但它与色块颜色差得离谱（ΔE > 20），其他候选也都没通过颜色校验：
+    // 多半是一位数字读混（C20 读成 C28），换成形近数字后颜色吻合（ΔE ≤ 14）、且没被别的色块占用的色号。
+    // 只有一遍读到的（噪声）不走这条：否则会把按颜色就能认出的色号（A10 → A7）改坏
+    for (const { e, cands, tally, rgb } of stranded) {
+      if (e.code) continue;
+      const top = [...cands].sort((x, y) => (tally.get(y) ?? 0) - (tally.get(x) ?? 0))[0];
+      if (!top || (tally.get(top) ?? 0) < 3 || cands.some((c) => c !== top && (tally.get(c) ?? 0) >= 2)) continue;
+      const topDE = nearestCodesByColor(rgb, [top], colorOf, 999, 1)[0];
+      if (!topDE || topDE.dE <= 20) continue;
+      const usedElsewhere = new Set(list.filter((o) => o !== e && o.code).map((o) => o.code as string));
+      const best = nearestCodesByColor(rgb, swapVariants(top).filter((v) => !usedElsewhere.has(v)), colorOf, 14, 1)[0];
+      if (best) { e.codeAlts = [best.code]; e.code = best.code; e.dE = best.dE; }
     }
   };
   // 第一遍不加白名单：色块里常写“A1 · 154 颗”，白名单会把分隔符丢掉让色号和数量连成一串；不加白名单时分隔符能保留

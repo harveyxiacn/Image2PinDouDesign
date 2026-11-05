@@ -390,6 +390,17 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     const patchy = patchRatio >= 0.3 || rawOff;
     const codesStrong = !!cellCodesRead && !!cellCodeStats && cellCodeStats.read / Math.max(1, cellCodeStats.clusters) >= 0.75;
     const agreement = Math.max(0, 1 - abs / Math.max(lt, gt, 1));
+    // 色块图例已“闭合”：每个色块都有色号，没读出数量的色块也已用网格补上，且总数与网格吻合——此时网格里多出来的、
+    // 不在图例色板里的色号只是图外装饰 / 水印 / 渐变色造成的零星假色（全力以赴的 A25/G16/M5、比奇堡居民 02da 的 H2），不是漏掉的色块
+    if (added.length && legendUsed.palette && legendUsed.palette.length >= 3 && Math.abs(lt - gt) / Math.max(lt, gt, 1) <= 0.03) {
+      const inPal = (c: string) => legendUsed.palette!.some((p) => p.code === c);
+      const extras = added.filter((c) => !inPal(c));
+      const sumExtra = extras.reduce((t, c) => t + (counts[c] ?? 0), 0);
+      if (extras.length && legendUsed.palette.length === legendUsed.items.length + added.filter(inPal).length && sumExtra <= 0.07 * lt) {
+        for (const c of extras) { delete counts[c]; added.splice(added.indexOf(c), 1); }
+        step("legend-extra", "忽略图例外的色号", "warn", `图例色块已全部读到，网格里多出的 ${extras.join("、")} 不在图例色板里（共 ${fmt(sumExtra)} 颗，多为图外装饰 / 水印 / 渐变色），不计入`);
+      }
+    }
     if (added.length) step("legend-missing", "补全图例", "warn", `图例漏读 ${added.length} 个色号（${added.join("、")}），已按网格统计补上`);
     if (Math.abs(lt - gt) / Math.max(lt, gt, 1) <= 0.03) {
       method = "legend+grid";
@@ -402,8 +413,8 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       }
       step("compare", "图例与网格对照", mismatch ? "warn" : "ok",
         mismatch
-          ? `总数吻合（图例 ${fmt(lt)} / 网格 ${fmt(gt)}），网格统计与图例有 ${mismatch} 个色号不一致`
-          : `图例与网格完全一致，共 ${fmt(lt)} 颗`);
+          ? `总数吻合（图例 ${fmt(sum(counts))} / 网格 ${fmt(gt)}），网格统计与图例有 ${mismatch} 个色号不一致`
+          : `图例与网格完全一致，共 ${fmt(sum(counts))} 颗`);
     } else {
       // 两边总数对不上：谁更可信？有总数（抬头 / 图上标注）就看谁更接近；没有就看网格是否“可信”
       // （规整、平涂、平均色差小）——小图里图例数字 OCR 常读错位，而网格计数是确定性的
@@ -917,8 +928,14 @@ function reconcileLegend(legend: LegendReading, reading: GridReading, statedTota
     if (s.length > 1) { cands.add(Number(s.slice(0, -1))); cands.add(Number(s.slice(1))); }
     // 漏读一位（49 → 9）：在任意位置补一个数字
     for (let i = 0; i <= s.length; i += 1) for (let dgt = 0; dgt <= 9; dgt += 1) cands.add(Number(s.slice(0, i) + dgt + s.slice(i)));
+    // 形近数字互换（1↔7、8↔0）：网格整体不可信（多数色号对不上）时，网格数碰巧差一位数字不能算证据；
+    // 色块图例读出的数只有“改动幅度大到足以改变合计”（≥ 0.5%：丧尸暴龙兽 H7 788→708）才互换，
+    // 几颗的改动（海马濑人 C16 11→17，被网格里 6 个串色格拉过去）保持图例原读数
     for (let i = 0; i < s.length; i += 1) {
-      for (const p of DIGIT_PARTNER[s[i]] ?? []) cands.add(Number(s.slice(0, i) + p + s.slice(i + 1)));
+      for (const p of DIGIT_PARTNER[s[i]] ?? []) {
+        const v = Number(s.slice(0, i) + p + s.slice(i + 1));
+        if (gridTrusted || item.source !== "色块图例" || Math.abs(v - l) >= 0.005 * legendSum) cands.add(v);
+      }
     }
     let best: number | null = null;
     for (const c of cands) {

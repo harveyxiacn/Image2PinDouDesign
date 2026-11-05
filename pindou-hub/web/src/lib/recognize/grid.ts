@@ -70,6 +70,8 @@ type Lattice = {
   score: number;
   /** 由“每 5 格一条粗线”结构外推出的范围（细线看不见，trimEnds / balanceGhosts 不再适用） */
   boldExt?: boolean;
+  /** boldExt 时粗线序列的余数：k ≡ boldR (mod 5) 的齿位是粗线 */
+  boldR?: number;
 };
 
 type CombFit = { pitch: number; phase: number; score: number };
@@ -420,13 +422,16 @@ function findLattice(P: Float64Array, lineLen: number, hint?: number, cov?: (pos
   }
   const lenFactor = Math.sqrt(Math.min(1, (kb - ka + 1) / 6));
   const score = (0.6 * contrast + 0.4 * regularity) * lenFactor;
-  return { pitch: p, pts, ka, kb, score, boldExt };
+  return { pitch: p, pts, ka, kb, score, boldExt, boldR };
 }
 
 /**
  * 低清 JPEG 图：空白格之间的细线几乎看不见，但每 5 格一条的粗线（以及外框）仍然横贯全图。
  * 找出 k ≡ r (mod 5) 的粗线序列，沿它向两端延伸（粗线位置上有线就继续），得到完整的网格范围。
  */
+/** 小格距粗线序列两端的粗线覆盖率至少是粗线中位数的这个比例 */
+const TAIL_BOLD = 0.6;
+
 function boldExtend(covs: number[], K: number, ka: number, kb: number, like: (k: number) => boolean, bigPitch = false): { ka: number; kb: number; r1: number } | null {
   const meds: number[] = [];
   for (let r = 0; r < 5; r += 1) {
@@ -448,6 +453,12 @@ function boldExtend(covs: number[], K: number, ka: number, kb: number, like: (k:
   const skipTo = (k: number, dir: 1 | -1) => { for (let m = 2; m <= 3; m += 1) if (isBold(k + 5 * m * dir)) return m; return 0; };
   for (;;) { if (isBold(lo - 5)) lo -= 5; else { const m = skipTo(lo, -1); if (!m) break; lo -= 5 * m; } }
   for (;;) { if (isBold(hi + 5)) hi += 5; else { const m = skipTo(hi, 1); if (!m) break; hi += 5 * m; } }
+  // 小格距：末尾几条“粗线”若只靠 lineLike 放行、覆盖率明显低于粗线中位数（图例 / 说明文字的行线），不算板子
+  if (!bigPitch) {
+    const weakEnd = (k: number) => covs[k] < TAIL_BOLD * meds[r1];
+    while ((hi - lo) / 5 > 8 && weakEnd(hi)) hi -= 5;
+    while ((hi - lo) / 5 > 8 && weakEnd(lo)) lo += 5;
+  }
   if ((hi - lo) / 5 < 8) return null;
   // 右 / 下端：最后一条粗线之后到外框之间还有 0~4 格（外框线本身也是线位）
   let end = hi;
@@ -725,6 +736,17 @@ function detectCore(src: PixelSource, region?: Rect | null, pitchHint?: number):
       const ex = extentOf(lx, x0); extendByContent(ly, src, "row", y0, ex[0], ex[1], bg, true, 3);
     }
   }
+  // 小格距粗线外推（低清图）：标尺圈是板子外多出的一圈整格，板子左 / 上边框落在粗线位上（k ≡ boldR）；
+  // 起点比粗线位早一格 = 起点是标尺外沿。标尺四边对称，所以两端各去掉一格。
+  // 相位判据只在两轴都满足、或只有行轴（纵向，另一轴是细线可见的普通格网）满足时才信：
+  // 列轴单独满足时，jpgref 1080 / 1280 宽的版本里行轴的相位是错的，剥一轴会让后面的 trimRulerBands 少剥一行
+  {
+    const ringAt = (l: Lattice) => !!l.boldExt && l.pitch < SMALL_PITCH && l.boldR !== undefined && l.kb - l.ka > 12 && ((l.ka - l.boldR) % 5 + 5) % 5 === 4;
+    const rx = ringAt(lx), ry = ringAt(ly);
+    const both = rx && ry && Math.max(lx.pitch, ly.pitch) < RING_PITCH; // 两轴都满足仍可能是巧合：格距大到标尺数字读得出（jpgref 1280 宽）时留给 trimRulerBands
+    if (ry && (both || !lx.boldExt)) { ly.ka += 1; ly.kb -= 1; }
+    if (both) { lx.ka += 1; lx.kb -= 1; }
+  }
   const score = (lx.score + ly.score) / 2;
   if (score < 0.3) return null;
   const cols = lx.kb - lx.ka;
@@ -798,6 +820,8 @@ function noiseLevel(src: PixelSource, x0: number, y0: number, x1: number, y1: nu
 }
 
 /** 小于此格距（像素）时启用“线位 vs 半格处”差分判线（低清 JPEG 图） */
+/** 两轴相位都指向标尺圈时，格距小于此值（px）才在这里剥圈 */
+const RING_PITCH = 7;
 const SMALL_PITCH = typeof process !== "undefined" && process.env?.PH_NOFAINT ? 0 : 12;
 
 /** 低阈值下，线位处的覆盖率明显高于左右半格处：低对比度的细格线（空白格间的浅线）也能认出来；标尺数字 / 色块边缘不满足 */
