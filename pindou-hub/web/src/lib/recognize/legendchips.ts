@@ -28,6 +28,8 @@ type Entry = {
   code: string | null;
   dE: number | null;
   guessed: boolean;
+  /** 按颜色猜的色号与 OCR 读到的系列字母（如“F”）一致：是真色块，只是数字没读清 */
+  leadOk?: boolean;
   count: number | null;
   countAlts: number[];
   codeAlts: string[];
@@ -413,6 +415,36 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
         const longer = nearestCodesByColor(rgb, [...VALID].filter((c) => c.length > e.code!.length && c.startsWith(e.code!)), colorOf, 3, 1)[0];
         if (longer) { e.codeAlts = [longer.code, ...e.codeAlts.filter((c) => c !== longer.code)]; e.code = longer.code; e.dE = longer.dE; }
       }
+      // 系列字母没读出来、只读到数字（“15(155)”“10(20)”，单独读色号段时读成“15”）：几遍都读到同一个数字，
+      // 而当前色号只有一遍（或是按颜色猜的）支持 → 在“某系列 + 这个数字”的色号里按色块颜色挑
+      if (!e.synthetic) {
+        const dv = new Map<string, number>();
+        for (const t of e.codeTexts) {
+          const w = t.normalize("NFKC").toUpperCase().replace(/\s+/g, "");
+          // 只认“数字(”这种色号(数量)写法，或单独切出来的色号段（色块里只印数量的图例不会走到这里）
+          const m = /^(\d{1,2})(\(|$)/.exec(w);
+          if (m && m[1][0] !== "0" && (m[2] === "(" || e.splitCodes)) dv.set(m[1], (dv.get(m[1]) ?? 0) + 1);
+        }
+        let dig: string | null = null, dn = 0;
+        for (const [k, v] of dv) if (v > dn) { dig = k; dn = v; }
+        const cur = e.code ? (tally.get(e.code) ?? 0) : 0;
+        if (dig && dn >= 2 && dn > cur) {
+          const pool = [...VALID].filter((c) => c.replace(/^[A-Z]+/, "") === dig);
+          const best = nearestCodesByColor(rgb, pool, colorOf, 11, 1)[0];
+          if (best && best.code !== e.code) { e.codeAlts = [best.code, ...e.codeAlts.filter((c) => c !== best.code)]; e.code = best.code; e.dE = best.dE; }
+        }
+      }
+      // 读出的某段字多了一笔（“C239” 其实是 C29）：去掉一个字符后得到的色号若与色块颜色吻合得多，取它（C9 与 C29 都是蓝，靠颜色区分）
+      if (!e.synthetic && (e.code === null || (e.dE ?? 0) > 4)) {
+        const vars = new Set<string>();
+        for (const t of e.codeTexts) {
+          const w = t.normalize("NFKC").toUpperCase().replace(/[^0-9A-Z]/g, "");
+          if (w.length < 3 || w.length > 5) continue;
+          for (let i = 1; i < w.length; i += 1) { const v = w.slice(0, i) + w.slice(i + 1); if (VALID.has(v) && v !== e.code) vars.add(v); }
+        }
+        const best = nearestCodesByColor(rgb, vars, colorOf, 6, 1)[0];
+        if (best && best.dE + 4 < (e.dE ?? 99)) { e.codeAlts = [best.code, ...e.codeAlts.filter((c) => c !== best.code)]; e.code = best.code; e.dE = best.dE; }
+      }
     }
   };
   // 第一遍不加白名单：色块里常写“A1 · 154 颗”，白名单会把分隔符丢掉让色号和数量连成一串；不加白名单时分隔符能保留
@@ -608,8 +640,14 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   for (const e of entries) if (e.code) used.add(e.code);
   for (const e of entries) {
     if (e.code || e.synthetic) continue;
-    const near = nearestCodesByColor({ r: e.chip.r, g: e.chip.g, b: e.chip.b }, [...VALID].filter((c) => !used.has(c)), colorOf, 12, 3);
-    if (near.length) { e.code = near[0].code; e.dE = near[0].dE; e.guessed = true; e.codeAlts = near.map((n) => n.code); used.add(e.code); }
+    // OCR 至少读出了系列字母（“F”“FE”）：先只在这个系列里按颜色找
+    const lead = leadLetter(e.codeTexts);
+    const free = [...VALID].filter((c) => !used.has(c));
+    const rgb = { r: e.chip.r, g: e.chip.g, b: e.chip.b };
+    let near = lead ? nearestCodesByColor(rgb, free.filter((c) => c.startsWith(lead) && /^[0-9]/.test(c.slice(lead.length))), colorOf, 12, 3) : [];
+    const leadOk = near.length > 0;
+    if (!near.length) near = nearestCodesByColor(rgb, free, colorOf, 12, 3);
+    if (near.length) { e.code = near[0].code; e.dE = near[0].dE; e.guessed = true; e.leadOk = leadOk; e.codeAlts = near.map((n) => n.code); used.add(e.code); }
   }
 
   const items: LegendItem[] = [];
@@ -621,7 +659,7 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
   const dropUnread = entries.filter((e) => e.count !== null).length >= 0.5 * entries.length;
   for (const e of entries) {
     if (!e.code) continue;
-    if (dropUnread && e.count === null && e.guessed) continue;
+    if (dropUnread && e.count === null && e.guessed && !e.leadOk) continue;
     const rgb = e.synthetic ? (colorOf(e.code) ?? { r: e.chip.r, g: e.chip.g, b: e.chip.b }) : { r: e.chip.r, g: e.chip.g, b: e.chip.b };
     colors[e.code] = rgb;
     palette.push({ code: e.code, rgb, count: e.count, ...(e.guessed ? { guessed: true } : {}) });
@@ -650,6 +688,18 @@ export async function readChipLegend(img: PixelSource, signal: AbortSignal): Pro
 }
 
 /** 至少有两遍读出同一个数（非空）：读数已经可信，不必再多读 */
+/** 多遍色号 OCR 里最常见的首字母（须是某个色号系列的字母，且至少两遍一致），读不出为 null */
+function leadLetter(texts: string[]): string | null {
+  const tally = new Map<string, number>();
+  for (const t of texts) {
+    const m = t.normalize("NFKC").toUpperCase().match(/[A-Z]/);
+    if (m && [...VALID].some((c) => c.startsWith(m[0]) && /^[0-9]/.test(c.slice(1)))) tally.set(m[0], (tally.get(m[0]) ?? 0) + 1);
+  }
+  let best: string | null = null, n = 0;
+  for (const [k, v] of tally) if (v > n) { best = k; n = v; }
+  return n >= 2 ? best : null;
+}
+
 function agreed(vals: Array<number | null | undefined>): boolean {
   const seen = new Set<number>();
   for (const v of vals) { if (v === null || v === undefined) continue; if (seen.has(v)) return true; seen.add(v); }
