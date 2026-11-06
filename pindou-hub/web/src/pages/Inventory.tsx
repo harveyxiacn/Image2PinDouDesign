@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import { Icon, fmt, DiffNumber } from "../components/ui";
 import { useData } from "../lib/db";
 import { demandByCode, isActive, stockByCode, compareCodes } from "../lib/inventory";
-import { ALL_CODES, PALETTE_KITS, colorOf, getPaletteKit } from "../lib/palette";
+import { ALL_CODES, PALETTE_KITS, colorOf, getPaletteKit, normalizeKitId } from "../lib/palette";
 import { levelOf, matchesQuery, seriesOf } from "../lib/stockview";
 import { BeadBox, type CellInfo } from "../components/stock/BeadBox";
 import { CodeSheet } from "../components/stock/CodeSheet";
@@ -20,7 +20,7 @@ export default function Inventory() {
   const [filter, setFilter] = useState<Filter>("recorded");
   const [series, setSeries] = useState("");
   const [query, setQuery] = useState("");
-  const [kitId, setKitId] = useState(data.prefs.kitId);
+  const [kitId, setKitId] = useState(() => normalizeKitId(data.prefs.kitId));
   const [open, setOpen] = useState<string | null>(null);
   const [batch, setBatch] = useState(false);
   const [kitInit, setKitInit] = useState(false);

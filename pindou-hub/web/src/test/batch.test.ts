@@ -100,6 +100,25 @@ describe("queue reducer", () => {
     items = reduceBatch(items, { type: "retry", id: "id-a.jpg" });
     expect(items[0].verifiedAt).toBeUndefined();
   });
+  it("keeps edited counts and matrix when returning an item to the queue", () => {
+    let items = add(["a.jpg"]);
+    items = reduceBatch(items, { type: "start", id: "id-a.jpg" });
+    items = reduceBatch(items, { type: "finish", id: "id-a.jpg", result: result() });
+    const base = result();
+    const edited = {
+      ...base,
+      counts: { A1: 99 },
+      grid: { ...base.grid!, matrix: [["A1"]], counts: { A1: 1 } }
+    };
+    items = reduceBatch(items, { type: "edited", id: "id-a.jpg", result: edited, reasons: ["已手动修改 1 格"] });
+    expect(items[0].result?.counts).toEqual({ A1: 99 });
+    expect(items[0].result?.grid?.matrix).toEqual([["A1"]]);
+    expect(items[0].reasons).toContain("已手动修改 1 格");
+    expect(items[0].review).toBe(true);
+    items = reduceBatch(items, { type: "verify", id: "id-a.jpg" });
+    expect(items[0].review).toBe(false);
+    expect(items[0].verifiedAt).toBeGreaterThan(0);
+  });
   it("saved items are not savable again and cannot be retried; running cannot be removed", () => {
     let items = add(["a.jpg"]);
     items = reduceBatch(items, { type: "start", id: "id-a.jpg" });

@@ -19,6 +19,10 @@ export function isKnownCode(code: string): boolean {
 export function kitCodes(kitId: string): string[] {
   return [...getPaletteKit(kitId).codes];
 }
+/** 旧版保存的套装 id（如已修正的 mard-264）统一解析成当前 id，避免下拉框没有对应选项。 */
+export function normalizeKitId(kitId: string | null | undefined): string {
+  return getPaletteKit(kitId).id;
+}
 /** 输入框里的色号规范化：全角、小写、空格 → "A1" / "ZG3"；无效返回 null */
 export function normalizeCode(input: string): string | null {
   const text = input.normalize("NFKC").toUpperCase().replace(/\s+/g, "");

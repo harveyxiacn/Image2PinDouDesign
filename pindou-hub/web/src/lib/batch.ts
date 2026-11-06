@@ -36,6 +36,7 @@ export type BatchAction =
   | { type: "duplicate"; id: string; imageId: string }
   | { type: "fail"; id: string; error: string }
   | { type: "name"; id: string; name: string }
+  | { type: "edited"; id: string; result: AnalyzeResult; reasons?: string[] }
   | { type: "verify"; id: string }
   | { type: "cancelAll" }
   | { type: "retry"; id: string }
@@ -171,6 +172,12 @@ export function reduceBatch(items: BatchItem[], a: BatchAction): BatchItem[] {
     case "duplicate": return patch(a.id, (it) => (it.state === "waiting" || it.state === "running" ? { ...it, state: "duplicate", duplicateImageId: a.imageId } : it));
     case "fail": return patch(a.id, (it) => (it.state === "running" ? { ...it, state: "failed", error: a.error } : it));
     case "name": return patch(a.id, (it) => ({ ...it, name: a.name.trim() || it.name }));
+    case "edited": return patch(a.id, (it) => {
+      if (it.state !== "done") return it;
+      const c = classify(a.result);
+      const reasons = [...(a.reasons ?? []), ...c.reasons.filter((reason) => !(a.reasons ?? []).includes(reason))];
+      return { ...it, state: c.state, result: a.result, steps: a.result.steps, review: reasons.length > 0, reasons, error: c.error };
+    });
     case "verify": return patch(a.id, (it) => (it.state === "done" ? { ...it, verifiedAt: Date.now(), review: false } : it));
     case "cancelAll": return items.map((it) => (it.state === "waiting" || it.state === "running" ? { ...it, state: "cancelled" as const } : it));
     case "retry": return patch(a.id, (it) => (it.state === "failed" || it.state === "cancelled" || it.state === "notchart" || it.state === "duplicate" || it.state === "done" && !it.savedId

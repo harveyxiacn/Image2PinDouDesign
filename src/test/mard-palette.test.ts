@@ -5,6 +5,8 @@ import { MARD_221_SEEDS, MARD_EXTENDED_SEEDS, MARD_PALETTE } from "../domain/pal
 import {
   DEFAULT_KIT_ID,
   KIT_STORAGE_KEY,
+  MARD_265_EXTRAS,
+  MARD_RETAIL_ORDER,
   PALETTE_KITS,
   getPaletteKit,
   loadPaletteKitId,
@@ -56,6 +58,27 @@ describe("palette kits", () => {
     expect(loadPaletteKitId()).toBe("mard-221");
     expect(paletteForKit(getPaletteKit("mard-221"))).toHaveLength(221);
     expect(paletteForKit(getPaletteKit("mard-291"))).toHaveLength(291);
+  });
+
+  it("matches the merchant chart compositions for retail kits", () => {
+    for (const size of [24, 48, 72, 96, 120, 144, 168, 192, 216]) {
+      expect(getPaletteKit(`mard-${size}`).codes).toEqual(MARD_RETAIL_ORDER.slice(0, size));
+    }
+    expect(getPaletteKit("mard-221").codes).toHaveLength(221);
+    expect(new Set(getPaletteKit("mard-221").codes)).toEqual(new Set(MARD_RETAIL_ORDER));
+    expect(getPaletteKit("mard-221").codes.slice(216)).toEqual(["C29", "D10", "B9", "C12", "D4"]);
+    expect(getPaletteKit("mard-265").codes).toHaveLength(265);
+    expect(getPaletteKit("mard-265").codes).toContain("C29");
+    expect(new Set(getPaletteKit("mard-265").codes)).toEqual(new Set([...MARD_RETAIL_ORDER, ...MARD_265_EXTRAS]));
+    expect(MARD_265_EXTRAS).toHaveLength(44);
+  });
+
+  it("resolves the retired 264 kit id to the corrected 265 kit", () => {
+    window.localStorage.setItem(KIT_STORAGE_KEY, "mard-264");
+    expect(loadPaletteKitId()).toBe("mard-265");
+    expect(getPaletteKit("mard-264").codes).toHaveLength(265);
+    expect(paletteForKit(getPaletteKit("mard-264"))).toHaveLength(265);
+    expect(resolveAllowedCodes(getPaletteKit("mard-265"), ["C29"])).toEqual(["C29"]);
   });
 
   it("only references real palette codes", () => {

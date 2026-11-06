@@ -27,7 +27,7 @@ describe("board pins and palette kits", () => {
     expect(maxBoardsPerSide(104)).toBe(2);
   });
 
-  it("provides the official MARD retail kits from 24 to 264 colors plus all 291", () => {
+  it("provides the official MARD retail kits from 24 to 265 colors plus all 291", () => {
     const sizes = [24, 48, 72, 96, 120, 144, 168, 192, 216, 221];
     let previous: readonly string[] = [];
     for (const size of sizes) {
@@ -41,15 +41,17 @@ describe("board pins and palette kits", () => {
     }
     // 官方 24 色套装的固定内容（含黑白）。
     expect(getPaletteKit("mard-24").codes).toEqual(expect.arrayContaining(["H1", "H2", "H7", "A4", "B5", "C5"]));
-    const kit264 = getPaletteKit("mard-264");
-    expect(kit264.codes).toHaveLength(264);
-    expect(kit264.codes).not.toContain("C29");
-    expect(kit264.codes).toEqual(expect.arrayContaining(["P1", "R13", "Y5", "Q5", "T1"]));
-    expect(PALETTE_KITS.map((kit) => kit.codes.length)).toEqual([...sizes, 264, 291]);
+    const kit265 = getPaletteKit("mard-265");
+    expect(kit265.codes).toHaveLength(265);
+    expect(kit265.codes).toContain("C29");
+    expect(kit265.codes).toEqual(expect.arrayContaining(["P1", "R13", "Y5", "Q5", "T1"]));
+    expect(PALETTE_KITS.map((kit) => kit.codes.length)).toEqual([...sizes, 265, 291]);
   });
 
-  it("migrates the old curated kit ids to the official kit of the same size", () => {
+  it("migrates old kit ids, including 264 to the corrected 265 kit", () => {
     expect(getPaletteKit("curated-48").id).toBe("mard-48");
+    expect(getPaletteKit("mard-264").id).toBe("mard-265");
+    expect(getPaletteKit("mard-264").codes).toHaveLength(265);
     expect(getPaletteKit("nope").id).toBe("mard-221");
   });
 });

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Sheet, fmt } from "../ui";
 import { useData } from "../../lib/db";
-import { PALETTE_KITS, getPaletteKit, isKnownCode } from "../../lib/palette";
+import { PALETTE_KITS, getPaletteKit, isKnownCode, normalizeKitId } from "../../lib/palette";
 import { stockByCode } from "../../lib/inventory";
 import { commitPurchase } from "./actions";
 import "./stock.css";
@@ -9,7 +9,7 @@ import "./stock.css";
 /** 按套装初始化库存：每个色号入库相同数量（追加，或补齐到该数量）。 */
 export function KitInit({ onClose }: { onClose: () => void }) {
   const data = useData();
-  const [kitId, setKitId] = useState(data.prefs.kitId);
+  const [kitId, setKitId] = useState(() => normalizeKitId(data.prefs.kitId));
   const [qty, setQty] = useState("500");
   const [mode, setMode] = useState<"add" | "fill">("add");
   const [ack, setAck] = useState(false);

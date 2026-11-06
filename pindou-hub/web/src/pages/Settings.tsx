@@ -4,7 +4,7 @@ import QRCode from "qrcode";
 import { Icon, fmt, fmtTime, toast } from "../components/ui";
 import { exportRecords, putRecords, saveDevice, useData } from "../lib/db";
 import { hubInfo, localPairInfo, pairWithHub, syncNow, unpair, useSyncState } from "../lib/sync";
-import { PALETTE_KITS } from "../lib/palette";
+import { PALETTE_KITS, normalizeKitId } from "../lib/palette";
 import type { CollectionName } from "../lib/model";
 import { parseBackup } from "../lib/stockview";
 import { copyText, downloadText } from "../components/stock/download";
@@ -149,7 +149,7 @@ function PrefsSection() {
   const [low, setLow] = useState(String(prefs.lowStock));
   const [pack, setPack] = useState(String(prefs.packSize));
   const [loss, setLoss] = useState(String(Math.round(prefs.lossRate * 1000) / 10));
-  const [kit, setKit] = useState(prefs.kitId);
+  const [kit, setKit] = useState(() => normalizeKitId(prefs.kitId));
   const save = async () => {
     await putRecords("prefs", [{
       ...prefs, lowStock: Math.max(0, Math.round(Number(low)) || 0), packSize: Math.max(1, Math.round(Number(pack)) || 1),

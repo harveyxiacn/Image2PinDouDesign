@@ -1,4 +1,4 @@
-import { MARD_221_SEEDS, MARD_PALETTE } from "./palette";
+import { MARD_PALETTE } from "./palette";
 import type { PaletteColor } from "./types";
 
 // 色卡套装：用户手里买的是哪一套豆子，生成图纸时就只从这套里挑颜色。
@@ -11,9 +11,10 @@ export type PaletteKit = {
   codes: readonly string[];
 };
 
-// MARD 零售套装：色号清单依据 MARD 264 色零售色卡整理（数据来源 pixel-beads.com 的 MARD 色号页，
-// 2026-11-03 抓取）。24 → 221 色是逐级追加的：每个套装都是下面顺序的前 N 个色号。
-// 264 色套装不含 C29，另加珠光 P、冻色 R、夜光 Y、温变 Q 与 T1 共 44 色。
+// MARD 零售套装：24 → 221 色按商家色号图逐级追加，每个套装都是下面顺序的前 N 个色号。
+// 2026-11-06 用商家色号图表复核：24/48/72/96 为面板 1–4，120 为面板 A–E（与 1–5 同集合），
+// 144/168/216 依次追加面板 6 / 9 / 10+11；221 再追加 C29、D10、B9、C12、D4。
+// 265 色 = 221 色 + 珠光 P、冻色 R、夜光 Y、温变 Q 与 T1 共 44 色（含 C29）。
 // 不同销售渠道 / 包装版本可能有差异，界面上提示“以实际购买的色卡为准”。
 export const MARD_RETAIL_ORDER: readonly string[] = [
   "B3", "C3", "D9", "E2", "G1", "A4", "B5", "C5", "D6", "E4", "G5", "A6", "B8", "C8", "D7", "F5", "G7", "A7",
@@ -32,7 +33,8 @@ export const MARD_RETAIL_ORDER: readonly string[] = [
   "C18", "B22", "C19", "C26", "C29", "D10", "B9", "C12", "D4"
 ];
 
-const MARD_264_EXTRAS: readonly string[] = [
+/** 265 色套装比 221 色多出的 44 色：珠光、冻色、夜光、温变与 T1。 */
+export const MARD_265_EXTRAS: readonly string[] = [
   "P18", "P16", "P3", "P12", "P1", "T1", "P7", "P17", "P6", "P13", "P9", "P11", "P4", "P5", "P15", "P14", "P2",
   "R12", "P23", "P22", "P21", "P20", "P19", "P8", "P10", "R11", "Y2", "Y3", "Q2", "Y4", "Y5", "Y1", "R3", "R4",
   "R5", "R8", "R9", "R2", "R1", "R10", "R6", "R7", "R13", "Q5"
@@ -53,13 +55,13 @@ export const PALETTE_KITS: PaletteKit[] = [
     id: "mard-221",
     name: "MARD 221 色",
     description: "最常见的标准套装：A–H、M 九个系列。",
-    codes: MARD_221_SEEDS.map((seed) => seed.code)
+    codes: MARD_RETAIL_ORDER
   },
   {
-    id: "mard-264",
-    name: "MARD 264 色",
-    description: "221 色（不含 C29）加珠光、冻色、夜光、温变等 44 色。",
-    codes: [...MARD_RETAIL_ORDER.filter((code) => code !== "C29"), ...MARD_264_EXTRAS]
+    id: "mard-265",
+    name: "MARD 265 色",
+    description: "221 色（含 C29）加珠光、冻色、夜光、温变等 44 色。",
+    codes: [...MARD_RETAIL_ORDER, ...MARD_265_EXTRAS]
   },
   {
     id: "mard-291",
@@ -69,10 +71,12 @@ export const PALETTE_KITS: PaletteKit[] = [
   }
 ];
 
-// 旧版本保存的“精选 N 色”套装 id 迁移到同色数的官方零售套装。
-const LEGACY_KIT_IDS: Record<string, string> = Object.fromEntries(
-  [24, 48, 72, 96, 120, 144, 168].map((size) => [`curated-${size}`, `mard-${size}`])
-);
+// 旧版本保存的“精选 N 色”套装 id 迁移到同色数的官方零售套装；
+// 早期的 264 色套装少 C29，按商家色号图修正为 265 色后保留别名，避免旧设置失效。
+const LEGACY_KIT_IDS: Record<string, string> = {
+  ...Object.fromEntries([24, 48, 72, 96, 120, 144, 168].map((size) => [`curated-${size}`, `mard-${size}`])),
+  "mard-264": "mard-265"
+};
 
 export const DEFAULT_KIT_ID = "mard-221";
 export const KIT_STORAGE_KEY = "image2pindou:palette-kit:v1";

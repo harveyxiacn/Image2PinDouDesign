@@ -7,7 +7,7 @@ import { useData } from "../../lib/db";
 import { stockByCode } from "../../lib/inventory";
 import { loadPixelSource, saveImage } from "../../lib/images";
 import { BOARD_CHOICES, buildConversionSettings, DEFAULT_GENERATE_OPTIONS, previewCellSize, startGeneration, type BoardChoice, type GenerateJob } from "../../lib/generate";
-import { PALETTE } from "../../lib/palette";
+import { PALETTE, normalizeKitId } from "../../lib/palette";
 import { fmt, navigate, toast } from "../ui";
 import ImageDrop from "./ImageDrop";
 import MatrixView from "./MatrixView";
@@ -41,7 +41,7 @@ export default function GeneratePanel({ file, onFile, onClear }: { file: File | 
   const [cw, setCw] = useState(64);
   const [ch, setCh] = useState(64);
   const [maxColors, setMaxColors] = useState<MaxColors>(24);
-  const [kitId, setKitId] = useState(data.prefs.kitId || DEFAULT_GENERATE_OPTIONS.kitId);
+  const [kitId, setKitId] = useState(() => normalizeKitId(data.prefs.kitId || DEFAULT_GENERATE_OPTIONS.kitId));
   const [onlyStock, setOnlyStock] = useState(false);
   const [dither, setDither] = useState(false);
   const [outline, setOutline] = useState(false);

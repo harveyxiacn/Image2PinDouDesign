@@ -92,7 +92,11 @@ export default function AddPattern() {
           {review ? (
             <RecognizePanel key={review.id} file={review.file} onFile={() => {}} onClear={() => setReview(null)} clearLabel="返回批量列表"
               seed={review.seed} onGenerate={() => toGenerate(review.file)}
-              onVerified={() => { batchStore.dispatch({ type: "verify", id: review.id }); setReview(null); }}
+              onVerified={(edit) => {
+                if (edit) batchStore.dispatch({ type: "edited", id: review.id, result: edit.result, reasons: edit.reasons });
+                batchStore.dispatch({ type: "verify", id: review.id });
+                setReview(null);
+              }}
               onSaved={(pid) => { batchStore.dispatch({ type: "saved", id: review.id, patternId: pid }); setReview(null); }} />
           ) : null}
         </>
