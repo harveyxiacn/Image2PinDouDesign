@@ -1,4 +1,5 @@
 import { putRecords } from "../../lib/db";
+import { encodeMatrix } from "../../lib/matrix";
 import { uid, type CountMethod, type Counts, type Pattern, type PatternKind } from "../../lib/model";
 import type { SaveValues } from "./SaveForm";
 
@@ -16,7 +17,8 @@ export async function createPattern(values: SaveValues, extra: {
   const now = Date.now();
   const pattern: Pattern = {
     id: uid("p"), name: values.name, kind: extra.kind, method: extra.method,
-    imageId: extra.imageId, previewId: extra.previewId, width: extra.width, height: extra.height, matrix: extra.matrix,
+    imageId: extra.imageId, previewId: extra.previewId, width: extra.width, height: extra.height,
+    matrixRle: extra.matrix?.length ? encodeMatrix(extra.matrix) : undefined,
     counts: cleanCounts(extra.counts), confidence: extra.confidence, colorMatch: extra.colorMatch,
     reviewReasons: extra.reviewReasons, verifiedAt: extra.verifiedAt,
     status: values.status, copies: values.copies, tags: values.tags, notes: "", createdAt: now, updatedAt: now

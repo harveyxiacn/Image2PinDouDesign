@@ -89,6 +89,17 @@ describe("queue reducer", () => {
     expect(items[0].name).toBe("黑魔导士");
     expect(reduceBatch(items, { type: "name", id: "id-a.jpg", name: "   " })[0].name).toBe("黑魔导士");
   });
+  it("marks a reviewed item verified and clears it on retry", () => {
+    let items = add(["a.jpg"]);
+    items = reduceBatch(items, { type: "start", id: "id-a.jpg" });
+    items = reduceBatch(items, { type: "finish", id: "id-a.jpg", result: result({ confidence: 0.4 }) });
+    expect(items[0].review).toBe(true);
+    items = reduceBatch(items, { type: "verify", id: "id-a.jpg" });
+    expect(items[0].verifiedAt).toBeGreaterThan(0);
+    expect(items[0].review).toBe(false);
+    items = reduceBatch(items, { type: "retry", id: "id-a.jpg" });
+    expect(items[0].verifiedAt).toBeUndefined();
+  });
   it("saved items are not savable again and cannot be retried; running cannot be removed", () => {
     let items = add(["a.jpg"]);
     items = reduceBatch(items, { type: "start", id: "id-a.jpg" });

@@ -7,7 +7,7 @@ import { BeadCode, DiffNumber, Icon, fmt } from "../ui";
 import "./pattern.css";
 
 /** 与下方图例用量的逐色核对结果（assistant 的 checks） */
-export type CheckMap = Record<string, { status: "ok" | "short" | "over" | "no-legend"; delta: number; source?: "legend" | "grid" | "cell" | "both" | "total-fit" }>;
+export type CheckMap = Record<string, { status: "ok" | "short" | "over" | "no-legend"; delta: number; legend?: number | null; read?: number; source?: "legend" | "grid" | "cell" | "both" | "total-fit" }>;
 export type DiffMap = Record<string, { legend: number; grid: number }>;
 
 /** 可编辑的色号用量表。diff 提供时标出图例与网格不一致的色号。 */
@@ -68,7 +68,7 @@ export default function CountsEditor({ counts, onChange, diff, checks, readOnly,
                   </td>
                   {diff ? <td className="r num">{d ? fmt(d.legend) : "—"}</td> : null}
                   {diff ? <td className="r num">{d ? fmt(d.grid) : "—"}</td> : null}
-                  {hasChecks ? <td><SourceChip source={checks?.[c]?.source} /></td> : null}
+                  {hasChecks ? <td><SourceChip source={checks?.[c]?.source} check={checks?.[c]} diff={d} /></td> : null}
                   <td className="r">
                     {readOnly ? <span className="num">{fmt(counts[c])}</span> : (
                       <input className="input pt-num num" type="number" inputMode="numeric" min={0} value={counts[c]} aria-label={`${c} 数量`}
@@ -106,14 +106,26 @@ const SOURCE_LABEL: Record<NonNullable<CheckMap[string]["source"]>, string> = {
   legend: "图例", grid: "网格", cell: "格内色号", both: "两者一致", "total-fit": "按总数核对"
 };
 
-function SourceChip({ source }: { source?: CheckMap[string]["source"] }) {
+function SourceChip({ source, check, diff }: { source?: CheckMap[string]["source"]; check?: CheckMap[string]; diff?: DiffMap[string] }) {
   if (!source) return <span className="meta">—</span>;
+  // “both”只表示两列在容差内吻合，不一定逐颗相等；最终数量取了哪一列就照实说。
+  if (source === "both" && check && check.legend != null && check.read != null && check.read !== check.legend) {
+    const label = diff && check.read === diff.grid ? "采用网格" : check.read === check.legend ? "采用图例" : "两者接近";
+    const where = diff ? `图例 ${fmt(diff.legend)}、网格 ${fmt(diff.grid)}` : `图例 ${fmt(check.legend)}`;
+    return <span className="chip" title={`${where}，相差 ${fmt(check.delta)} 颗（在允许误差内），最终数量${label.replace("采用", "取")}`}>{label}</span>;
+  }
   return <span className={`chip ${source === "cell" ? "chip-leaf" : ""}`} title="这一行最终采用的数量来自哪一列">{SOURCE_LABEL[source]}</span>;
 }
 
 function CheckChip({ check }: { check: CheckMap[string] }) {
   const n = fmt(check.delta);
-  if (check.status === "ok") return <span className="chip chip-leaf pt-check-chip" title="与下方图例的用量一致">✓ 一致</span>;
+  if (check.status === "ok") {
+    // 3% 容差内的小差异不算“完全一致”，避免同一行出现“✓ 一致”又标“≠”。
+    if (check.legend != null && check.read != null && check.read !== check.legend) {
+      return <span className="chip pt-check-chip" title={`图例 ${fmt(check.legend)}，当前用量 ${fmt(check.read)}，相差 ${n} 颗（在允许误差内）`}>≈ 接近</span>;
+    }
+    return <span className="chip chip-leaf pt-check-chip" title="与下方图例的用量完全一致">✓ 一致</span>;
+  }
   if (check.status === "short") return <span className="chip chip-amber pt-check-chip" title={`比下方图例少 ${n} 颗`}>少 {n}</span>;
   if (check.status === "over") return <span className="chip chip-amber pt-check-chip" title={`比下方图例多 ${n} 颗`}>多 {n}</span>;
   return <span className="chip pt-check-chip" title="下方图例里没有这个色号">无图例</span>;

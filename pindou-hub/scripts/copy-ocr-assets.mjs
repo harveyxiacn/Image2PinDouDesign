@@ -28,4 +28,11 @@ const candidates = ["4.0.0_best_int", "4.0.0", "4.0.0_fast"].map((d) => path.joi
 const found = candidates.find((file) => existsSync(file));
 if (found) copy(found, "eng.traineddata.gz");
 else console.warn("[ocr-assets] 没找到 eng.traineddata.gz，图例 OCR 将不可用");
+
+// 中文图例（chi_sim）。best_int 约 1.7 MB，精度够读“色号 + 数量”这种短文本。
+const chiRoot = path.join(nm, "@tesseract.js-data", "chi_sim");
+const chiCandidates = ["4.0.0_best_int", "4.0.0", "4.0.0_fast"].map((d) => path.join(chiRoot, d, "chi_sim.traineddata.gz"));
+const chiFound = chiCandidates.find((file) => existsSync(file));
+if (chiFound) copy(chiFound, "chi_sim.traineddata.gz");
+else console.warn("[ocr-assets] 没找到 chi_sim.traineddata.gz，中文图例只能按网格识别");
 console.log(`[ocr-assets] -> ${path.relative(root, out)}`);

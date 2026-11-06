@@ -38,7 +38,9 @@ function makeWorker(slot: Slot): Promise<any> {
       const mod = await import("tesseract.js");
       const base = ocrBase();
       const createWorker = (mod as any).createWorker ?? (mod as any).default?.createWorker;
-      return createWorker("eng", 1, {
+      // 同时加载中文：中文图例的色名、数量单位（颗/粒）和抬头（尺寸/色/总计）都能读到。
+      // 离线语言包由 scripts/copy-ocr-assets.mjs 复制到 public/ocr。
+      return createWorker("eng+chi_sim", 1, {
         workerPath: base + "worker.min.js",
         corePath: base,
         langPath: base,

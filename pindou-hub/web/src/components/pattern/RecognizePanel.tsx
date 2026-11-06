@@ -44,12 +44,15 @@ async function toJpegBase64(file: Blob, maxEdge = 1600): Promise<string> {
 }
 
 /** 从批量队列“需要检查”打开时带入：已有的识别结果（不重新跑 OCR）、标签与状态默认值 */
-export type RecognizeSeed = { result: AnalyzeResult; name: string; tags: string; status: PatternStatus };
+export type RecognizeSeed = { result: AnalyzeResult; name: string; tags: string; status: PatternStatus; verifiedAt?: number };
 
-export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed, onSaved, clearLabel = "换一张", onMulti }: {
+export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed, onSaved, onVerified, clearLabel = "换一张", onMulti }: {
   file: File | null; onFile: (f: File) => void; onClear: () => void;
   /** “用它生成图纸”：由页面切换到生成模式并保留这张图 */
-  onGenerate?: () => void; seed?: RecognizeSeed | null; onSaved?: (patternId: string) => void; clearLabel?: string;
+  onGenerate?: () => void; seed?: RecognizeSeed | null; onSaved?: (patternId: string) => void;
+  /** 批量检查视图：把这一张标为已核对并返回队列 */
+  onVerified?: () => void;
+  clearLabel?: string;
   /** 一次选了多张图（或点「多张截图拼接」）：交给页面决定是拼接还是批量；mode=stitch 表示用户已明确要拼接 */
   onMulti?: (files: File[], mode: "ask" | "stitch") => void;
 }) {
@@ -72,7 +75,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const [ai, setAi] = useState<Ai | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
-  const [verified, setVerified] = useState(false);
+  const [verified, setVerified] = useState(!!seed?.verifiedAt);
   const [focus, setFocus] = useState<string | null>(null);
   const [view, setView] = useState<"orig" | "restored">("orig");
   const [forceChart, setForceChart] = useState(false);
@@ -222,7 +225,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   }, [result]);
   const codeChecks = useMemo<CheckMap | null>(() => {
     if (!result?.checks?.length || !result.checks.some((c) => c.legend !== null)) return null;
-    return Object.fromEntries(result.checks.map((c) => [c.code, { status: c.status, delta: Math.abs((c.legend ?? 0) - c.read), source: c.source }]));
+    return Object.fromEntries(result.checks.map((c) => [c.code, { status: c.status, delta: Math.abs((c.legend ?? 0) - c.read), legend: c.legend, read: c.read, source: c.source }]));
   }, [result]);
   const mismatches = result ? mismatchCount(result) : 0;
   const comparable = result ? comparableMismatchCount(result) : 0;
@@ -418,6 +421,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
           <div className="panel panel-pad">
             {hdBlob ? <label className="pt-check" style={{ marginBottom: 8 }}><input type="checkbox" checked={useHdSource} onChange={(e) => setUseHdSource(e.target.checked)} />用高清版作为原图（图库里保存放大后的图）</label> : null}
             <label className="pt-check" style={{ marginBottom: 8 }}><input type="checkbox" checked={verified} onChange={(e) => setVerified(e.target.checked)} />我已对照原图核对（保存后标为「已核对」）</label>
+            {onVerified ? <div className="row" style={{ marginBottom: 8 }}><button type="button" className="btn btn-sm" onClick={onVerified}><Icon name="check" size={14} />标为已核对，返回队列</button><span className="meta">不会保存，回到队列后可继续批量保存</span></div> : null}
             <SaveForm defaultName={seed?.name || (file.name || "").replace(/\.[^.]+$/, "") || "新图纸"} defaultTags={seed?.tags} defaultStatus={seed?.status} busy={saving} success={savedOk} disabled={!Object.keys(counts).length} onSave={save} />
           </div>
         ) : null}

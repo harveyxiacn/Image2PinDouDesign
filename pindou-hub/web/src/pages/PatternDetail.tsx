@@ -10,6 +10,7 @@ import ZoomImage from "../components/pattern/ZoomImage";
 import DetailTable from "../components/pattern/DetailTable";
 import CountsEditor from "../components/pattern/CountsEditor";
 import { cleanCounts } from "../components/pattern/save";
+import { matrixOf } from "../lib/matrix";
 import { parseTags } from "../components/pattern/SaveForm";
 import "../components/pattern/pattern.css";
 import "./PatternDetail.css";
@@ -62,7 +63,8 @@ export default function PatternDetail({ id }: { id: string }) {
   const save = (patch: Partial<Pattern>) => putRecords("patterns", [{ ...pattern, ...patch, updatedAt: Math.max(Date.now(), pattern.updatedAt + 1) }]);
   const copies = Math.max(1, pattern.copies || 1);
   const total = totalOf(pattern.counts);
-  const hasMatrix = !!pattern.matrix && !!pattern.width && !!pattern.height;
+  const matrix = matrixOf(pattern);
+  const hasMatrix = !!matrix && !!pattern.width && !!pattern.height;
   const available: View[] = [...(hasMatrix ? ["matrix" as const] : []), ...(pattern.previewId ? ["preview" as const] : []), ...(pattern.imageId ? ["source" as const] : [])];
   const current: View | null = view && available.includes(view) ? view : available[0] ?? null;
   const used = Object.keys(pattern.counts).filter((c) => pattern.counts[c] > 0).length;
@@ -172,8 +174,8 @@ export default function PatternDetail({ id }: { id: string }) {
               {available.map((v) => <button key={v} aria-pressed={current === v} onClick={() => setView(v)}>{v === "matrix" ? "拼豆图" : v === "preview" ? "预览图" : "原图"}</button>)}
             </div>
           ) : null}
-          {current === "matrix" && pattern.matrix ? (
-            <MatrixView matrix={pattern.matrix} width={pattern.width!} height={pattern.height!} focusCode={focus} />
+          {current === "matrix" && matrix ? (
+            <MatrixView matrix={matrix} width={pattern.width!} height={pattern.height!} focusCode={focus} />
           ) : current === "preview" ? (
             previewUrl ? <ZoomImage src={previewUrl} alt="预览图" /> : <div className="empty pegboard">图片同步中…</div>
           ) : current === "source" ? (

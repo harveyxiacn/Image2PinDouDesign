@@ -1,10 +1,12 @@
 // 本地图库：图片按内容 SHA-256 存进 IndexedDB，元数据进 images 集合并同步到 Hub。
 import type { PixelSource } from "@engine/types";
-import { getSnapshot, putBlob, putRecords } from "./db";
+import { getBlob, getSnapshot, putBlob, putRecords } from "./db";
 import type { ImageMeta } from "./model";
 
 const MAX_STORED_EDGE = 4096;
 const MAX_STORED_BYTES = 6 * 1024 * 1024;
+const THUMB_EDGE = 512;
+const THUMB_SKIP_BYTES = 220 * 1024;
 
 /** SHA-256 十六进制。局域网 http 页面不是安全上下文，crypto.subtle 不可用时走纯 JS 实现。 */
 export async function sha256Hex(data: ArrayBuffer): Promise<string> {
@@ -93,14 +95,66 @@ export async function imageContentId(input: Blob): Promise<string> {
   return sha256Hex(await blob.arrayBuffer());
 }
 
+/** 缩略图：512px、WebP；小图直接用原图，避免多存一份。 */
+async function makeThumb(blob: Blob): Promise<Blob | null> {
+  const bitmap = await decode(blob);
+  try {
+    const { width, height } = bitmap;
+    if (Math.max(width, height) <= THUMB_EDGE && blob.size <= THUMB_SKIP_BYTES) return null;
+    const scale = Math.min(1, THUMB_EDGE / Math.max(width, height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const webp = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), "image/webp", 0.82));
+    if (webp) return webp;
+    return await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", 0.85));
+  } finally {
+    bitmap.close();
+  }
+}
+
+/** 有原图但还没有缩略图时补一张，并把缩略图 id 写回记录；已有则跳过。返回是否新写入。 */
+export async function ensureThumb(id: string, original?: Blob): Promise<boolean> {
+  const meta = getSnapshot().images.find((img) => img.id === id);
+  if (meta && meta.thumbId !== undefined) return false;
+  const blob = original ?? await getBlob(id);
+  if (!blob) return false;
+  const thumb = await makeThumb(blob);
+  if (!thumb) {
+    if (meta) await putRecords("images", [{ ...meta, thumbId: "", updatedAt: Math.max(Date.now(), meta.updatedAt + 1) }]);
+    return false;
+  }
+  const thumbId = await sha256Hex(await thumb.arrayBuffer());
+  await putBlob(thumbId, thumb);
+  if (meta) {
+    await putRecords("images", [{ ...meta, thumbId, updatedAt: Math.max(Date.now(), meta.updatedAt + 1) }]);
+  }
+  return true;
+}
+
+/** 升级旧图库：把本机已有的原图逐张补成缩略图（限制单次数量，避免启动卡顿）。 */
+export async function ensureThumbs(limit = 40): Promise<number> {
+  let made = 0;
+  for (const img of getSnapshot().images) {
+    if (made >= limit) break;
+    try { if (await ensureThumb(img.id)) made += 1; } catch { /* 单张失败不影响其他 */ }
+  }
+  return made;
+}
+
 export async function saveImage(input: Blob, name: string, role: ImageMeta["role"]): Promise<ImageMeta> {
   const { blob, width, height } = role === "preview" ? { blob: input, ...(await dims(input)) } : await normalizeForStorage(input);
   const id = await sha256Hex(await blob.arrayBuffer());
   const existing = getSnapshot().images.find((img) => img.id === id);
   await putBlob(id, blob);
-  if (existing) return existing;
+  if (existing) { await ensureThumb(id, blob); return existing; }
+  // 缩略图按自身内容哈希存储，Hub 的内容校验对原图和缩略图都成立。
+  const thumb = await makeThumb(blob);
+  const thumbId = thumb ? await sha256Hex(await thumb.arrayBuffer()) : undefined;
+  if (thumb && thumbId) await putBlob(thumbId, thumb);
   const now = Date.now();
-  const meta: ImageMeta = { id, name, mime: blob.type || "image/png", width, height, bytes: blob.size, role, createdAt: now, updatedAt: now };
+  const meta: ImageMeta = { id, name, mime: blob.type || "image/png", width, height, bytes: blob.size, thumbId: thumbId ?? "", role, createdAt: now, updatedAt: now };
   await putRecords("images", [meta]);
   return meta;
 }

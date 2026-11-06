@@ -59,6 +59,7 @@ function CopyBtn({ text, label }: { text: string; label: string }) {
 }
 
 const PHASE_TEXT: Record<string, string> = { idle: "已同步", syncing: "同步中…", error: "同步失败", offline: "设备离线", unpaired: "未连接" };
+const sizeText = (n: number) => (n === 0 ? "0 KB" : n >= 1024 * 1024 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 function SyncSection({ local, info, qr, paired }: { local: Local; info: Info; qr: string; paired: boolean }) {
   const data = useData();
@@ -115,6 +116,7 @@ function SyncSection({ local, info, qr, paired }: { local: Local; info: Info; qr
             <span>上次同步</span><span>{fmtTime(sync.lastSyncAt || data.device.lastSyncAt)}</span>
             <span>待上传</span><span className="num">{data.outbox} 条</span>
             <span>图片体积</span><span className="num">{imageCount} 张 · {imageMb.toFixed(1)} MB</span>
+            <span>上次传输</span><span className="num">上传 {sync.lastUpBlobs} 张 · {sizeText(sync.lastUpBytes)} / 下载 {sync.lastDownBlobs} 张 · {sizeText(sync.lastDownBytes)}</span>
           </div>
           <div className="row">
             <button className="btn btn-primary" disabled={sync.phase === "syncing"} onClick={() => void syncNow()}><Icon name="sync" />{sync.phase === "syncing" ? "同步中…" : "立即同步"}</button>

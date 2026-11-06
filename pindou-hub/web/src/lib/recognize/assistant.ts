@@ -201,7 +201,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       } else {
         step("legend", "读取图例", "warn", parsed.items.length
           ? "只读到 1 个色号，不足以当作图例使用"
-          : "没有识别到“色号 + 数量”形式的图例（当前 OCR 只带英文 / 数字模型，中文色名图例会读不到；按网格 / 格内色号核对）");
+          : "没有识别到“色号 + 数量”形式的图例（已加载中英文 OCR；如果图例只有色名没有色号，仍无法直接对应 MARD 色号；按网格 / 格内色号核对）");
       }
     } catch (err) {
       if (signal?.aborted && (err as Error)?.name === "AbortError" && !(err as { timeout?: boolean }).timeout) throw err;
@@ -529,9 +529,11 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     if (lc) {
       const withLegend = checks.filter((c) => c.legend !== null);
       const okN = withLegend.filter((c) => c.status === "ok").length;
+      const exactN = withLegend.filter((c) => c.status === "ok" && c.legend === c.read).length;
+      const nearN = okN - exactN;
       const bad = withLegend.filter((c) => c.status !== "ok").map((c) => `${c.code} ${c.status === "short" ? "少" : "多"} ${fmt(Math.abs((c.legend ?? 0) - c.read))}`);
       step("legend-check", "与下方用量核对", okN === withLegend.length ? "ok" : "warn",
-        `与下方用量核对：${okN}/${withLegend.length} 色一致${bad.length ? `（${bad.slice(0, 6).join("、")}${bad.length > 6 ? "…" : ""}）` : ""}`);
+        `与下方用量核对：${exactN}/${withLegend.length} 色完全一致${nearN ? `，${nearN} 色在容差内接近` : ""}${bad.length ? `（${bad.slice(0, 6).join("、")}${bad.length > 6 ? "…" : ""}）` : ""}`);
     }
   }
   {

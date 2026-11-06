@@ -17,8 +17,10 @@ export type Pattern = {
   previewId?: string;
   width?: number;
   height?: number;
-  /** 每格色号（生成或网格识别得到时保存），null 表示空格 */
+  /** 每格色号（生成或网格识别得到时保存），null 表示空格。新记录改用 matrixRle 压缩存储。 */
   matrix?: Array<Array<string | null>>;
+  /** 矩阵压缩（色号字典 + 游程编码），见 lib/matrix.ts；老记录仍可能有 matrix */
+  matrixRle?: string;
   counts: Counts;
   /** 整体可信度 0–1；大幅手工修改后置 1（不等于“已核对”） */
   confidence?: number;
@@ -67,6 +69,8 @@ export type ImageMeta = {
   width: number;
   height: number;
   bytes: number;
+  /** 512px WebP 缩略图的 blob id（= 缩略图 SHA-256）；空串表示小图无需缩略图；老记录没有，按需生成 */
+  thumbId?: string;
   role: "source" | "preview";
   createdAt: number;
   updatedAt: number;

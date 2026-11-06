@@ -1,6 +1,7 @@
 // 局域网同步：本机发件箱推送到 Hub，再按游标拉取 Hub 上的新变更；图片按 SHA-256 补传/补下。
 import { useSyncExternalStore } from "react";
-import { ackOutbox, getSnapshot, listBlobIds, mergeRemote, putBlob, readOutbox, saveDevice, setLocalChangeHandler, getBlob } from "./db";
+import { ackOutbox, getSnapshot, listBlobIds, mergeRemote, putBlob, readOutbox, saveDevice, setLocalChangeHandler, getBlob, thumbIdOf } from "./db";
+import { ensureThumb, ensureThumbs } from "./images";
 import type { CollectionName } from "./model";
 
 export type SyncState = {
@@ -8,9 +9,14 @@ export type SyncState = {
   message: string;
   lastSyncAt: number;
   hubName: string;
+  /** 上一次同步实际传输的图片体积与张数（只算需要的 blob，不再每次全量） */
+  lastUpBytes: number;
+  lastDownBytes: number;
+  lastUpBlobs: number;
+  lastDownBlobs: number;
 };
 
-let state: SyncState = { phase: "unpaired", message: "", lastSyncAt: 0, hubName: "" };
+let state: SyncState = { phase: "unpaired", message: "", lastSyncAt: 0, hubName: "", lastUpBytes: 0, lastDownBytes: 0, lastUpBlobs: 0, lastDownBlobs: 0 };
 const listeners = new Set<() => void>();
 function setState(patch: Partial<SyncState>) {
   state = { ...state, ...patch };
@@ -116,6 +122,28 @@ type SyncResponse = {
 
 let running: Promise<void> | null = null;
 let queued = false;
+/** 本次会话里确认 Hub 没有的缩略图：避免每次同步都重复 404。 */
+const thumbMiss = new Set<string>();
+const remoteTried = new Set<string>();
+
+/** 原图按需下载：本地没有时才向 Hub 要，成功就缓存进 IndexedDB。 */
+export async function fetchBlobFromHub(id: string): Promise<Blob | null> {
+  if (!/^[a-f0-9]{64}$/.test(id)) return null;
+  const local = await getBlob(id);
+  if (local) return local;
+  if (remoteTried.has(id)) return null;
+  const { hubUrl, token } = getSnapshot().device;
+  if (!hubUrl || !token) return null;
+  try {
+    const response = await fetch(`${hubUrl}/api/blobs/${id}`, { headers: { "x-pindou-token": token }, signal: AbortSignal.timeout(120000) });
+    if (!response.ok) { if (response.status === 404) remoteTried.add(id); return null; }
+    const blob = new Blob([await response.arrayBuffer()], { type: response.headers.get("content-type") || "application/octet-stream" });
+    await putBlob(id, blob);
+    return blob;
+  } catch {
+    return null;
+  }
+}
 
 export function syncNow(): Promise<void> {
   if (running) { queued = true; return running; }
@@ -138,6 +166,7 @@ async function doSync(): Promise<void> {
     let pushed = false;
     let received = 0;
     let missing: string[] = [];
+    let upBytes = 0, downBytes = 0, upBlobs = 0, downBlobs = 0;
     // 第一轮带上全部发件箱；如果 Hub 一次返回不完（more），继续空推拉取。
     for (let round = 0; round < 50; round++) {
       const changes = pushed ? [] : outbox;
@@ -151,24 +180,44 @@ async function doSync(): Promise<void> {
       await saveDevice({ cursor });
       if (!body.more) break;
     }
-    // 补传 Hub 缺的图片
+    // 只补传 Hub 缺的图片 / 缩略图
     for (const id of missing) {
       const blob = await getBlob(id);
-      if (blob) await api(`/api/blobs/${id}`, { method: "PUT", body: blob }, 120000);
+      if (blob) {
+        await api(`/api/blobs/${id}`, { method: "PUT", body: blob }, 120000);
+        upBytes += blob.size;
+        upBlobs += 1;
+      }
     }
-    // 补下本机缺的图片
+    // 缩略图：本机有原图就先本地补一张；否则向 Hub 要缩略图。原图改为打开详情时按需下载。
     const have = new Set(await listBlobIds());
-    const wanted = getSnapshot().images.filter((img) => !have.has(img.id)).slice(0, 200);
+    const wanted = getSnapshot().images.slice(0, 200);
     for (const img of wanted) {
       try {
+        if (!img.thumbId) {
+          if (await ensureThumb(img.id)) { /* 新缩略图会在下一轮随发件箱上传 */ }
+          continue;
+        }
+        if (have.has(img.thumbId) || thumbMiss.has(img.thumbId)) continue;
         const { hubUrl, token } = getSnapshot().device;
-        const response = await fetch(`${hubUrl}/api/blobs/${img.id}`, { headers: { "x-pindou-token": token }, signal: AbortSignal.timeout(120000) });
-        if (response.ok) await putBlob(img.id, new Blob([await response.arrayBuffer()], { type: img.mime }));
+        const response = await fetch(`${hubUrl}/api/blobs/${img.thumbId}`, { headers: { "x-pindou-token": token }, signal: AbortSignal.timeout(120000) });
+        if (response.ok) {
+          const blob = new Blob([await response.arrayBuffer()], { type: response.headers.get("content-type") || "image/webp" });
+          await putBlob(img.thumbId, blob);
+          downBytes += blob.size;
+          downBlobs += 1;
+        } else if (response.status === 404) {
+          thumbMiss.add(img.thumbId);
+        }
       } catch { /* 下次再试 */ }
     }
     const now = Date.now();
     await saveDevice({ lastSyncAt: now });
-    setState({ phase: "idle", lastSyncAt: now, message: `已同步 · 上传 ${outbox.length} 条，收到 ${received} 条` });
+    const size = (n: number) => (n === 0 ? "0 KB" : n >= 1024 * 1024 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+    setState({
+      phase: "idle", lastSyncAt: now, lastUpBytes: upBytes, lastDownBytes: downBytes, lastUpBlobs: upBlobs, lastDownBlobs: downBlobs,
+      message: `已同步 · 上传 ${outbox.length} 条 / ${size(upBytes)}，收到 ${received} 条 / ${size(downBytes)}`
+    });
   } catch (error) {
     if (state.phase !== "unpaired") setState({ phase: "error", message: error instanceof Error ? error.message : "同步失败" });
   }
@@ -191,6 +240,8 @@ export function startAutoSync(): void {
     window.addEventListener("online", () => void syncNow());
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && getSnapshot().device.autoSync) void syncNow(); });
   }
+  // 老图库升级：本机有原图但没缩略图的，补一张后再同步，别的设备就能只拉小图。
+  void ensureThumbs().then((made) => { if (made) void syncNow(); });
   void syncNow();
 }
 

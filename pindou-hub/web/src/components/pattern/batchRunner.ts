@@ -81,7 +81,7 @@ export async function saveItem(it: BatchItem, status: PatternStatus): Promise<st
   const method = res.method === "none" ? "manual" : res.method;
   const p = await createPattern(
     { name: it.name, tags: parseTags(it.tag), status, copies: 1 },
-    { kind: "recognized", method, counts: res.counts, imageId: meta.id, width: res.grid?.grid.cols, height: res.grid?.grid.rows, matrix: res.grid?.matrix, confidence: res.confidence, colorMatch: res.colorMatch, reviewReasons: it.reasons.length ? it.reasons : undefined }
+    { kind: "recognized", method, counts: res.counts, imageId: meta.id, width: res.grid?.grid.cols, height: res.grid?.grid.rows, matrix: res.grid?.matrix, confidence: res.confidence, colorMatch: res.colorMatch, reviewReasons: it.reasons.length ? it.reasons : undefined, verifiedAt: it.verifiedAt }
   );
   batchStore.dispatch({ type: "saved", id: it.id, patternId: p.id });
   return p.id;

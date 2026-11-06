@@ -21,6 +21,8 @@ export type BatchItem = {
   duplicateImageId?: string;
   /** 用户点过“仍然识别”，本次跳过查重 */
   force?: boolean;
+  /** 在检查视图里人工确认过；批量保存时写入 verifiedAt */
+  verifiedAt?: number;
   /** done 且需要人工核对 */
   review: boolean;
   reasons: string[];
@@ -34,6 +36,7 @@ export type BatchAction =
   | { type: "duplicate"; id: string; imageId: string }
   | { type: "fail"; id: string; error: string }
   | { type: "name"; id: string; name: string }
+  | { type: "verify"; id: string }
   | { type: "cancelAll" }
   | { type: "retry"; id: string }
   | { type: "tag"; id: string; tag: string }
@@ -168,9 +171,10 @@ export function reduceBatch(items: BatchItem[], a: BatchAction): BatchItem[] {
     case "duplicate": return patch(a.id, (it) => (it.state === "waiting" || it.state === "running" ? { ...it, state: "duplicate", duplicateImageId: a.imageId } : it));
     case "fail": return patch(a.id, (it) => (it.state === "running" ? { ...it, state: "failed", error: a.error } : it));
     case "name": return patch(a.id, (it) => ({ ...it, name: a.name.trim() || it.name }));
+    case "verify": return patch(a.id, (it) => (it.state === "done" ? { ...it, verifiedAt: Date.now(), review: false } : it));
     case "cancelAll": return items.map((it) => (it.state === "waiting" || it.state === "running" ? { ...it, state: "cancelled" as const } : it));
     case "retry": return patch(a.id, (it) => (it.state === "failed" || it.state === "cancelled" || it.state === "notchart" || it.state === "duplicate" || it.state === "done" && !it.savedId
-      ? { ...it, state: "waiting", steps: [], result: undefined, error: undefined, duplicateImageId: undefined, review: false, reasons: [], force: it.state === "duplicate" ? true : it.force } : it));
+      ? { ...it, state: "waiting", steps: [], result: undefined, error: undefined, duplicateImageId: undefined, review: false, reasons: [], verifiedAt: undefined, force: it.state === "duplicate" ? true : it.force } : it));
     case "tag": return patch(a.id, (it) => ({ ...it, tag: a.tag }));
     case "remove": return items.filter((it) => it.id !== a.id || it.state === "running");
     case "saved": return patch(a.id, (it) => ({ ...it, savedId: a.patternId }));

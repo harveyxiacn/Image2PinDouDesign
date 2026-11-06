@@ -6,8 +6,8 @@ import { fmt, useBlobUrl } from "../ui";
 import "./pattern.css";
 
 export function Thumb({ id, fallbackId, alt }: { id?: string; fallbackId?: string; alt: string }) {
-  const first = useBlobUrl(id);
-  const second = useBlobUrl(id ? undefined : fallbackId);
+  const first = useBlobUrl(id, "thumb");
+  const second = useBlobUrl(id ? undefined : fallbackId, "thumb");
   const url = first ?? second;
   return (
     <div className={`pt-thumb${url ? "" : " ph pegboard"}`}>

@@ -277,13 +277,21 @@ export function onBlobAdded(listener: (id: string) => void): () => void {
   return () => blobListeners.delete(listener);
 }
 
-export async function blobUrl(id: string): Promise<string | null> {
-  const cached = blobUrlCache.get(id);
+/** 某张图片的缩略图 blob id（= 缩略图内容的 SHA-256）；老记录没有。 */
+export function thumbIdOf(id: string): string | undefined {
+  const img = raw.images.get(id);
+  return img && !img.deleted ? img.thumbId : undefined;
+}
+
+export async function blobUrl(id: string, variant: "original" | "thumb" = "original"): Promise<string | null> {
+  const key = variant === "thumb" ? thumbIdOf(id) : id;
+  if (!key) return null;
+  const cached = blobUrlCache.get(key);
   if (cached) return cached;
-  const blob = await getBlob(id);
+  const blob = await getBlob(key);
   if (!blob) return null;
   const url = URL.createObjectURL(blob);
-  blobUrlCache.set(id, url);
+  blobUrlCache.set(key, url);
   return url;
 }
 

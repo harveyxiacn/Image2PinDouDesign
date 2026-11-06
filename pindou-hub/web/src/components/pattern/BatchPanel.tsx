@@ -9,8 +9,32 @@ import "./batch.css";
 
 const isNative = () => /capacitor/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "") || !!(globalThis as { Capacitor?: unknown }).Capacitor;
 
+type FsFile = { kind: "file"; name: string; getFile: () => Promise<File> };
+type FsDir = { kind: "directory"; name: string; values: () => AsyncIterableIterator<FsFile | FsDir> };
+type FolderPicker = (opts?: { mode?: "read" }) => Promise<FsDir>;
+
+/** File System Access API 不支持时返回 null，调用方退回 <input webkitdirectory>。 */
+function folderPicker(): FolderPicker | null {
+  const picker = (window as unknown as { showDirectoryPicker?: FolderPicker }).showDirectoryPicker;
+  return typeof picker === "function" ? picker.bind(window) : null;
+}
+
+/** 递归读取目录；保留 root/子目录/文件名，交给 folderOf 取上级目录作为标签。 */
+async function filesOf(dir: FsDir, prefix: string, out: File[]): Promise<void> {
+  for await (const entry of dir.values()) {
+    if (entry.kind === "file") {
+      const file = await entry.getFile();
+      try { Object.defineProperty(file, "webkitRelativePath", { value: `${prefix}/${entry.name}` }); } catch { /* 只读实现：标签留空 */ }
+      out.push(file);
+    } else if (entry.name !== "node_modules" && !entry.name.startsWith(".")) {
+      await filesOf(entry, `${prefix}/${entry.name}`, out);
+    }
+  }
+}
+
 function StatusChip({ it }: { it: BatchItem }) {
   if (it.savedId) return <span className="chip chip-leaf"><Icon name="check" size={12} />已保存</span>;
+  if (it.verifiedAt) return <span className="chip chip-leaf"><Icon name="check" size={12} />已核对</span>;
   switch (it.state) {
     case "waiting": return <span className="chip">等待</span>;
     case "running": return <span className="chip chip-amber">识别中</span>;
@@ -56,11 +80,14 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
   const saveAll = async (acceptAll = false) => {
     setSaving(true);
     let n = 0;
+    let verified = 0;
     try {
       for (const it of batchStore.get()) {
-        if (it.state === "done" && !it.savedId && (acceptAll || !it.review)) { if (await saveItem(it, status)) n++; }
+        if (it.state === "done" && !it.savedId && (acceptAll || !it.review)) {
+          if (await saveItem(it, status)) { n++; if (it.verifiedAt) verified++; }
+        }
       }
-      toast(n ? (acceptAll ? `已保存 ${n} 张到图库，${n} 张未核对` : `已保存 ${n} 张到图库`) : "没有可保存的");
+      toast(n ? `${acceptAll ? `已保存 ${n} 张到图库，${n - verified} 张未核对` : `已保存 ${n} 张到图库`}${verified ? `（其中 ${verified} 张已核对）` : ""}` : "没有可保存的");
     } catch (e) { toast(e instanceof Error ? e.message : "保存失败"); }
     finally { setSaving(false); }
   };
@@ -70,6 +97,18 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
 
   const empty = items.length === 0;
   const native = isNative();
+  const pickFolder = async () => {
+    const picker = folderPicker();
+    if (!picker) { folder.current?.click(); return; }
+    try {
+      const root = await picker({ mode: "read" });
+      const list: File[] = [];
+      await filesOf(root, root.name, list);
+      take(list);
+    } catch (e) {
+      if ((e as DOMException)?.name !== "AbortError") toast(e instanceof Error ? `读取文件夹失败：${e.message}` : "读取文件夹失败");
+    }
+  };
   const unsavedDone = items.filter((it) => it.state === "done" && !it.savedId).length;
   const hashItems = items.filter((it) => !it.savedId && isHashName(it.name));
   const notchartItems = items.filter((it) => it.state === "notchart" && !it.savedId);
@@ -102,7 +141,7 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
           {empty ? <p className="meta">逐张自动识别，识别完可一起保存到图库。{native ? "" : "推荐选整个文件夹：文件夹名会作为标签，并按内容哈希自动跳过重复图片。"}</p> : null}
         </div>
         <div className="row bt-pick">
-          {!native ? <button type="button" className="btn btn-primary" onClick={() => folder.current?.click()}><Icon name="gallery" />选择文件夹</button> : null}
+          {!native ? <button type="button" className="btn btn-primary" onClick={() => void pickFolder()}><Icon name="gallery" />选择文件夹</button> : null}
           <button type="button" className={native ? "btn btn-primary" : "btn"} onClick={() => files.current?.click()}><Icon name="plus" />选择多张图片</button>
         </div>
         <input ref={files} type="file" accept="image/*" multiple hidden aria-label="选择多张图片" onChange={(e) => { take(e.target.files); e.target.value = ""; }} />
@@ -131,7 +170,7 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
 
           <ul className="bt-list">
             {items.map((it) => (
-              <li key={it.id} className="bt-item" data-state={it.state} data-review={it.review} data-saved={!!it.savedId}>
+              <li key={it.id} className="bt-item" data-state={it.state} data-review={it.review} data-verified={!!it.verifiedAt} data-saved={!!it.savedId}>
                 <div className="bt-main">
                   <div className="bt-title">
                     <input className="input bt-name bt-name-input" value={it.name} aria-label={`${it.name} 的名称`} disabled={!!it.savedId} onChange={(e) => batchStore.dispatch({ type: "name", id: it.id, name: e.target.value })} />
@@ -165,6 +204,7 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
                   {it.state === "done" && !it.savedId ? (
                     <>
                       {it.review ? <button type="button" className="btn btn-sm btn-iron" onClick={() => onReview(it)}>检查</button> : <button type="button" className="btn btn-sm" onClick={() => onReview(it)}>查看</button>}
+                      {it.review ? <button type="button" className="btn btn-sm btn-ghost" onClick={() => batchStore.dispatch({ type: "verify", id: it.id })}>标为已核对</button> : null}
                       {it.review ? <button type="button" className="btn btn-sm btn-ghost" onClick={() => void saveOne(it)}>仍然保存</button> : <button type="button" className="btn btn-sm" onClick={() => void saveOne(it)}>保存</button>}
                     </>
                   ) : null}

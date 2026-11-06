@@ -270,20 +270,31 @@ export function fmtTime(ms: number): string {
   return sameDay ? `今天 ${hm}` : `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
 }
 
-/** 本地图片（IndexedDB blob）→ object URL */
-export function useBlobUrl(id: string | undefined): string | null {
+/** 本地图片（IndexedDB blob）→ object URL。thumb 优先用小图；original 缺失时按需从 Hub 拉取。 */
+export function useBlobUrl(id: string | undefined, variant: "original" | "thumb" = "original"): string | null {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     let off: (() => void) | null = null;
     if (!id) { setUrl(null); return; }
-    import("../lib/db").then(async ({ blobUrl, onBlobAdded }) => {
-      const first = await blobUrl(id);
-      if (alive) setUrl(first);
+    import("../lib/db").then(async ({ blobUrl, onBlobAdded, thumbIdOf }) => {
+      let first = await blobUrl(id, variant);
+      if (!first && variant === "thumb") first = await blobUrl(id, "original");
+      if (!first && variant === "original") {
+        const fallback = await blobUrl(id, "thumb");
+        if (alive && fallback) setUrl(fallback);
+        const { fetchBlobFromHub } = await import("../lib/sync");
+        if (await fetchBlobFromHub(id)) first = await blobUrl(id, variant);
+      }
+      if (alive && first) setUrl(first);
       if (!alive) return;
-      off = onBlobAdded(async (added) => { if (added === id && alive) setUrl(await blobUrl(id)); });
+      off = onBlobAdded(async (added) => {
+        if (variant === "thumb" ? added !== thumbIdOf(id) : added !== id) return;
+        const next = await blobUrl(id, variant);
+        if (alive && next) setUrl(next);
+      });
     });
     return () => { alive = false; off?.(); };
-  }, [id]);
+  }, [id, variant]);
   return url;
 }

@@ -20,7 +20,7 @@ function verifyFilterOf(value: string | null): VerifyFilter {
 }
 
 function ImageTile({ img, patternId }: { img: ImageMeta; patternId?: string }) {
-  const url = useBlobUrl(img.id);
+  const url = useBlobUrl(img.id, "thumb");
   return (
     <div className="panel ga-tile">
       <div className={`pt-thumb${url ? "" : " ph pegboard"}`}>{url ? <img src={url} alt={img.name} loading="lazy" /> : <span>图片同步中…</span>}</div>

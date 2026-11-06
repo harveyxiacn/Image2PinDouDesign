@@ -1,6 +1,7 @@
 // 焦点元素：图片投放区——选图后立刻变成“图 + 豆探助手时间线 + 可编辑结果”。
 import { useEffect, useState } from "react";
 import { getBlob, useData } from "../lib/db";
+import { fetchBlobFromHub } from "../lib/sync";
 import { navigate, useRoute } from "../components/ui";
 import RecognizePanel, { type RecognizeSeed } from "../components/pattern/RecognizePanel";
 import BatchPanel from "../components/pattern/BatchPanel";
@@ -36,13 +37,14 @@ export default function AddPattern() {
   useEffect(() => {
     if (!imageId) return;
     let alive = true;
-    getBlob(imageId).then((blob) => {
+    (async () => {
+      const blob = (await getBlob(imageId)) ?? (await fetchBlobFromHub(imageId));
       if (!alive) return;
       if (!blob) { setLoadError("这张图片还在同步中，稍后再试"); return; }
       const meta = data.images.find((i) => i.id === imageId);
       setLoadError("");
       setFile(new File([blob], meta?.name || "图片", { type: blob.type || meta?.mime || "image/png" }));
-    });
+    })();
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageId]);
@@ -55,7 +57,7 @@ export default function AddPattern() {
   const openReview = (it: BatchItem) => {
     // notchart / 无结果的条目没有可用 seed：直接按单张重新识别
     const seed: RecognizeSeed | null = it.result && it.state === "done"
-      ? { result: it.result, name: it.name, tags: it.tag, status: "idea" } : null;
+      ? { result: it.result, name: it.name, tags: it.tag, status: "idea", verifiedAt: it.verifiedAt } : null;
     setReview({ id: it.id, file: it.file, seed: seed ?? (null as unknown as RecognizeSeed) });
   };
   const clear = () => { setFile(null); if (imageId) navigate(`/add?mode=${mode}`); };
@@ -90,6 +92,7 @@ export default function AddPattern() {
           {review ? (
             <RecognizePanel key={review.id} file={review.file} onFile={() => {}} onClear={() => setReview(null)} clearLabel="返回批量列表"
               seed={review.seed} onGenerate={() => toGenerate(review.file)}
+              onVerified={() => { batchStore.dispatch({ type: "verify", id: review.id }); setReview(null); }}
               onSaved={(pid) => { batchStore.dispatch({ type: "saved", id: review.id, patternId: pid }); setReview(null); }} />
           ) : null}
         </>
