@@ -128,18 +128,23 @@ export type AnalyzeResult = {
   grid: GridReading | null;
   /** 助手建议采用的最终用量 */
   counts: Counts;
-  method: "legend" | "grid" | "legend+grid" | "none";
-  /** 0–1 */
+  /** cell = 以格内印的色号为主（覆盖率 ≥ 90%） */
+  method: "legend" | "grid" | "legend+grid" | "cell" | "none";
+  /** 整体可信度 0–1：综合颜色匹配、图例/网格差异、抬头核对；有疑点时最高 0.69 */
   confidence: number;
+  /** 颜色匹配度 0–1：只看格子颜色与色卡的吻合程度，不含图例数字差异 */
+  colorMatch?: number;
+  /** 格内色号覆盖的豆子比例 0–1（读出格内色号的格子 / 非空格子） */
+  cellCoverage?: number;
   /** 是否成功读到了格内色号并用来校正颜色匹配 */
   cellCodesRead?: boolean;
-  /** 格内色号读取概况：读出的颜色数 / 颜色总数 / 校正数 */
-  cellCodeStats?: { read: number; clusters: number; overrides: number; /** 簇平均字形读出的簇数 */ glyph?: number; /** 按颜色并入已读簇的碎簇数 */ merged?: number; /** 格内读出的色号（去重） */ names?: string[] };
+  /** 格内色号读取概况：读出的颜色数 / 颜色总数 / 校正数 / 覆盖格数 */
+  cellCodeStats?: { read: number; clusters: number; overrides: number; /** 簇平均字形读出的簇数 */ glyph?: number; /** 按颜色并入已读簇的碎簇数 */ merged?: number; /** 格内读出的色号（去重） */ names?: string[]; /** 格内色号覆盖的格子数 */ cells?: number; /** 非空格子总数 */ cellsTotal?: number; /** cells / cellsTotal */ coverage?: number };
   /** 与下方图例用量逐色核对：legend 为 null = 图上没有该色数量 */
   checks?: Array<{
     code: string; legend: number | null; read: number; status: "ok" | "short" | "over" | "no-legend";
-    /** 最终采用的数量来自哪里：图例 / 网格（含格内色号）/ 两者一致 / 按总数挑选 */
-    source?: "legend" | "grid" | "both" | "total-fit";
+    /** 最终采用的数量来自哪里：图例 / 网格 / 格内色号 / 两者一致 / 按总数挑选 */
+    source?: "legend" | "grid" | "cell" | "both" | "total-fit";
     /** 0–1：多个来源一致、且合计与抬头总数吻合时高 */
     confidence?: number;
     /** 来源互相矛盾、无法确定的色号（界面可提示核对） */

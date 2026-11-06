@@ -28,7 +28,7 @@ export default function SaveForm({ defaultName, defaultTags = "", defaultStatus 
             <button type="button" key={s} aria-pressed={status === s} onClick={() => setStatus(s)}>{s === "idea" ? `${STATUS_LABEL.idea}（想法）` : `${STATUS_LABEL.planned}`}</button>
           ))}
         </div>
-        <span className="meta">“计划做”会计入采购清单</span>
+        <span className="meta">“计划拼”会计入采购清单</span>
       </div>
       <label className="field"><span>份数</span><input className="input num" type="number" min={1} max={99} value={copies} onChange={(e) => setCopies(Number(e.target.value) || 1)} style={{ maxWidth: 120 }} /></label>
       <button className="btn btn-iron btn-block pt-save" type="submit" data-success={success ? "true" : undefined} disabled={busy || success || disabled}>

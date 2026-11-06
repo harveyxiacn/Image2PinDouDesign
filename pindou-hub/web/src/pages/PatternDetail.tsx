@@ -39,6 +39,7 @@ export default function PatternDetail({ id }: { id: string }) {
   const data = useData();
   const pattern = data.patterns.find((p) => p.id === id);
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
+  const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
   const previewUrl = useBlobUrl(pattern?.previewId);
   const sourceUrl = useBlobUrl(pattern?.imageId);
   const [view, setView] = useState<View | null>(null);
@@ -149,9 +150,20 @@ export default function PatternDetail({ id }: { id: string }) {
             <button className="btn btn-sm" onClick={() => void save({ copies: Math.min(99, copies + 1) })} aria-label="增加一份">+</button>
           </div>
           <span className="meta">{METHOD_LABEL[pattern.method]} · {fmt(total)} 颗 · {used} 色{pattern.width ? ` · ${pattern.width}×${pattern.height}` : ""} · 更新 {fmtTime(pattern.updatedAt)}</span>
+          {pattern.confidence != null ? <span className={`chip ${pattern.confidence >= 0.8 ? "chip-leaf" : pattern.confidence >= 0.5 ? "chip-amber" : "chip-iron"}`} title="综合颜色、图例差异、图上标注与网格容量；有疑点时最高 69%">整体可信度 {Math.round(pattern.confidence * 100)}%</span> : null}
+          {pattern.colorMatch != null ? <span className="chip" title="只看格子颜色与色卡的吻合度">颜色匹配 {Math.round(pattern.colorMatch * 100)}%</span> : null}
+          {pattern.verifiedAt == null ? (
+            <button className="btn btn-sm" onClick={() => void save({ verifiedAt: Date.now() }).then(() => toast("已标为核对过"))}>标为已核对</button>
+          ) : <span className="chip chip-leaf"><Icon name="check" size={12} />已核对</span>}
           {pattern.consumed ? <span className="chip chip-leaf">已扣库存</span> : null}
         </div>
       </header>
+
+      {pattern.reviewReasons?.length ? (
+        <div className="notice" role="note" style={{ marginBottom: 12 }}>
+          <span><b>保存时的自动检查：</b>{pattern.reviewReasons.join("；")}。{pattern.verifiedAt == null ? "对照原图确认后，点上方「标为已核对」。" : ""}</span>
+        </div>
+      ) : null}
 
       <div className="pd-grid">
         <section className="panel panel-pad pd-image stack">
@@ -188,7 +200,7 @@ export default function PatternDetail({ id }: { id: string }) {
                 </div>
               ) : <button className="btn btn-sm" onClick={() => setEditing({ ...pattern.counts })}><Icon name="edit" />编辑用量</button>}
             </div>
-            {editing ? <CountsEditor counts={editing} onChange={setEditing} /> : <DetailTable counts={pattern.counts} copies={copies} stock={stock} focusCode={focus} onPick={(c) => setFocus((f) => (f === c ? null : c))} />}
+            {editing ? <CountsEditor counts={editing} onChange={setEditing} /> : <DetailTable counts={pattern.counts} copies={copies} stock={stock} inventoryReady={inventoryReady} focusCode={focus} onPick={(c) => setFocus((f) => (f === c ? null : c))} />}
           </div>
 
           <div className="panel panel-pad stack">

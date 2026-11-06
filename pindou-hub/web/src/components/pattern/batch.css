@@ -37,3 +37,5 @@
 @keyframes bt-in { from { opacity: 0; transform: translateY(4px); } }
 @media (prefers-reduced-motion: reduce) { .bt-item { animation: none; } }
 .bt-done a { color: var(--iron-ink); font-weight: 500; }
+.bt-name-input { height: 30px; max-width: 280px; padding: 2px 6px; font-weight: 600; border-color: transparent; background: transparent; }
+.bt-name-input:hover, .bt-name-input:focus { border-color: var(--rule); background: var(--paper); }

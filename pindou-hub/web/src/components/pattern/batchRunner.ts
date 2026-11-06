@@ -2,7 +2,8 @@
 import { useSyncExternalStore } from "react";
 import { analyzePattern } from "../../lib/recognize/assistant";
 import type { AnalyzeResult } from "../../lib/recognize/types";
-import { loadPixelSource, saveImage } from "../../lib/images";
+import { imageContentId, loadPixelSource, saveImage } from "../../lib/images";
+import { getSnapshot } from "../../lib/db";
 import { reduceBatch, nextWaiting, type BatchAction, type BatchItem } from "../../lib/batch";
 import type { PatternStatus } from "../../lib/model";
 import { createPattern } from "./save";
@@ -32,6 +33,14 @@ async function runOne(it: BatchItem) {
   current = { id: it.id, ctl };
   batchStore.dispatch({ type: "start", id: it.id });
   try {
+    // 查重：图库里已经有同样内容（同一套存储规格的 SHA-256）就不重复识别；用户可点“仍然识别”强制跑
+    if (!it.force) {
+      const contentId = await imageContentId(it.file);
+      if (getSnapshot().images.some((img) => img.id === contentId && !img.deleted)) {
+        batchStore.dispatch({ type: "duplicate", id: it.id, imageId: contentId });
+        return;
+      }
+    }
     const px = await loadPixelSource(it.file, 2400);
     const full = await loadPixelSource(it.file, 5000).catch(() => null);
     if (ctl.signal.aborted) return;
@@ -72,7 +81,19 @@ export async function saveItem(it: BatchItem, status: PatternStatus): Promise<st
   const method = res.method === "none" ? "manual" : res.method;
   const p = await createPattern(
     { name: it.name, tags: parseTags(it.tag), status, copies: 1 },
-    { kind: "recognized", method, counts: res.counts, imageId: meta.id, width: res.grid?.grid.cols, height: res.grid?.grid.rows, matrix: res.grid?.matrix, confidence: res.confidence, reviewReasons: it.reasons.length ? it.reasons : undefined }
+    { kind: "recognized", method, counts: res.counts, imageId: meta.id, width: res.grid?.grid.cols, height: res.grid?.grid.rows, matrix: res.grid?.matrix, confidence: res.confidence, colorMatch: res.colorMatch, reviewReasons: it.reasons.length ? it.reasons : undefined }
+  );
+  batchStore.dispatch({ type: "saved", id: it.id, patternId: p.id });
+  return p.id;
+}
+
+/** 不是图纸的图：保留原图、存成“收藏”，不进入采购。 */
+export async function saveIdea(it: BatchItem): Promise<string | null> {
+  if (it.savedId || (it.state !== "notchart" && it.state !== "done")) return null;
+  const meta = await saveImage(it.file, it.file.name || it.name, "source");
+  const p = await createPattern(
+    { name: it.name, tags: parseTags(it.tag), status: "idea", copies: 1 },
+    { kind: "recognized", method: "manual", counts: {}, imageId: meta.id }
   );
   batchStore.dispatch({ type: "saved", id: it.id, patternId: p.id });
   return p.id;

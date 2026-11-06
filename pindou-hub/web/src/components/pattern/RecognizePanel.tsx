@@ -5,7 +5,7 @@ import { enhanceInWorker, type EnhanceResult } from "../../lib/enhance";
 import { hubInfo, aiVision } from "../../lib/sync";
 import { loadPixelSource, saveImage } from "../../lib/images";
 import { METHOD_LABEL, totalOf, type Counts, type PatternStatus } from "../../lib/model";
-import { headerChecks, reviewReasonsFor } from "../../lib/batch";
+import { comparableMismatchCount, gridCapacity, headerChecks, mismatchCount, reviewReasonsFor } from "../../lib/batch";
 import { checkSize } from "../../lib/recognize/sizecheck";
 import { normalizeCode } from "../../lib/palette";
 import { DiffNumber, Icon, fmt, navigate, prefersReducedMotion, toast } from "../ui";
@@ -72,6 +72,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const [ai, setAi] = useState<Ai | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
+  const [verified, setVerified] = useState(false);
   const [focus, setFocus] = useState<string | null>(null);
   const [view, setView] = useState<"orig" | "restored">("orig");
   const [forceChart, setForceChart] = useState(false);
@@ -221,9 +222,12 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   }, [result]);
   const codeChecks = useMemo<CheckMap | null>(() => {
     if (!result?.checks?.length || !result.checks.some((c) => c.legend !== null)) return null;
-    return Object.fromEntries(result.checks.map((c) => [c.code, { status: c.status, delta: Math.abs((c.legend ?? 0) - c.read) }]));
+    return Object.fromEntries(result.checks.map((c) => [c.code, { status: c.status, delta: Math.abs((c.legend ?? 0) - c.read), source: c.source }]));
   }, [result]);
-  const mismatches = diff ? Object.values(diff).filter((d) => d.legend !== d.grid).length : 0;
+  const mismatches = result ? mismatchCount(result) : 0;
+  const comparable = result ? comparableMismatchCount(result) : 0;
+  const cap = result ? gridCapacity(result) : null;
+  const capBad = !!(cap && cap.total > cap.capacity);
 
   const askAi = async () => {
     if (!file) return;
@@ -250,8 +254,9 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
       const reasons = heavy || !result ? [] : reviewReasonsFor(result);
       const p = await createPattern(values, {
         kind: "recognized", method, counts, imageId: meta.id,
-        width: grid?.grid.cols, height: grid?.grid.rows, matrix: grid?.matrix, confidence: heavy ? 1 : result?.confidence,
-        reviewReasons: reasons.length ? reasons : undefined
+        width: grid?.grid.cols, height: grid?.grid.rows, matrix: grid?.matrix,
+        confidence: heavy ? 1 : result?.confidence, colorMatch: heavy ? undefined : result?.colorMatch,
+        reviewReasons: reasons.length ? reasons : undefined, verifiedAt: verified ? Date.now() : undefined
       });
       toast("已保存到图库");
       setSaving(false); setSavedOk(true);
@@ -277,6 +282,8 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   }
 
   const conf = result ? Math.round(result.confidence * 100) : 0;
+  const colorConf = result?.colorMatch != null ? Math.round(result.colorMatch * 100) : null;
+  const cellPct = result?.cellCoverage != null ? Math.round(result.cellCoverage * 100) : null;
   const notChart = !!result && result.isChart === false && !forceChart;
   const matrix = result?.grid?.matrix && result.grid.matrix.length ? result.grid.matrix : null;
   const pick = (code: string) => setFocus((f) => (f === code ? null : code));
@@ -347,9 +354,10 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
             <div className="panel-head">
               <h3>识别结果</h3>
               <div className="row">
-                <span className="chip">{result.method === "none" ? "未识别到用量" : METHOD_LABEL[result.method]}</span>
-                {result.cellCodesRead && result.cellCodeStats ? <span className="chip chip-leaf" title={`格内色号校正了 ${result.cellCodeStats.overrides} 个颜色匹配`}>格内色号 {result.cellCodeStats.read}/{result.cellCodeStats.clusters} 色</span> : null}
-                <span className={`chip ${conf >= 80 ? "chip-leaf" : conf >= 50 ? "chip-amber" : "chip-iron"}`}>可信度 {conf}%</span>
+                <span className="chip">{result.method === "none" ? "未识别到用量" : `采用：${METHOD_LABEL[result.method]}`}</span>
+                {colorConf != null ? <span className={`chip ${colorConf >= 80 ? "chip-leaf" : colorConf >= 50 ? "chip-amber" : "chip-iron"}`} title="只看格子颜色与色卡的吻合度，不含图例数字差异">颜色匹配 {colorConf}%</span> : null}
+                {result.cellCodesRead && result.cellCodeStats ? <span className="chip chip-leaf" title={`读出了 ${result.cellCodeStats.read}/${result.cellCodeStats.clusters} 个颜色的格内色号，校正 ${result.cellCodeStats.overrides} 个颜色匹配`}>格内色号 {result.cellCodeStats.cells != null && result.cellCodeStats.cellsTotal != null ? `${fmt(result.cellCodeStats.cells)}/${fmt(result.cellCodeStats.cellsTotal)} 格（${cellPct}%）` : `${result.cellCodeStats.read}/${result.cellCodeStats.clusters} 色`}</span> : null}
+                <span className={`chip ${conf >= 80 ? "chip-leaf" : conf >= 50 ? "chip-amber" : "chip-iron"}`} title="综合颜色、图例差异、图上标注与网格容量；有疑点时最高 69%">整体可信度 {conf}%</span>
               </div>
             </div>
             {result.method === "none" ? <div className="notice iron" style={{ margin: 12 }}>没有读到图例，也没能确定网格。可以框选图纸区域、手动填列数和行数后重新识别，或直接在下表手动添加。</div> : null}
@@ -377,7 +385,9 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
                 </span>
               </div>
             ) : null}
-            {mismatches ? <div className="notice" style={{ margin: 12 }}>有 {mismatches} 个色号的图例数量和网格数出来的不一致（高亮行）。请对照原图核对。</div> : null}
+            {cap ? <p className="meta" style={{ padding: "8px 12px 0" }}>网格 {cap.cols}×{cap.rows}，最多 {fmt(cap.capacity)} 格；最终数出 <b className="num">{fmt(cap.total)}</b> 颗。</p> : null}
+            {capBad ? <div className="notice iron" style={{ margin: 12 }}><b>网格可能过细：</b>网格 {cap!.cols}×{cap!.rows} 最多 {fmt(cap!.capacity)} 格，却数出 {fmt(cap!.total)} 颗。请核对列数 / 行数，或手动改小后重新识别。</div> : null}
+            {mismatches ? <div className="notice" style={{ margin: 12 }}>有 {mismatches} 个色号的图例数量和网格数出来的有差异{comparable && comparable !== mismatches ? `，其中 ${comparable} 个双方都读到了数字、可以直接对比` : ""}（高亮行）。请对照原图核对。</div> : null}
             {result.legend?.statedTotal != null ? <p className="meta" style={{ padding: "8px 12px 0" }}>图上标注的总数 {fmt(result.legend.statedTotal)}，当前合计 <DiffNumber value={totalOf(counts)} /></p> : null}
             {matrix ? <p className="meta" style={{ padding: "8px 12px 0" }}>点一个色号，图上只亮出它的格子。</p> : null}
             <CountsEditor counts={counts} onChange={setCounts} diff={diff} checks={codeChecks} stagger focusCode={focus} onPick={matrix ? pick : undefined} />
@@ -407,6 +417,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
         {result && !notChart ? (
           <div className="panel panel-pad">
             {hdBlob ? <label className="pt-check" style={{ marginBottom: 8 }}><input type="checkbox" checked={useHdSource} onChange={(e) => setUseHdSource(e.target.checked)} />用高清版作为原图（图库里保存放大后的图）</label> : null}
+            <label className="pt-check" style={{ marginBottom: 8 }}><input type="checkbox" checked={verified} onChange={(e) => setVerified(e.target.checked)} />我已对照原图核对（保存后标为「已核对」）</label>
             <SaveForm defaultName={seed?.name || (file.name || "").replace(/\.[^.]+$/, "") || "新图纸"} defaultTags={seed?.tags} defaultStatus={seed?.status} busy={saving} success={savedOk} disabled={!Object.keys(counts).length} onSave={save} />
           </div>
         ) : null}

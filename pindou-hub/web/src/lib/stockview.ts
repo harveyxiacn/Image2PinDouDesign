@@ -196,7 +196,7 @@ export type Collection = {
   missingColors: number;
   /** 上述缺口合计颗数 */
   shortBeads: number;
-  /** 已在“计划做 / 制作中”的图纸数 */
+  /** 已在“计划拼 / 制作中”的图纸数 */
   plannedCount: number;
   /** 库存覆盖整套需求的比例 0–1 */
   coverage: number;

@@ -87,6 +87,12 @@ async function normalizeForStorage(blob: Blob): Promise<{ blob: Blob; width: num
   }
 }
 
+/** 和 saveImage 用同一套存储规格算出内容哈希，用来在识别前查重（不写入）。 */
+export async function imageContentId(input: Blob): Promise<string> {
+  const { blob } = await normalizeForStorage(input);
+  return sha256Hex(await blob.arrayBuffer());
+}
+
 export async function saveImage(input: Blob, name: string, role: ImageMeta["role"]): Promise<ImageMeta> {
   const { blob, width, height } = role === "preview" ? { blob: input, ...(await dims(input)) } : await normalizeForStorage(input);
   const id = await sha256Hex(await blob.arrayBuffer());

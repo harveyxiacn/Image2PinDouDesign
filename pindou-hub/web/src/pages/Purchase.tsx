@@ -53,7 +53,7 @@ export default function Purchase() {
     return (
       <div>
         <div className="page-head"><div><h1>采购方案</h1><p>按真实报价比较套装和单色补充包。</p></div></div>
-        <div className="panel empty pegboard"><h3>还没有要做的图纸</h3><p>把图纸标为“计划做”，这里会按缺口算方案。</p><a className="btn" href="#/gallery">去图库</a></div>
+        <div className="panel empty pegboard"><h3>还没有要做的图纸</h3><p>把图纸标为“计划拼”，这里会按缺口算方案。</p><a className="btn" href="#/gallery">去图库</a></div>
       </div>
     );
   }

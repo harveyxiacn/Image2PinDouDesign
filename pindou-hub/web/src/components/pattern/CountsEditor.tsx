@@ -7,7 +7,7 @@ import { BeadCode, DiffNumber, Icon, fmt } from "../ui";
 import "./pattern.css";
 
 /** 与下方图例用量的逐色核对结果（assistant 的 checks） */
-export type CheckMap = Record<string, { status: "ok" | "short" | "over" | "no-legend"; delta: number }>;
+export type CheckMap = Record<string, { status: "ok" | "short" | "over" | "no-legend"; delta: number; source?: "legend" | "grid" | "cell" | "both" | "total-fit" }>;
 export type DiffMap = Record<string, { legend: number; grid: number }>;
 
 /** 可编辑的色号用量表。diff 提供时标出图例与网格不一致的色号。 */
@@ -19,6 +19,8 @@ export default function CountsEditor({ counts, onChange, diff, checks, readOnly,
   const [code, setCode] = useState("");
   const [count, setCount] = useState("");
   const [error, setError] = useState("");
+  const hasChecks = !!checks && Object.keys(checks).length > 0;
+  const columns = 1 + (diff ? 2 : 0) + (hasChecks ? 1 : 0) + 1 + (readOnly ? 0 : 1);
   const codes = Object.keys(counts).sort((a, b) => (counts[b] - counts[a]) || compareCodes(a, b));
   const set = (c: string, n: number) => onChange?.({ ...counts, [c]: Math.max(0, Math.round(n) || 0) });
   const remove = (c: string) => { const next = { ...counts }; delete next[c]; onChange?.(next); };
@@ -42,6 +44,7 @@ export default function CountsEditor({ counts, onChange, diff, checks, readOnly,
               <th>色号</th>
               {diff ? <th className="r">图例</th> : null}
               {diff ? <th className="r">网格</th> : null}
+              {hasChecks ? <th>采用</th> : null}
               <th className="r">数量</th>
               {!readOnly ? <th aria-label="操作" /> : null}
             </tr>
@@ -65,6 +68,7 @@ export default function CountsEditor({ counts, onChange, diff, checks, readOnly,
                   </td>
                   {diff ? <td className="r num">{d ? fmt(d.legend) : "—"}</td> : null}
                   {diff ? <td className="r num">{d ? fmt(d.grid) : "—"}</td> : null}
+                  {hasChecks ? <td><SourceChip source={checks?.[c]?.source} /></td> : null}
                   <td className="r">
                     {readOnly ? <span className="num">{fmt(counts[c])}</span> : (
                       <input className="input pt-num num" type="number" inputMode="numeric" min={0} value={counts[c]} aria-label={`${c} 数量`}
@@ -77,10 +81,10 @@ export default function CountsEditor({ counts, onChange, diff, checks, readOnly,
                 </tr>
               );
             })}
-            {!codes.length ? <tr><td colSpan={5} className="meta" style={{ textAlign: "center", padding: 20 }}>还没有色号</td></tr> : null}
+            {!codes.length ? <tr><td colSpan={columns} className="meta" style={{ textAlign: "center", padding: 20 }}>还没有色号</td></tr> : null}
           </tbody>
           <tfoot>
-            <tr><td className="meta">合计 {codes.length} 色</td>{diff ? <td /> : null}{diff ? <td /> : null}<td className="r"><b><DiffNumber value={totalOf(counts)} /></b></td>{!readOnly ? <td /> : null}</tr>
+            <tr><td className="meta">合计 {codes.length} 色</td>{diff ? <td /> : null}{diff ? <td /> : null}{hasChecks ? <td /> : null}<td className="r"><b><DiffNumber value={totalOf(counts)} /></b></td>{!readOnly ? <td /> : null}</tr>
           </tfoot>
         </table>
       </div>
@@ -96,6 +100,15 @@ export default function CountsEditor({ counts, onChange, diff, checks, readOnly,
       ) : null}
     </div>
   );
+}
+
+const SOURCE_LABEL: Record<NonNullable<CheckMap[string]["source"]>, string> = {
+  legend: "图例", grid: "网格", cell: "格内色号", both: "两者一致", "total-fit": "按总数核对"
+};
+
+function SourceChip({ source }: { source?: CheckMap[string]["source"] }) {
+  if (!source) return <span className="meta">—</span>;
+  return <span className={`chip ${source === "cell" ? "chip-leaf" : ""}`} title="这一行最终采用的数量来自哪一列">{SOURCE_LABEL[source]}</span>;
 }
 
 function CheckChip({ check }: { check: CheckMap[string] }) {

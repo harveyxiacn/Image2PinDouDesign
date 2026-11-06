@@ -35,11 +35,16 @@ export default function Shopping() {
   const excluded = useMemo(() => (onlyTag ? new Set([...excludeForTag(scoped, onlyTag), ...manual]) : manual), [scoped, onlyTag, manual]);
   const [loss, setLoss] = useState(String(Math.round(data.prefs.lossRate * 1000) / 10));
   const [pack, setPack] = useState(String(data.prefs.packSize));
+  const [packSizes, setPackSizes] = useState<Record<string, number>>(() => ({ ...(data.prefs.packSizes ?? {}) }));
+  const [mode, setMode] = useState<"pack" | "net">("pack");
+  const [patQuery, setPatQuery] = useState("");
+  const [showAllPats, setShowAllPats] = useState(false);
   const [includeLow, setIncludeLow] = useState(true);
   const [edits, setEdits] = useState<Record<string, number>>({});
   const [receive, setReceive] = useState(false);
 
   const prefs = useMemo(() => ({ ...data.prefs, lossRate: Math.max(0, Number(loss) || 0) / 100, packSize: Math.max(1, Math.round(Number(pack)) || 1) }), [data.prefs, loss, pack]);
+  const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
   const demand = useMemo(() => demandByCode(data.patterns, (p) => isActive(p) && (!onlyVerified || !!p.verifiedAt) && !excluded.has(p.id)), [data.patterns, onlyVerified, excluded]);
   const need = useMemo(() => {
@@ -47,7 +52,12 @@ export default function Shopping() {
     for (const [code, n] of Object.entries(demand)) out[code] = Math.ceil(n * (1 + prefs.lossRate));
     return out;
   }, [demand, prefs.lossRate]);
-  const rows = useMemo(() => shoppingList(stock, demand, prefs, includeLow), [stock, demand, prefs, includeLow]);
+  const packOf = (code: string) => Math.max(1, Math.round(packSizes[code] ?? prefs.packSize));
+  const rows = useMemo(() => shoppingList(stock, demand, prefs, includeLow).map((row) => {
+    if (mode === "net") return row.shortfall > 0 ? { ...row, buy: row.shortfall } : row;
+    const size = Math.max(1, Math.round(packSizes[row.code] ?? prefs.packSize));
+    return row.shortfall > 0 ? { ...row, buy: Math.ceil(row.shortfall / size) * size } : row;
+  }), [stock, demand, prefs, includeLow, mode, packSizes]);
   const qtyOf = (code: string, buy: number) => edits[code] ?? buy;
   const items = rows.map((r) => ({ code: r.code, qty: qtyOf(r.code, r.buy) })).filter((r) => r.qty > 0);
   const total = items.reduce((a, r) => a + r.qty, 0);
@@ -66,12 +76,33 @@ export default function Shopping() {
     ? { cost: applied.totalCost + extraCost.cost, beads: applied.totalBeads + extraCost.beads, packs: addPacks(applied.packs, extraCost.packs) }
     : estimateCostForRows(items);
   // 套装方案下，逐行成本只显示“补充包”部分；套装价已经计入顶部方案成本。
+  const showPackCol = mode === "pack" && !planUnchanged;
   const rowCost = (code: string, qty: number) => {
     const item = planUnchanged ? planItemByCode.get(code) : undefined;
     return item ? { cost: item.singlesCost, packs: item.packs } : optimizePacks(qty, code);
   };
   const unverifiedCount = useMemo(() => active.filter((p) => (!onlyVerified || p.verifiedAt != null) && !excluded.has(p.id) && p.verifiedAt == null).length, [active, onlyVerified, excluded]);
   const verifiedCount = useMemo(() => active.filter((p) => p.verifiedAt != null).length, [active]);
+  const patMatches = useMemo(() => {
+    const q = patQuery.trim().toLowerCase();
+    return q ? active.filter((p) => p.name.toLowerCase().includes(q) || p.tags.some((t) => t.toLowerCase().includes(q))) : active;
+  }, [active, patQuery]);
+  const visiblePats = showAllPats || patMatches.length <= 12 ? patMatches : patMatches.slice(0, 12);
+  // 分系列买 vs 一次买齐：同一色号在两个系列都出现时，分开买会各取整一次
+  const splitHint = useMemo(() => {
+    if (applied || tagsInPlan.length < 2 || Object.keys(stock).length) return null;
+    const base = scoped.filter((p) => !manual.has(p.id));
+    const costFor = (d: Record<string, number>) => estimateCostForRows(Object.entries(d).map(([code, n]) => ({ code, qty: Math.ceil(n * (1 + prefs.lossRate)) }))).cost;
+    // 按“主标签”分组，保证每张图纸只算一次（多标签的图纸不会被重复计入）
+    const groups = new Map<string, typeof base>();
+    for (const p of base) {
+      const key = p.tags[0] || "未分组";
+      groups.set(key, [...(groups.get(key) ?? []), p]);
+    }
+    const separate = [...groups.values()].reduce((sum, ps) => sum + costFor(demandByCode(ps)), 0);
+    const together = costFor(demand);
+    return separate > together + 0.01 ? { separate, together, extra: separate - together } : null;
+  }, [applied, tagsInPlan, scoped, manual, prefs, stock, demand]);
 
   // ?plan= 从采购方案页带入：把每色购买量写进 edits；用户手动改损耗/包装/标签后清除。
   const planId = route.query.get("plan");
@@ -82,6 +113,7 @@ export default function Shopping() {
     if (!plan) return;
     setEdits(applyPlanToEdits(plan));
     setApplied(plan);
+    setMode("pack");
   }, [planId, plans, planCleared]);
   const resetEdits = () => { setEdits({}); setApplied(null); setPlanCleared(true); };
 
@@ -117,15 +149,23 @@ export default function Shopping() {
     downloadText("采购清单.csv", countsToCsv(out, [["code", "色号"], ["name", "颜色"], ["need", "需要(含损耗)"], ["stock", "库存"], ["shortfall", "缺口"], ["buy", "建议购买"], ["cost", "预计成本(元)"]]), "text/csv;charset=utf-8");
   };
   const saveDefaults = async () => {
-    await putRecords("prefs", [{ ...data.prefs, lossRate: prefs.lossRate, packSize: prefs.packSize, updatedAt: Date.now() }]);
-    toast("已存为默认损耗率和包装规格");
+    await putRecords("prefs", [{ ...data.prefs, lossRate: prefs.lossRate, packSize: prefs.packSize, packSizes, updatedAt: Date.now() }]);
+    toast("已存为默认损耗率、包装规格和逐色包装");
   };
 
   return (
     <div>
       <div className="page-head">
-        <div><h1>采购清单</h1><p>按计划做 / 制作中的图纸算出缺口，再按真实报价估算成本。</p></div>
+        <div><h1>采购清单</h1><p>按计划拼 / 制作中的图纸算出缺口，再按真实报价估算成本。</p></div>
       </div>
+
+      {!inventoryReady ? (
+        <div className="notice" role="note">
+          <span><b>库存还没录入</b>：下面按净需求列出，“缺”不代表真的缺货。</span>
+          <span className="spacer" />
+          <a className="btn btn-sm" href="#/inventory">去录入现有豆子</a>
+        </div>
+      ) : null}
 
       {applied ? (
         <div className="notice shop-plan-note" role="status">
@@ -137,7 +177,7 @@ export default function Shopping() {
 
       <section className="panel shop-hero pegboard" aria-label="采购汇总">
         <div className="shop-hero-main">
-          <div className="label">清单合计（整包）</div>
+          <div className="label">清单合计（{mode === "net" ? "净需求" : "整包"}）</div>
           <div className="big"><DiffNumber value={total} /> <span className="meta">颗 · {items.length} 色</span></div>
           <div className="shop-kpis">
             <span>净需求 <b className="num">{fmt(net)}</b> 颗 · {colorCount} 色</span>
@@ -172,27 +212,42 @@ export default function Shopping() {
               {tagsInPlan.map((t) => <button type="button" key={t} className="chip shop-tag" aria-pressed={onlyTag === t} onClick={() => pickTag(t)}>只算{t}</button>)}
             </div>
           ) : null}
+          {splitHint ? <p className="meta shop-split">分系列各买各的约 <b>{formatMoney(splitHint.separate)}</b>；一次买齐约 <b>{formatMoney(splitHint.together)}</b>，省 {formatMoney(splitHint.extra)}（同一色号只取整一次）。</p> : null}
           {active.length ? (
-            <div className="shop-pats" style={{ marginTop: 6 }}>
-              {active.map((p) => {
-                const offByVerify = onlyVerified && p.verifiedAt == null;
-                return (
-                  <label key={p.id} className={offByVerify ? "is-off" : undefined}>
-                    <input type="checkbox" checked={!offByVerify && !excluded.has(p.id)} disabled={offByVerify} onChange={() => toggle(p.id)} />
-                    <span className="n">{p.name}</span>
-                    {p.verifiedAt == null ? <span className="chip chip-amber pt-unverified">未核对</span> : null}
-                    <span className="meta num">×{Math.max(1, p.copies || 1)} 份</span>
-                  </label>
-                );
-              })}
-            </div>
-          ) : <p className="meta" style={{ marginTop: 6 }}>没有“计划做 / 制作中”的图纸。到图库把图纸标成计划做，这里就会算出缺口。</p>}
+            <>
+              <div className="row shop-pat-tools" style={{ marginTop: 6 }}>
+                <input className="input" type="search" placeholder={`搜索 ${active.length} 张图纸`} value={patQuery} onChange={(e) => setPatQuery(e.target.value)} aria-label="搜索图纸" />
+                <button type="button" className="btn btn-sm btn-ghost" onClick={() => setManual(new Set())}>全选</button>
+                <button type="button" className="btn btn-sm btn-ghost" onClick={() => setManual(new Set(active.map((p) => p.id)))}>全不选</button>
+              </div>
+              <div className="shop-pats">
+                {visiblePats.map((p) => {
+                  const offByVerify = onlyVerified && p.verifiedAt == null;
+                  return (
+                    <label key={p.id} className={offByVerify ? "is-off" : undefined}>
+                      <input type="checkbox" checked={!offByVerify && !excluded.has(p.id)} disabled={offByVerify} onChange={() => toggle(p.id)} />
+                      <span className="n">{p.name}</span>
+                      {p.verifiedAt == null ? <span className="chip chip-amber pt-unverified">未核对</span> : null}
+                      <span className="meta num">×{Math.max(1, p.copies || 1)} 份</span>
+                    </label>
+                  );
+                })}
+              </div>
+              {patMatches.length > 12 ? <button type="button" className="btn btn-sm btn-ghost" onClick={() => setShowAllPats((v) => !v)}>{showAllPats ? "收起" : `展开全部 ${patMatches.length} 张`}</button> : null}
+              {!patMatches.length ? <p className="meta">没有匹配的图纸。</p> : null}
+            </>
+          ) : <p className="meta" style={{ marginTop: 6 }}>没有“计划拼 / 制作中”的图纸。到图库把图纸标成计划拼，这里就会算出缺口。</p>}
         </section>
         <section className="panel panel-pad stack">
+          <div className="seg" role="group" aria-label="买法">
+            <button type="button" aria-pressed={mode === "pack"} onClick={() => { setMode("pack"); setEdits({}); setApplied(null); setPlanCleared(true); }}>按整包买</button>
+            <button type="button" aria-pressed={mode === "net"} onClick={() => { setMode("net"); setEdits({}); setApplied(null); setPlanCleared(true); }}>按净需求买</button>
+          </div>
           <div className="shop-ctl">
             <label className="field"><span>损耗率（%）</span><input className="input num" type="number" inputMode="decimal" min={0} value={loss} onChange={(e) => { setLoss(e.target.value); resetEdits(); }} /></label>
-            <label className="field"><span>包装规格（颗/包）</span><input className="input num" type="number" inputMode="numeric" min={1} value={pack} onChange={(e) => { setPack(e.target.value); resetEdits(); }} /></label>
+            <label className="field"><span>默认包装（颗/包）</span><input className="input num" type="number" inputMode="numeric" min={1} value={pack} onChange={(e) => { setPack(e.target.value); resetEdits(); }} disabled={mode === "net"} /></label>
           </div>
+          <p className="meta">{mode === "pack" ? "按整包向上取整，多出的整包会显示在顶部。" : "按实际缺口买，不按整包取整；成本仍按下单时的整包报价估算。"}</p>
           <label className="row" style={{ minHeight: 28 }}><input className="shop-check" type="checkbox" checked={includeLow} onChange={(e) => setIncludeLow(e.target.checked)} />包含补货提醒（库存低于最低库存的色号）</label>
           <label className="row" style={{ minHeight: 28 }}><input className="shop-check" type="checkbox" checked={onlyVerified} onChange={(e) => toggleVerified(e.target.checked)} disabled={!verifiedCount} />只算已核对（{verifiedCount} 张）</label>
           <div className="row"><button className="btn btn-sm" onClick={saveDefaults}>存为默认</button></div>
@@ -204,13 +259,13 @@ export default function Shopping() {
         <section className="panel">
           <div className="table-wrap">
             <table className="table">
-              <thead><tr><th>色号</th><th className="r">需要(含损耗)</th><th className="r">库存</th><th className="r">缺口</th><th className="r">建议购买</th><th className="r">{planUnchanged && applied?.setOffer ? "补充包成本" : "预计成本"}</th><th>原因</th></tr></thead>
+              <thead><tr><th>色号</th><th className="r">需要(含损耗)</th><th className="r">库存</th><th className="r">缺口</th><th className="r">建议购买</th>{showPackCol ? <th className="r">包装(颗/包)</th> : null}<th className="r">{planUnchanged && applied?.setOffer ? "补充包成本" : "预计成本"}</th><th>原因</th></tr></thead>
               <tbody>
                 {view.map(({ row: r, done }) => {
                   if (done) return (
                     <tr key={r.code} className="shop-done">
                       <td><span className="bead-code"><Bead code={r.code} /><span className="code">{r.code}</span></span></td>
-                      <td colSpan={6}><span className="shop-done-tag"><Icon name="check" size={16} />已买到，已入库</span></td>
+                      <td colSpan={showPackCol ? 7 : 6}><span className="shop-done-tag"><Icon name="check" size={16} />已买到，已入库</span></td>
                     </tr>
                   );
                   const qty = qtyOf(r.code, r.buy);
@@ -224,8 +279,9 @@ export default function Shopping() {
                       <td className="r">{fmt(r.stock)}</td>
                       <td className="r" style={{ color: r.shortfall ? "var(--iron-ink)" : undefined }}>{r.shortfall ? fmt(r.shortfall) : "—"}</td>
                       <td className="r"><input className="input num shop-buy" type="number" inputMode="numeric" min={0} aria-label={`${r.code} 建议购买`} value={qty} onChange={(e) => setEdits((cur) => ({ ...cur, [r.code]: Math.max(0, Math.round(Number(e.target.value)) || 0) }))} /></td>
+                      {showPackCol ? <td className="r"><input className="input num shop-pack" type="number" inputMode="numeric" min={1} aria-label={`${r.code} 包装规格`} value={packOf(r.code)} onChange={(e) => { const n = Math.max(1, Math.round(Number(e.target.value)) || 1); setPackSizes((cur) => ({ ...cur, [r.code]: n })); setEdits({}); }} /></td> : null}
                       <td className="r" title={costTitle}>{formatMoney(est.cost)}</td>
-                      <td>{r.reason === "shortfall" ? <span className="chip chip-iron">缺货</span> : <span className="chip chip-amber">补货</span>}</td>
+                      <td>{r.reason === "shortfall" ? <span className="chip chip-iron">{inventoryReady ? "缺货" : "未入库"}</span> : <span className="chip chip-amber">补货</span>}</td>
                     </tr>
                   );
                 })}
@@ -242,7 +298,7 @@ export default function Shopping() {
       ) : active.length ? (
         <div className="panel empty shop-ok"><span style={{ color: "var(--leaf)" }}><Icon name="check" size={28} /></span><h3>库存够做全部计划</h3><p>{excluded.size ? "已勾选的图纸都够用。" : "没有需要补的色号，可以直接开工。"}</p></div>
       ) : (
-        <div className="panel empty pegboard"><h3>还没有要做的图纸</h3><p>把图纸标为“计划做”，这里会列出要买什么。</p><a className="btn" href="#/gallery">去图库</a></div>
+        <div className="panel empty pegboard"><h3>还没有要做的图纸</h3><p>把图纸标为“计划拼”，这里会列出要买什么。</p><a className="btn" href="#/gallery">去图库</a></div>
       )}
 
       <div className="sr-only" role="status" aria-live="polite">{say}</div>

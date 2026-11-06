@@ -201,7 +201,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       } else {
         step("legend", "读取图例", "warn", parsed.items.length
           ? "只读到 1 个色号，不足以当作图例使用"
-          : "没有识别到“色号 + 数量”形式的图例");
+          : "没有识别到“色号 + 数量”形式的图例（当前 OCR 只带英文 / 数字模型，中文色名图例会读不到；按网格 / 格内色号核对）");
       }
     } catch (err) {
       if (signal?.aborted && (err as Error)?.name === "AbortError" && !(err as { timeout?: boolean }).timeout) throw err;
@@ -235,6 +235,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
 
   // 3) 读色
   throwIfAborted(signal);
+  let capacityBad = false;
   let reading: GridReading | null = null;
   if (grid) {
     const legendCodes = legend ? legendCodeList(legend) : null;
@@ -247,6 +248,13 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     });
     const total = sum(reading.counts);
     if (total > 0) {
+      // 硬校验：一个格子最多一颗豆，数出的豆子不可能多于网格格子总数
+      const capacity = grid.cols * grid.rows;
+      if (total > capacity) {
+        capacityBad = true;
+        step("grid-capacity", "核对网格容量", "warn",
+          `网格 ${grid.cols}×${grid.rows} 最多 ${fmt(capacity)} 格，却数出 ${fmt(total)} 颗，网格可能过细；请核对列数 / 行数`);
+      }
       step("read", "读取格子颜色", "ok",
         `识别 ${Object.keys(reading.counts).length} 个色号，共 ${fmt(total)} 颗，空格 ${fmt(reading.emptyCells)} 个`
         + (legendCodes ? "（按图例色号匹配）" : ""));
@@ -263,6 +271,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   // 3b) 格内色号：图纸每个格子里印了色号时，这是最强的信号，用它校正颜色匹配
   let cellCodesRead = false;
   let cellCodeStats: AnalyzeResult["cellCodeStats"];
+  let cellCoverage = 0;
   if (grid && reading && options.ocr !== false && options.cellCodes !== false) {
     throwIfAborted(signal);
     if (!reading.inkChart || !reading.clusters) {
@@ -295,7 +304,20 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
           if (sum(next.counts) > 0) {
             reading = next;
             cellCodesRead = true;
-            cellCodeStats = { read: nRead, clusters: r.total, overrides, glyph: r.glyph, merged: r.merged, names: [...new Set(Object.values(r.votes))] };
+            // 覆盖到“豆子格”，而不是“颜色数”：一个色号可能覆盖几百格
+            const covered = new Set<number>();
+            for (const id of Object.keys(r.votes)) {
+              const cluster = next.clusters?.find((c) => c.id === Number(id));
+              if (cluster) for (const cell of cluster.cells) covered.add(cell);
+            }
+            for (const [cell, code] of Object.entries(r.cellCodes ?? {})) if (code) covered.add(Number(cell));
+            const cellsTotal = Math.max(1, grid.cols * grid.rows - next.emptyCells);
+            cellCoverage = Math.min(1, covered.size / cellsTotal);
+            cellCodeStats = {
+              read: nRead, clusters: r.total, overrides, glyph: r.glyph, merged: r.merged,
+              names: [...new Set(Object.values(r.votes))],
+              cells: covered.size, cellsTotal, coverage: cellCoverage
+            };
             const ovTxt = overrides ? `，格内色号校正了 ${overrides} 个颜色匹配` : "，与颜色匹配一致";
             step("cellcode", "读取格内色号", nRead >= r.total * 0.8 ? "ok" : "warn",
               `读出 ${nRead}/${r.total} 个颜色的格内色号${r.recovered ? `（另 ${r.recovered} 个按校正后的颜色补全）` : ""}${ovTxt}，用时 ${((performance.now() - t1) / 1000).toFixed(1)} 秒`);
@@ -376,6 +398,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       abs += Math.abs(l - g);
     }
     const mismatch = diff.filter((d) => d.legend !== d.grid && !added.includes(d.code)).length;
+    const comparable = diff.filter((d) => d.legend > 0 && d.grid > 0 && d.legend !== d.grid).length;
     // 网格读数是否“硬”：格内色号读出了绝大多数颜色，或网格规整、平涂、色差小。
     // JPEG 压缩后图例小数字常被读错（8↔6、1↔7），而格子是一颗颗数出来的——此时有分歧的色号以网格为准。
     const gtAll = sum(reading.counts);
@@ -413,7 +436,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       }
       step("compare", "图例与网格对照", mismatch ? "warn" : "ok",
         mismatch
-          ? `总数吻合（图例 ${fmt(sum(counts))} / 网格 ${fmt(gt)}），网格统计与图例有 ${mismatch} 个色号不一致`
+          ? `总数吻合（图例 ${fmt(sum(counts))} / 网格 ${fmt(gt)}），${mismatch} 个色号有差异（其中 ${comparable} 个双方都有数）`
           : `图例与网格完全一致，共 ${fmt(sum(counts))} 颗`);
     } else {
       // 两边总数对不上：谁更可信？有总数（抬头 / 图上标注）就看谁更接近；没有就看网格是否“可信”
@@ -425,7 +448,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
         method = agreement >= 0.5 ? "legend+grid" : "grid";
         confidence = 0.55 + 0.2 * agreement + (target ? 0.1 : 0);
         step("compare", "图例与网格对照", "warn",
-          `图例合计 ${fmt(lt)} 颗，网格数出 ${fmt(gt)} 颗，差异较大（${mismatch} 个色号不一致）；${target ? `按抬头 / 图上总数 ${fmt(target)} 判断` : "网格规整、颜色吻合度高"}，图例数字多半是识别错位，采用网格统计`);
+          `图例合计 ${fmt(lt)} 颗，网格数出 ${fmt(gt)} 颗，差异较大（${mismatch} 个色号有差异，其中 ${comparable} 个双方都有数）；${target ? `按抬头 / 图上总数 ${fmt(target)} 判断` : "网格规整、颜色吻合度高"}，图例数字多半是识别错位，采用网格统计`);
       } else {
         method = "legend";
         confidence = 0.5 + 0.25 * agreement;
@@ -517,8 +540,32 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   }
   const paletteWarning = detectPaletteMismatch(legend, reading, cellCodeStats);
   if (paletteWarning) step("palette", "核对色卡", "warn", paletteWarning);
+
+  // P0-2：颜色匹配度只反映“格子颜色 ↔ 色卡”的吻合程度；整体可信度再把图例差异、抬头核对、
+  // 网格容量等疑点算进去。有任何疑点时整体分封顶 69%——100% 只留给“无任何疑点 + 格内色号覆盖 ≥90% + 图例/网格一致”的图纸。
+  let colorMatch: number | undefined;
+  if (reading) {
+    const gridTotal = sum(reading.counts);
+    let colorDe = 0;
+    for (const c of reading.colors) colorDe += c.deltaE * c.count;
+    colorDe /= Math.max(1, gridTotal);
+    colorMatch = 0.45 * reading.grid.score + 0.4 * Math.max(0, 1 - colorDe / 10) + 0.15 * cellCoverage;
+    if (cellCoverage >= 0.9) colorMatch += 0.08;
+    colorMatch = Math.max(0, Math.min(1, colorMatch));
+  }
+  const headerBad = !!header?.total && sum(counts) > 0 && Math.abs(sum(counts) - header.total) / header.total > 0.01;
+  const sizeBad = !!(header?.cols && header?.rows && reading && (header.cols !== reading.grid.cols || header.rows !== reading.grid.rows));
+  const legendGridDiff = diff.filter((d) => d.legend !== d.grid).length;
+  if (capacityBad || headerBad || sizeBad || legendGridDiff > 0 || paletteWarning) {
+    confidence = Math.min(confidence, 0.69);
+  } else if (!(cellCoverage >= 0.9 && !!legendUsed && !!reading && legendGridDiff === 0)) {
+    confidence = Math.min(confidence, 0.99);
+  }
+  confidence = Math.max(0, Math.min(1, confidence));
+  if (reading && cellCoverage >= 0.9 && method !== "legend") method = "cell";
+  if (method === "cell") for (const c of checks) if (c.source === "grid") c.source = "cell";
   return {
-    steps, legend, grid: reading, counts, method, confidence, diff, source, cellCodesRead, cellCodeStats, enhance: enhanceSummary(),
+    steps, legend, grid: reading, counts, method, confidence, colorMatch, cellCoverage, diff, source, cellCodesRead, cellCodeStats, enhance: enhanceSummary(),
     isChart: true, checks, header: header ?? undefined, paletteWarning: paletteWarning ?? undefined
   };
 }

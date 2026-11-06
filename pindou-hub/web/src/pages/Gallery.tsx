@@ -39,11 +39,11 @@ function ImageTile({ img, patternId }: { img: ImageMeta; patternId?: string }) {
 const LONG_PRESS_MS = 480;
 
 type ItemProps = {
-  p: Pattern; stock: Record<string, number>; flipKey: string; selecting: boolean; checked: boolean;
+  p: Pattern; stock: Record<string, number>; inventoryReady: boolean; flipKey: string; selecting: boolean; checked: boolean;
   onToggle: (id: string, shift: boolean) => void; onLongPress: (id: string) => void;
 };
 
-function GalleryItem({ p, stock, flipKey, selecting, checked, onToggle, onLongPress }: ItemProps) {
+function GalleryItem({ p, stock, inventoryReady, flipKey, selecting, checked, onToggle, onLongPress }: ItemProps) {
   const timer = useRef<number | undefined>(undefined);
   const start = useRef<{ x: number; y: number } | null>(null);
   const suppress = useRef(false);
@@ -68,7 +68,7 @@ function GalleryItem({ p, stock, flipKey, selecting, checked, onToggle, onLongPr
       onKeyDown={(e) => {
         if (selecting && e.key === " " && (e.target as HTMLElement).closest("a.pt-card")) { e.preventDefault(); onToggle(p.id, e.shiftKey); }
       }}>
-      <PatternCard pattern={p} stock={stock} />
+      <PatternCard pattern={p} stock={stock} inventoryReady={inventoryReady} />
       <label className="ga-check" title={checked ? "取消选择" : "选择这张"}>
         <input type="checkbox" checked={checked} onChange={() => undefined} onClick={(e) => onToggle(p.id, e.shiftKey)} />
         <span className="sr-only">选择 {p.name}</span>
@@ -81,7 +81,10 @@ export default function Gallery() {
   const route = useRoute();
   const data = useData();
   const tab = route.query.get("tab") === "images" ? "images" : "patterns";
-  const [status, setStatus] = useState<PatternStatus | "all">("all");
+  const [status, setStatus] = useState<PatternStatus | "all">(() => {
+    const s = route.query.get("status");
+    return s === "idea" || s === "planned" || s === "making" || s === "done" ? s : "all";
+  });
   const [verify, setVerify] = useState<VerifyFilter>(() => verifyFilterOf(route.query.get("verify")));
   const [tag, setTag] = useState(route.query.get("tag") ?? "");
   const [view, setView] = useState<"grid" | "tag">(route.query.get("group") === "tag" ? "tag" : "grid");
@@ -94,6 +97,7 @@ export default function Gallery() {
   const anchor = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
+  const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
 
   // 外部深链（总览的合集卡片）变化时同步筛选
   const qs = route.query.toString();
@@ -160,7 +164,7 @@ export default function Gallery() {
 
   const run = async (job: () => Promise<string>) => { const m = await job(); setSay(m); exitSelect(); };
 
-  const itemProps = (p: Pattern, flipKey: string): ItemProps => ({ p, stock, flipKey, selecting, checked: selected.has(p.id), onToggle: toggle, onLongPress: longPress });
+  const itemProps = (p: Pattern, flipKey: string): ItemProps => ({ p, stock, inventoryReady, flipKey, selecting, checked: selected.has(p.id), onToggle: toggle, onLongPress: longPress });
 
   return (
     <div>
@@ -175,6 +179,14 @@ export default function Gallery() {
         </div>
       </div>
       <div className="sr-only" role="status" aria-live="polite">{say}</div>
+
+      {!inventoryReady && data.patterns.length ? (
+        <div className="notice" role="note">
+          <span><b>库存还没录入</b>，卡片显示「库存未录入」，不是缺货。</span>
+          <span className="spacer" />
+          <a className="btn btn-sm" href="#/inventory">去录入现有豆子</a>
+        </div>
+      ) : null}
 
       {tab === "patterns" ? (
         data.patterns.length === 0 ? (
@@ -222,7 +234,7 @@ export default function Gallery() {
                   <section key={c.tag || "__none"} className="ga-sec" aria-labelledby={`ga-h-${c.tag || "none"}`}>
                     <div className="ga-sec-head">
                       <h2 id={`ga-h-${c.tag || "none"}`}>{c.tag || "未分组"}</h2>
-                      <span className="meta">{c.count} 张 · 共 {fmt(c.totalBeads)} 颗{c.missingColors ? ` · 缺 ${c.missingColors} 色` : ""}</span>
+                      <span className="meta">{c.count} 张 · 共 {fmt(c.totalBeads)} 颗{!inventoryReady ? " · 库存未录入" : c.missingColors ? ` · 缺 ${c.missingColors} 色` : ""}</span>
                       <span className="spacer" />
                       {selecting ? <button className="btn btn-sm btn-ghost" onClick={() => selectAll([...new Set([...chosen, ...c.patterns.map((p) => p.id)])])}>选择本组</button> : null}
                     </div>
@@ -247,7 +259,7 @@ export default function Gallery() {
           <button className="btn btn-sm btn-ghost" onClick={() => { exitSelect(); setSay("已退出多选"); }} aria-label="退出多选"><Icon name="x" /></button>
           <div className="ga-bulk-acts">
           <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetVerified(chosen))}>标记已核对</button>
-          <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetStatus(chosen, "planned"))}>设为计划做</button>
+          <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetStatus(chosen, "planned"))}>设为计划拼</button>
           <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetStatus(chosen, "idea"))}>设为收藏</button>
           <button className="btn btn-sm" disabled={!chosen.length} onClick={() => setTagSheet(true)}>加标签</button>
           <button className="btn btn-sm ga-del" disabled={!chosen.length} onClick={() => void run(() => bulkDelete(chosen))}><Icon name="trash" />删除</button>

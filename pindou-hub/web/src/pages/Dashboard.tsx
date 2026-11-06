@@ -22,13 +22,16 @@ export default function Dashboard() {
   const [batch, setBatch] = useState(false);
   const [kitInit, setKitInit] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
+  const [invSkipped, setInvSkipped] = useState(false);
 
+  const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
   const active = useMemo(() => data.patterns.filter(isActive), [data.patterns]);
   const buy = useMemo(() => shoppingList(stock, demandByCode(data.patterns, isActive), data.prefs, true), [stock, data.patterns, data.prefs]);
   const demand = useMemo(() => demandByCode(data.patterns, isActive), [data.patterns]);
   const collections = useMemo(() => collectionsByTag(data.patterns, stock), [data.patterns, stock]);
   const buyTotal = buy.reduce((a, r) => a + r.buy, 0);
+  const demandTotal = Object.values(demand).reduce((a, n) => a + Math.max(0, n), 0);
   const shortCount = buy.filter((r) => r.reason === "shortfall").length;
   const low = useMemo(() => Object.keys(stock).map((code) => ({ code, have: stock[code], floor: data.prefs.minStock[code] ?? data.prefs.lowStock }))
     .filter((c) => c.have > 0 && levelOf(c.have, c.floor) === "low").sort((a, b) => a.have / (a.floor || 1) - b.have / (b.floor || 1)), [stock, data.prefs]);
@@ -56,7 +59,7 @@ export default function Dashboard() {
               <div className="row"><button className="btn btn-sm" onClick={() => setKitInit(true)}>按套装初始化库存</button><button className="btn btn-sm btn-ghost" onClick={() => setBatch(true)}>批量入库</button></div></div>
             <div className="dash-step"><span className="n">2</span><h4>添加图纸</h4><p className="meta">拍下或上传图纸识别用量，也能用照片生成。</p>
               <div className="row"><a className="btn btn-sm" href="#/add?mode=recognize">识别图纸</a><a className="btn btn-sm btn-ghost" href="#/add?mode=generate">生成图纸</a></div></div>
-            <div className="dash-step"><span className="n">3</span><h4>看采购清单</h4><p className="meta">把图纸标为“计划做”，缺哪些色一目了然。</p>
+            <div className="dash-step"><span className="n">3</span><h4>看采购清单</h4><p className="meta">把图纸标为“计划拼”，缺哪些色一目了然。</p>
               <div className="row"><a className="btn btn-sm" href="#/shopping">采购清单</a></div></div>
           </div>
           <a className="btn btn-iron" href="#/add">添加第一张图纸</a>
@@ -77,6 +80,16 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {!inventoryReady && !invSkipped ? (
+        <div className="notice dash-onboard" role="note">
+          <span><b>先录入现有库存？</b>没录入时，图纸只显示「需要哪些色」，不会把 0 当成缺货。</span>
+          <span className="spacer" />
+          <button className="btn btn-sm btn-primary" onClick={() => setKitInit(true)}>按套装录入</button>
+          <button className="btn btn-sm" onClick={() => setBatch(true)}>批量入库</button>
+          <button className="btn btn-sm btn-ghost" onClick={() => setInvSkipped(true)}>跳过，先看需求</button>
+        </div>
+      ) : null}
+
       <section className="panel dash-hero" aria-label="本周计划">
         <div className="dash-hero-list">
           {active.length ? active.slice(0, 6).map((p) => {
@@ -87,13 +100,18 @@ export default function Dashboard() {
               <div className="dash-pat" key={p.id}>
                 <div className="stack" style={{ gap: 2, minWidth: 0 }}>
                   <a className="name" href={`#/pattern/${p.id}`}>{p.name}</a>
-                  <span className="meta">{copies > 1 ? `计划 ${copies} 份 · ` : ""}{ready ? "豆子够做" : `库存能做 ${r.makeable} 份`}</span>
+                  <span className="meta">{copies > 1 ? `计划 ${copies} 份 · ` : ""}{!inventoryReady ? `需要 ${Object.keys(p.counts).filter((c) => p.counts[c] > 0).length} 色` : ready ? "豆子够做" : `库存能做 ${r.makeable} 份`}</span>
                 </div>
                 <div className="stack" style={{ gap: 4 }}>
-                  <div className="row" style={{ justifyContent: "space-between", gap: 4 }}><span className="meta">备豆</span><span className="meta num">{Math.round(r.coverage * 100)}%</span></div>
-                  <div className={`meter ${ready ? "ok" : r.coverage > 0.6 ? "low" : "short"}`}><i style={{ width: `${Math.min(100, r.coverage * 100)}%` }} /></div>
+                  <div className="row" style={{ justifyContent: "space-between", gap: 4 }}><span className="meta">{inventoryReady ? "备豆" : "库存"}</span><span className="meta num">{inventoryReady ? `${Math.round(r.coverage * 100)}%` : "未录入"}</span></div>
+                  <div className={`meter ${!inventoryReady ? "" : ready ? "ok" : r.coverage > 0.6 ? "low" : "short"}`}><i style={{ width: inventoryReady ? `${Math.min(100, r.coverage * 100)}%` : "0%" }} /></div>
                 </div>
-                {r.missing.length ? (
+                {!inventoryReady ? (
+                  <div className="dash-pat-miss">
+                    <span className="meta">需要</span>
+                    {Object.entries(p.counts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([code, n]) => <button key={code} className="btn btn-ghost btn-sm" style={{ padding: "0 4px" }} title={`${code} 需要 ${fmt(n * copies)}`} onClick={() => setOpen(code)}><Bead code={code} size={18} /><span className="code">{code}</span></button>)}
+                  </div>
+                ) : r.missing.length ? (
                   <div className="dash-pat-miss">
                     <span className="meta">还差</span>
                     {r.missing.slice(0, 8).map((m) => <button key={m.code} className="btn btn-ghost btn-sm" style={{ padding: "0 4px" }} title={`${m.code} 缺 ${fmt(m.need - m.have)}`} onClick={() => setOpen(m.code)}><Bead code={m.code} size={18} /><span className="code">{m.code}</span></button>)}
@@ -103,13 +121,19 @@ export default function Dashboard() {
               </div>
             );
           }) : (
-            <div className="empty"><h3>没有计划中的图纸</h3><p>把图纸标为“计划做”或“制作中”，这里会显示备豆进度。</p><a className="btn" href="#/gallery">去图库</a></div>
+            <div className="empty"><h3>没有计划拼的图纸</h3><p>把图纸标为“计划拼”或“制作中”，这里会显示备豆进度。</p><a className="btn" href="#/gallery">去图库</a></div>
           )}
-          {active.length > 6 ? <div style={{ padding: "8px 16px" }}><a className="meta" href="#/gallery">还有 {active.length - 6} 张计划中的图纸</a></div> : null}
+          {active.length > 6 ? <div style={{ padding: "8px 16px" }}><a className="meta" href="#/gallery?status=planned">还有 {active.length - 6} 张计划拼的图纸</a></div> : null}
         </div>
         <div className="dash-hero-buy pegboard">
-          <span className="label">还要买</span>
-          {buyTotal > 0 ? (
+          <span className="label">{inventoryReady ? "还要买" : "计划需要"}</span>
+          {!inventoryReady ? (
+            <>
+              <div className="big"><DiffNumber value={demandTotal} /><span className="meta"> 颗</span></div>
+              <div className="meta">库存未录入，先按净需求看；录入库存后这里会扣掉已有豆子。</div>
+              <a className="btn" href="#/shopping">看采购清单</a>
+            </>
+          ) : buyTotal > 0 ? (
             <>
               <div className="big"><DiffNumber value={buyTotal} /><span className="meta"> 颗</span></div>
               <div className="meta">{buy.length} 个色号{shortCount ? `，其中 ${shortCount} 色缺货` : "，都是补货提醒"}</div>
@@ -126,8 +150,8 @@ export default function Dashboard() {
       </section>
 
       <div className="dash-strip" aria-label="库存概况">
-        <div><span className="label">豆子总数</span><b><DiffNumber value={totalBeads} /></b></div>
-        <div><span className="label">有货色号</span><b>{inStock}</b></div>
+        <div><span className="label">豆子总数</span><b>{inventoryReady ? <DiffNumber value={totalBeads} /> : "—"}</b></div>
+        <div><span className="label">有货色号</span><b>{inventoryReady ? inStock : "—"}</b></div>
         <div><span className="label">快用完</span><b style={{ color: low.length ? "var(--amber)" : undefined }}>{low.length}</b></div>
       </div>
 
@@ -138,7 +162,7 @@ export default function Dashboard() {
         </section>
         <section className="panel" aria-labelledby="dash-use-h">
           <div className="panel-head"><h3 id="dash-use-h">色号用量</h3><span className="meta">计划需求 vs 库存 · 前 10 色</span></div>
-          <UsageChart demand={demand} stock={stock} onOpen={setOpen} />
+          <UsageChart demand={demand} stock={stock} onOpen={setOpen} inventoryReady={inventoryReady} />
         </section>
       </div>
 

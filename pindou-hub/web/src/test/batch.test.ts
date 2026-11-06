@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classify, folderOf, headerChecks, isImageFile, itemProgress, nextWaiting, reduceBatch, summarize, announceFor, type BatchItem } from "../lib/batch";
+import { classify, folderOf, gridCapacity, headerChecks, isHashName, isImageFile, itemProgress, mismatchCount, nextWaiting, reduceBatch, summarize, announceFor, type BatchItem } from "../lib/batch";
 import type { AnalyzeResult } from "../lib/recognize/types";
 
 const file = (name: string, rel = "", size = 10) => ({ name, type: "image/jpeg", size, webkitRelativePath: rel }) as unknown as File;
@@ -23,6 +23,12 @@ describe("folderOf / isImageFile", () => {
     expect(isImageFile({ name: "x.JPG" })).toBe(true);
     expect(isImageFile({ name: "x", type: "image/png" })).toBe(true);
     expect(isImageFile({ name: "Thumbs.db", type: "" })).toBe(false);
+  });
+  it("spots content-hash file names", () => {
+    expect(isHashName("02da54f1".padEnd(32, "0") + ".jpg")).toBe(true);
+    expect(isHashName("02da54f1".padEnd(64, "a"))).toBe(true);
+    expect(isHashName("黑魔导士.jpg")).toBe(false);
+    expect(isHashName("a".repeat(31) + ".jpg")).toBe(false);
   });
 });
 
@@ -69,6 +75,20 @@ describe("queue reducer", () => {
     expect(items[1].state).toBe("waiting");
     expect(nextWaiting(items)?.id).toBe("id-b.jpg");
   });
+  it("skips a duplicate and allows retrying it; names are editable", () => {
+    let items = add(["a.jpg"]);
+    items = reduceBatch(items, { type: "start", id: "id-a.jpg" });
+    items = reduceBatch(items, { type: "duplicate", id: "id-a.jpg", imageId: "sha" });
+    expect(items[0]).toMatchObject({ state: "duplicate", duplicateImageId: "sha" });
+    expect(summarize(items).duplicate).toBe(1);
+    items = reduceBatch(items, { type: "retry", id: "id-a.jpg" });
+    expect(items[0].state).toBe("waiting");
+    expect(items[0].duplicateImageId).toBeUndefined();
+    expect(items[0].force).toBe(true);
+    items = reduceBatch(items, { type: "name", id: "id-a.jpg", name: "黑魔导士" });
+    expect(items[0].name).toBe("黑魔导士");
+    expect(reduceBatch(items, { type: "name", id: "id-a.jpg", name: "   " })[0].name).toBe("黑魔导士");
+  });
   it("saved items are not savable again and cannot be retried; running cannot be removed", () => {
     let items = add(["a.jpg"]);
     items = reduceBatch(items, { type: "start", id: "id-a.jpg" });
@@ -86,11 +106,20 @@ describe("classify / headerChecks", () => {
   it("flags low confidence, legend/grid mismatch, header disagreement, palette warning", () => {
     expect(classify(result())).toMatchObject({ state: "done", review: false });
     expect(classify(result({ confidence: 0.4 })).review).toBe(true);
-    expect(classify(result({ diff: [{ code: "A1", legend: 10, grid: 12 }] })).reasons[0]).toContain("不一致");
+    expect(classify(result({ diff: [{ code: "A1", legend: 10, grid: 12 }] })).reasons[0]).toContain("差异");
+    // 图例漏读（legend=0）后按网格补上的色号不算“不一致”
+    expect(mismatchCount(result({ diff: [{ code: "A1", legend: 0, grid: 12 }] }))).toBe(0);
     const c = classify(result({ header: { cols: 55, rows: 60, colors: 2, total: 150 } }));
     expect(c.review).toBe(true);
     expect(c.reasons.join()).toContain("尺寸");
     expect(classify(result({ paletteWarning: "非 MARD" })).review).toBe(true);
+  });
+  it("flags a grid that cannot hold the beads it counted", () => {
+    const r = result({ counts: { A1: 2348 }, diff: [], header: undefined });
+    expect(gridCapacity(r)).toMatchObject({ cols: 55, rows: 61, capacity: 3355, total: 2348 });
+    expect(classify(r).reasons.join()).not.toContain("网格");
+    const tiny = result({ grid: { ...result().grid!, grid: { ...result().grid!.grid, cols: 34, rows: 30 } }, counts: { A1: 2348 } });
+    expect(classify(tiny).reasons.join()).toContain("最多 1020 格");
   });
   it("not-a-chart and empty results are not 'done'", () => {
     expect(classify(result({ isChart: false })).state).toBe("notchart");

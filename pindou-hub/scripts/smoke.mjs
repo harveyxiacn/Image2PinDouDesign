@@ -365,7 +365,7 @@ try {
     return t ? t.replace(/\n/g, " ") : "header not provided by engine (skipped)";
   });
   await step("save recognized pattern", async () => {
-    await evaluate(`(() => { const f = document.querySelector('form'); const s = f.querySelector('[aria-pressed]') ; const btns=[...f.querySelectorAll('button[type=button]')]; const plan = btns.find(b => b.innerText.includes('计划做')); plan?.click(); })()`);
+    await evaluate(`(() => { const f = document.querySelector('form'); const s = f.querySelector('[aria-pressed]') ; const btns=[...f.querySelectorAll('button[type=button]')]; const plan = btns.find(b => b.innerText.includes('计划拼')); plan?.click(); })()`);
     await sleep(200);
     await clickText("保存到图库", "button[type=submit]");
     await waitFor(`document.querySelector('.pt-save[data-success="true"]') || location.hash.startsWith("#/pattern/")`, 30000, "save success state");

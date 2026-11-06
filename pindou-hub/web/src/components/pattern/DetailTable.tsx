@@ -5,8 +5,8 @@ import { BeadCode, fmt } from "../ui";
 import "./pattern.css";
 
 /** 详情页用量表：每份 / ×份数 / 库存 / 缺口。缺口用熨斗红。点击一行高亮该色。 */
-export default function DetailTable({ counts, copies, stock, focusCode, onPick }: {
-  counts: Counts; copies: number; stock: Counts; focusCode: string | null; onPick: (code: string) => void;
+export default function DetailTable({ counts, copies, stock, inventoryReady, focusCode, onPick }: {
+  counts: Counts; copies: number; stock: Counts; /** false = 还没录入过库存，0 不代表缺货 */ inventoryReady: boolean; focusCode: string | null; onPick: (code: string) => void;
 }) {
   const codes = Object.keys(counts).filter((c) => counts[c] > 0).sort((a, b) => counts[b] - counts[a] || compareCodes(a, b));
   const multi = copies > 1;
@@ -15,7 +15,7 @@ export default function DetailTable({ counts, copies, stock, focusCode, onPick }
     const need = counts[c] * copies;
     const have = Math.max(0, stock[c] ?? 0);
     const gap = Math.max(0, need - have);
-    if (gap) shortColors++;
+    if (gap && inventoryReady) shortColors++;
     return { c, need, have, gap };
   });
   return (
@@ -30,12 +30,12 @@ export default function DetailTable({ counts, copies, stock, focusCode, onPick }
                 <td className="r num">{fmt(counts[c])}</td>
                 {multi ? <td className="r num">{fmt(need)}</td> : null}
                 <td className="r num">{fmt(have)}</td>
-                <td className="r num" style={gap ? { color: "var(--iron-ink)", fontWeight: 600 } : { color: "var(--ink-4)" }}>{gap ? `缺 ${fmt(gap)}` : "够"}</td>
+                <td className="r num" style={!inventoryReady ? { color: "var(--ink-4)" } : gap ? { color: "var(--iron-ink)", fontWeight: 600 } : { color: "var(--ink-4)" }}>{!inventoryReady ? "未入库" : gap ? `缺 ${fmt(gap)}` : "够"}</td>
               </tr>
             ))}
             {!rows.length ? <tr><td colSpan={5} className="meta" style={{ textAlign: "center", padding: 20 }}>还没有用量，点“编辑用量”添加</td></tr> : null}
           </tbody>
-          <tfoot><tr><td className="meta">{rows.length} 色{shortColors ? `，缺 ${shortColors} 色` : ""}</td><td className="r num"><b>{fmt(totalOf(counts))}</b></td>{multi ? <td className="r num"><b>{fmt(totalOf(counts) * copies)}</b></td> : null}<td /><td /></tr></tfoot>
+          <tfoot><tr><td className="meta">{rows.length} 色{!inventoryReady ? "，库存未录入" : shortColors ? `，缺 ${shortColors} 色` : ""}</td><td className="r num"><b>{fmt(totalOf(counts))}</b></td>{multi ? <td className="r num"><b>{fmt(totalOf(counts) * copies)}</b></td> : null}<td /><td /></tr></tfoot>
         </table>
       </div>
     </div>

@@ -4,7 +4,7 @@ export type Counts = Record<string, number>;
 
 export type PatternStatus = "idea" | "planned" | "making" | "done";
 export type PatternKind = "recognized" | "generated" | "manual";
-export type CountMethod = "legend" | "grid" | "legend+grid" | "ai" | "manual" | "generate";
+export type CountMethod = "legend" | "grid" | "legend+grid" | "cell" | "ai" | "manual" | "generate";
 
 export type Pattern = {
   id: string;
@@ -20,14 +20,16 @@ export type Pattern = {
   /** 每格色号（生成或网格识别得到时保存），null 表示空格 */
   matrix?: Array<Array<string | null>>;
   counts: Counts;
-  /** 识别置信度 0–1；大幅手工修改后置 1（不等于“已核对”） */
+  /** 整体可信度 0–1；大幅手工修改后置 1（不等于“已核对”） */
   confidence?: number;
+  /** 颜色匹配度 0–1：只反映格子颜色与色卡的吻合程度 */
+  colorMatch?: number;
   /** 人工点过“已核对”的时间；空表示未核对。 */
   verifiedAt?: number;
   /** 保存时记录自动检查给出的疑点，便于之后回看。 */
   reviewReasons?: string[];
   status: PatternStatus;
-  /** 计划做几份（采购清单按份数放大） */
+  /** 计划拼几份（采购清单按份数放大） */
   copies: number;
   tags: string[];
   notes: string;
@@ -80,6 +82,10 @@ export type SharedPrefs = {
   kitId: string;
   /** 用户自定义的每个色号最低库存，覆盖 lowStock */
   minStock: Counts;
+  /** 用户自定义的每个色号包装规格（颗/包），覆盖 packSize */
+  packSizes: Counts;
+  /** 用户点过“录入现有库存”或“跳过”的时间；用来区分“未录入库存”和“库存真的为 0” */
+  inventoryStartedAt?: number;
   updatedAt: number;
   deleted?: boolean;
 };
@@ -101,6 +107,7 @@ export const DEFAULT_PREFS: SharedPrefs = {
   lossRate: 0.05,
   kitId: "mard-221",
   minStock: {},
+  packSizes: {},
   updatedAt: 0
 };
 
@@ -110,7 +117,7 @@ export type RecordOf<C extends CollectionName> =
 
 export const STATUS_LABEL: Record<PatternStatus, string> = {
   idea: "收藏",
-  planned: "计划做",
+  planned: "计划拼",
   making: "制作中",
   done: "已完成"
 };
@@ -119,6 +126,7 @@ export const METHOD_LABEL: Record<CountMethod, string> = {
   legend: "读取图例",
   grid: "识别网格",
   "legend+grid": "图例+网格核对",
+  cell: "格内色号",
   ai: "本地视觉模型",
   manual: "手动录入",
   generate: "由图片生成"

@@ -2,7 +2,7 @@
 import type { AnalyzeResult, AssistantStep } from "./recognize/types";
 import { totalOf } from "./model";
 
-export type BatchState = "waiting" | "running" | "done" | "notchart" | "failed" | "cancelled";
+export type BatchState = "waiting" | "running" | "done" | "notchart" | "duplicate" | "failed" | "cancelled";
 
 export type BatchItem = {
   id: string;
@@ -17,6 +17,10 @@ export type BatchItem = {
   result?: AnalyzeResult;
   error?: string;
   savedId?: string;
+  /** 图库里已经有同一张图（SHA-256 相同） */
+  duplicateImageId?: string;
+  /** 用户点过“仍然识别”，本次跳过查重 */
+  force?: boolean;
   /** done 且需要人工核对 */
   review: boolean;
   reasons: string[];
@@ -27,7 +31,9 @@ export type BatchAction =
   | { type: "start"; id: string }
   | { type: "step"; id: string; step: AssistantStep }
   | { type: "finish"; id: string; result: AnalyzeResult }
+  | { type: "duplicate"; id: string; imageId: string }
   | { type: "fail"; id: string; error: string }
+  | { type: "name"; id: string; name: string }
   | { type: "cancelAll" }
   | { type: "retry"; id: string }
   | { type: "tag"; id: string; tag: string }
@@ -52,6 +58,11 @@ export function folderOf(f: { webkitRelativePath?: string }): string {
 
 export function baseName(name: string): string {
   return name.replace(/\.[^.]+$/, "") || name;
+}
+
+/** 文件名像内容哈希（32/40/64 位十六进制）：导入后应该提示改成可读的名字。 */
+export function isHashName(name: string): boolean {
+  return /^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$/i.test(baseName(name));
 }
 
 let counter = 0;
@@ -80,20 +91,40 @@ export function headerChecks(result: AnalyzeResult): HeaderCheck[] {
   return out;
 }
 
+/** 图例与网格都有数字、且不一致的色号数（图例漏读后按网格补上的色号不算“不一致”）。 */
 export function mismatchCount(result: AnalyzeResult): number {
-  return result.diff.filter((d) => d.legend !== d.grid).length;
+  return result.diff.filter((d) => d.legend > 0 && d.legend !== d.grid).length;
+}
+
+/** 上述差异中，图例和网格都读到了数字、可以逐色对比的色号数。 */
+export function comparableMismatchCount(result: AnalyzeResult): number {
+  return result.diff.filter((d) => d.legend > 0 && d.grid > 0 && d.legend !== d.grid).length;
+}
+
+/** 网格容量硬校验：数出的豆子数是否超过网格格子总数。 */
+export function gridCapacity(result: AnalyzeResult): { cols: number; rows: number; capacity: number; total: number } | null {
+  const g = result.grid?.grid;
+  if (!g) return null;
+  const total = totalOf(result.counts);
+  return { cols: g.cols, rows: g.rows, capacity: g.cols * g.rows, total };
 }
 
 /** 把一次识别结果里“需要检查”的原因提取出来；保存时也写入 reviewReasons。 */
 export function reviewReasonsFor(result: AnalyzeResult): string[] {
   if (result.isChart === false || result.method === "none" || !Object.keys(result.counts).length) return [];
   const reasons: string[] = [];
-  if (result.confidence < LOW_CONFIDENCE) reasons.push("可信度偏低");
   const mm = mismatchCount(result);
-  if (mm) reasons.push(`${mm} 个色号图例与网格不一致`);
+  if (mm) {
+    const cmp = comparableMismatchCount(result);
+    reasons.push(`${mm} 个色号图例与网格有差异${cmp && cmp !== mm ? `（其中 ${cmp} 个双方都有数）` : ""}`);
+  }
+  const cap = gridCapacity(result);
+  if (cap && cap.total > cap.capacity) reasons.push(`网格 ${cap.cols}×${cap.rows} 最多 ${cap.capacity} 格，却数出 ${cap.total} 颗`);
   const bad = headerChecks(result).filter((c) => c.ok === false);
   if (bad.length) reasons.push(`与图上标注不符：${bad.map((c) => c.label).join("、")}`);
   if (result.paletteWarning) reasons.push("色号体系可能不是 MARD");
+  // 其他具体疑点已经说明问题时，不再重复加一句笼统的“可信度偏低”
+  if (!reasons.length && result.confidence < LOW_CONFIDENCE) reasons.push("可信度偏低");
   return reasons;
 }
 
@@ -134,10 +165,12 @@ export function reduceBatch(items: BatchItem[], a: BatchAction): BatchItem[] {
       const c = classify(a.result);
       return { ...it, state: c.state, result: a.result, steps: a.result.steps, review: c.review, reasons: c.reasons, error: c.error };
     });
+    case "duplicate": return patch(a.id, (it) => (it.state === "waiting" || it.state === "running" ? { ...it, state: "duplicate", duplicateImageId: a.imageId } : it));
     case "fail": return patch(a.id, (it) => (it.state === "running" ? { ...it, state: "failed", error: a.error } : it));
+    case "name": return patch(a.id, (it) => ({ ...it, name: a.name.trim() || it.name }));
     case "cancelAll": return items.map((it) => (it.state === "waiting" || it.state === "running" ? { ...it, state: "cancelled" as const } : it));
-    case "retry": return patch(a.id, (it) => (it.state === "failed" || it.state === "cancelled" || it.state === "notchart" || it.state === "done" && !it.savedId
-      ? { ...it, state: "waiting", steps: [], result: undefined, error: undefined, review: false, reasons: [] } : it));
+    case "retry": return patch(a.id, (it) => (it.state === "failed" || it.state === "cancelled" || it.state === "notchart" || it.state === "duplicate" || it.state === "done" && !it.savedId
+      ? { ...it, state: "waiting", steps: [], result: undefined, error: undefined, duplicateImageId: undefined, review: false, reasons: [], force: it.state === "duplicate" ? true : it.force } : it));
     case "tag": return patch(a.id, (it) => ({ ...it, tag: a.tag }));
     case "remove": return items.filter((it) => it.id !== a.id || it.state === "running");
     case "saved": return patch(a.id, (it) => ({ ...it, savedId: a.patternId }));
@@ -161,7 +194,7 @@ export function stepsProgress(steps: AssistantStep[], running: boolean): number 
 }
 
 export type BatchSummary = {
-  total: number; waiting: number; running: number; done: number; notchart: number; failed: number; cancelled: number;
+  total: number; waiting: number; running: number; done: number; notchart: number; duplicate: number; failed: number; cancelled: number;
   saved: number; review: number;
   /** 可一键保存：识别完成、未保存、无需检查 */
   savable: number;
@@ -170,7 +203,7 @@ export type BatchSummary = {
   active: boolean;
 };
 export function summarize(items: BatchItem[]): BatchSummary {
-  const s: BatchSummary = { total: items.length, waiting: 0, running: 0, done: 0, notchart: 0, failed: 0, cancelled: 0, saved: 0, review: 0, savable: 0, progress: 0, active: false };
+  const s: BatchSummary = { total: items.length, waiting: 0, running: 0, done: 0, notchart: 0, duplicate: 0, failed: 0, cancelled: 0, saved: 0, review: 0, savable: 0, progress: 0, active: false };
   let acc = 0;
   for (const it of items) {
     s[it.state]++;
@@ -189,6 +222,7 @@ export function announceFor(it: BatchItem): string {
   const n = it.name;
   if (it.state === "done") return `${n} 识别完成，共 ${it.result ? totalOf(it.result.counts) : 0} 颗${it.review ? "，需要检查" : ""}`;
   if (it.state === "notchart") return `${n} 看起来不是图纸`;
+  if (it.state === "duplicate") return `${n} 图库里已经有这张图，已跳过`;
   if (it.state === "failed") return `${n} 识别失败`;
   if (it.state === "cancelled") return `${n} 已取消`;
   return "";

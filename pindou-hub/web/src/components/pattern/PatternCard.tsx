@@ -18,9 +18,17 @@ export function Thumb({ id, fallbackId, alt }: { id?: string; fallbackId?: strin
 
 const STATUS_CHIP: Record<Pattern["status"], string> = { idea: "chip", planned: "chip chip-amber", making: "chip chip-iron", done: "chip chip-leaf" };
 
-export function ReadinessMeter({ pattern, stock }: { pattern: Pattern; stock: Counts }) {
+export function ReadinessMeter({ pattern, stock, inventoryReady = true }: { pattern: Pattern; stock: Counts; inventoryReady?: boolean }) {
   const r = readiness(pattern, stock);
   if (!totalOf(pattern.counts)) return <span className="meta">还没有用量</span>;
+  if (!inventoryReady) {
+    return (
+      <div style={{ display: "grid", gap: 4 }}>
+        <div className="meter" role="img" aria-label="库存未录入"><i style={{ width: 0 }} /></div>
+        <span className="meta">库存未录入 · 需 {Object.keys(pattern.counts).filter((c) => pattern.counts[c] > 0).length} 色</span>
+      </div>
+    );
+  }
   const cls = r.missing.length === 0 ? "ok" : r.coverage > 0.7 ? "low" : "short";
   return (
     <div style={{ display: "grid", gap: 4 }}>
@@ -30,7 +38,7 @@ export function ReadinessMeter({ pattern, stock }: { pattern: Pattern; stock: Co
   );
 }
 
-export default function PatternCard({ pattern, stock }: { pattern: Pattern; stock: Counts }) {
+export default function PatternCard({ pattern, stock, inventoryReady = true }: { pattern: Pattern; stock: Counts; inventoryReady?: boolean }) {
   const colors = Object.values(pattern.counts).filter((n) => n > 0).length;
   return (
     <a className="panel pt-card pressable" href={`#/pattern/${pattern.id}`}>
@@ -46,7 +54,7 @@ export default function PatternCard({ pattern, stock }: { pattern: Pattern; stoc
           {pattern.copies > 1 ? <span className="meta">×{pattern.copies} 份</span> : null}
           {pattern.verifiedAt == null ? <span className="chip chip-amber pt-unverified">未核对</span> : null}
         </div>
-        <ReadinessMeter pattern={pattern} stock={stock} />
+        <ReadinessMeter pattern={pattern} stock={stock} inventoryReady={inventoryReady} />
       </div>
     </a>
   );

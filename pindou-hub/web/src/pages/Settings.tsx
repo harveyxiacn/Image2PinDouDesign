@@ -68,6 +68,8 @@ function SyncSection({ local, info, qr, paired }: { local: Local; info: Info; qr
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [name, setName] = useState(data.device.deviceName);
+  const imageCount = data.images.filter((img) => !img.deleted).length;
+  const imageMb = data.images.filter((img) => !img.deleted).reduce((sum, img) => sum + (img.bytes || 0), 0) / 1024 / 1024;
 
   const pair = async () => {
     setBusy(true); setErr("");
@@ -112,6 +114,7 @@ function SyncSection({ local, info, qr, paired }: { local: Local; info: Info; qr
             <span>地址</span><span className="row set-addr-row"><span className="code set-addr">{data.device.hubUrl}</span><CopyBtn text={data.device.hubUrl} label="Hub 地址" /></span>
             <span>上次同步</span><span>{fmtTime(sync.lastSyncAt || data.device.lastSyncAt)}</span>
             <span>待上传</span><span className="num">{data.outbox} 条</span>
+            <span>图片体积</span><span className="num">{imageCount} 张 · {imageMb.toFixed(1)} MB</span>
           </div>
           <div className="row">
             <button className="btn btn-primary" disabled={sync.phase === "syncing"} onClick={() => void syncNow()}><Icon name="sync" />{sync.phase === "syncing" ? "同步中…" : "立即同步"}</button>

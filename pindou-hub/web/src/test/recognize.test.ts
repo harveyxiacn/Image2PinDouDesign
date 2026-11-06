@@ -552,6 +552,10 @@ describe.skipIf(!existsSync(SAMPLE))("格内色号 OCR（agumon 样张，关闭�
     expect(res.cellCodesRead).toBe(true);
     expect(cell?.label).toBe("读取格内色号");
     expect(res.cellCodeStats!.read).toBeGreaterThanOrEqual(28);
+    expect(res.cellCodeStats!.coverage).toBeGreaterThan(0.8);
+    if (res.cellCodeStats!.coverage! >= 0.9) expect(res.method).toBe("cell");
+    // 没有图例可比对，也还没有人工核对：整体可信度最高 99%，不会出现“100% 但未核对”
+    expect(res.confidence).toBeLessThanOrEqual(0.99);
     expect(backend.log.length).toBeLessThanOrEqual(4);
     expect(sum(res.counts)).toBe(11128);
     expect(wrongCodes(res.counts)).toEqual([]);

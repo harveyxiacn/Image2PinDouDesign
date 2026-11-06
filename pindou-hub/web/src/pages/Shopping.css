@@ -34,3 +34,8 @@
 @media (prefers-reduced-motion: reduce) { .shop-done td { animation: none; } .shop-sum-ic { animation: none; } }
 .shop-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .shop-chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px 0 4px; border-radius: 999px; background: var(--paper-sunk); font-size: var(--t-small); font-variant-numeric: tabular-nums; }
+.shop-pat-tools { gap: 8px; }
+.shop-pat-tools .input { flex: 1; min-width: 140px; height: 32px; }
+.shop-split { padding: 6px 0 0; }
+.shop-pack { width: 84px; text-align: right; }
+.dash-onboard { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }

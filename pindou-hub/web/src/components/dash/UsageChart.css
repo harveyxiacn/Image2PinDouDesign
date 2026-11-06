@@ -26,3 +26,4 @@
 @keyframes uc-grow { from { transform: scaleX(0); } to { transform: none; } }
 @media (prefers-reduced-motion: reduce) { .uc-bar { animation: none; } }
 @media (max-width: 420px) { .uc-row { grid-template-columns: 56px minmax(0, 1fr) 76px; gap: 8px; } }
+.uc-sw.need, .uc-bar i.need { background: var(--ink-3); }
