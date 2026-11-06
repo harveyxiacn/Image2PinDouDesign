@@ -9,6 +9,7 @@ import type { HeaderInfo } from "./legend";
 import { fitEntriesToTotal, readChipLegend } from "./legendchips";
 import { fitLegendToTotal, reconcileCounts } from "./reconcile";
 import type { ReconcileResult } from "./reconcile";
+import { capOverallConfidence, comparableLegendDiffCount, materialLegendDiffCount } from "./trust";
 import { enhanceImage, summarizeEnhance, assessQuality } from "../enhance";
 import type { EnhanceResult } from "../enhance";
 import type {
@@ -557,13 +558,19 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
   }
   const headerBad = !!header?.total && sum(counts) > 0 && Math.abs(sum(counts) - header.total) / header.total > 0.01;
   const sizeBad = !!(header?.cols && header?.rows && reading && (header.cols !== reading.grid.cols || header.rows !== reading.grid.rows));
-  const legendGridDiff = diff.filter((d) => d.legend !== d.grid).length;
-  if (capacityBad || headerBad || sizeBad || legendGridDiff > 0 || paletteWarning) {
-    confidence = Math.min(confidence, 0.69);
-  } else if (!(cellCoverage >= 0.9 && !!legendUsed && !!reading && legendGridDiff === 0)) {
-    confidence = Math.min(confidence, 0.99);
-  }
-  confidence = Math.max(0, Math.min(1, confidence));
+  // 图例/网格的差异：容差内（较大值的 3%，至少 2 颗）只降到 99%；有实质差异才封顶 69%。
+  confidence = capOverallConfidence({
+    confidence,
+    capacityBad,
+    headerBad,
+    sizeBad,
+    comparableDiffs: comparableLegendDiffCount(diff),
+    materialDiffs: materialLegendDiffCount(diff),
+    paletteWarning,
+    cellCoverage,
+    legendUsed: !!legendUsed,
+    reading: !!reading
+  });
   if (reading && cellCoverage >= 0.9 && method !== "legend") method = "cell";
   if (method === "cell") for (const c of checks) if (c.source === "grid") c.source = "cell";
   return {

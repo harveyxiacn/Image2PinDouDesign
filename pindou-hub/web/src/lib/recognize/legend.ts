@@ -12,6 +12,13 @@ const INLINE = new RegExp(
   `(?<![A-Z0-9])${CODE}(?![0-9])\\s*(?:${SEP}\\s*|\\s)\\s*([0-9OIL|,]{1,8})(?![0-9])`,
   "g"
 );
+// 色号后紧跟中文色名、数量写在色名后（“A1 米黄 154” / “A1米黄 154”）。色号本身仍是字母 + 数字；
+// 中文只作为中间的说明文字跳过，不参与色号映射。
+const CJK_NAME = "[\\u4e00-\\u9fff](?:[ \\t]*[\\u4e00-\\u9fff]){0,9}";
+const INLINE_NAMED = new RegExp(
+  `(?<![A-Z0-9])${CODE}(?![0-9])[ \\t]*${CJK_NAME}[ \\t]*(?:${SEP}[ \\t]*)?([0-9OIL|,]{1,8})(?![0-9])`,
+  "g"
+);
 const CODE_ONLY = new RegExp(`(?<![A-Z0-9])${CODE}(?![0-9A-Z])`, "g");
 const TOTAL = /(?:总计|合计|总数|总共|共计|共|TOTAL|SUM)\s*[:：]?\s*([0-9OIL|,]{2,8})(?![0-9OIL|,]|\s*[色种款])/;
 
@@ -104,6 +111,18 @@ function parseInline(norm: string, valid: Set<string>): Map<string, LegendItem> 
   return map;
 }
 
+/** 色号 + 中文色名 + 数量；中文忽略，只取字母数字色号和数量。 */
+function parseInlineNamed(norm: string, valid: Set<string>): Map<string, LegendItem> {
+  const map = new Map<string, LegendItem>();
+  INLINE_NAMED.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = INLINE_NAMED.exec(norm))) {
+    const count = parseCount(m[3]);
+    if (count !== null) addItem(map, normalizeCode(m[1] + m[2]), count, "文字(色名)", valid);
+  }
+  return map;
+}
+
 /** 两行对应：上一行只有色号、下一行只有数字（色板式排版被 OCR 成纯文本时）。 */
 function parseLinePairs(lines: string[], valid: Set<string>): Map<string, LegendItem> {
   const map = new Map<string, LegendItem>();
@@ -129,6 +148,7 @@ function parseLinePairs(lines: string[], valid: Set<string>): Map<string, Legend
 export function parseLegendText(text: string, validCodes: Set<string>): LegendReading {
   const norm = normalizeText(text);
   const a = parseInline(norm, validCodes);
+  for (const [code, item] of parseInlineNamed(norm, validCodes)) addItem(a, code, item.count, item.source, validCodes);
   const b = parseLinePairs(norm.split(/\r?\n/), validCodes);
   return finish(b.size > a.size ? b : a, text);
 }
@@ -175,10 +195,14 @@ export function parseLegendWords(
   const lineTexts = lines.map((l) => l.sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(" "));
   const fullText = lineTexts.join("\n");
 
-  const codeWords = ws.filter((w) => {
-    const m = CODE_WORD.exec(w.text);
-    return !!m && validCodes.has(normalizeCode(m[1] + m[2]));
-  });
+  // 色号可能和中文名粘在一个词里（“A1米黄” / “H19号”）：取开头的“字母 + 数字”，后面允许中文。
+  const codeFromWord = (text: string): string | null => {
+    const m = /^(ZG|[A-HMPQRTY])(\d{1,3})(?![0-9A-Za-z])/.exec(text);
+    if (!m) return null;
+    const code = normalizeCode(m[1] + m[2]);
+    return validCodes.has(code) ? code : null;
+  };
+  const codeWords = ws.filter((w) => codeFromWord(w.text) !== null);
   const numWords = ws.filter((w) => {
     if (CODE_WORD.test(w.text)) return false;
     const m = NUM_WORD.exec(w.text);
@@ -226,7 +250,8 @@ export function parseLegendWords(
       usedN.add(p.ni);
       const nm = NUM_WORD.exec(numWords[p.ni].text);
       const cnt = nm ? parseCount(nm[1]) : null;
-      if (cnt !== null) addItem(map, normalizeCode(codeWords[p.ci].text), cnt, kind === "right" ? "词框(同行)" : kind === "left" ? "词框(表格)" : "词框(下方)", validCodes);
+      const code = codeFromWord(codeWords[p.ci].text);
+      if (cnt !== null && code) addItem(map, code, cnt, kind === "right" ? "词框(同行)" : kind === "left" ? "词框(表格)" : "词框(下方)", validCodes);
     }
     return map;
   };

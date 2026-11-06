@@ -295,6 +295,11 @@ describe("parseLegendText", () => {
     expect(parseLegendText("A1 10 A1 20", VALID).counts).toEqual({ A1: 20 });
   });
 
+  it("色号后带中文色名：只取字母+数字色号，中文不参与映射", () => {
+    const r = parseLegendText("A1 米黄 154 B2浅奶黄88 C7蓝色 22", VALID);
+    expect(r.counts).toEqual({ A1: 154, B2: 88, C7: 22 });
+  });
+
   it("无效色号 / 中文乱文本 / 无分隔符 不产生条目", () => {
     expect(parseLegendText("拼豆图纸 我的作品 作者 小明 2024 年", VALID).items).toHaveLength(0);
     expect(parseLegendText("A99 5 Z9 12 A125", VALID).items).toHaveLength(0);
@@ -322,6 +327,11 @@ describe("parseLegendWords", () => {
   it("粘连词 A1(125)", () => {
     const r = parseLegendWords([w("A1(125)", 10, 10, 90, 28), w("B2:88", 10, 40, 90, 58)], VALID);
     expect(r.counts).toEqual({ A1: 125, B2: 88 });
+  });
+
+  it("色号词和中文名粘连（A1米黄 + 154）也能配对", () => {
+    const r = parseLegendWords([w("A1米黄", 10, 10, 90, 28), w("154", 100, 10), w("B2 浅奶黄", 10, 40, 110, 58), w("88", 120, 40)], VALID);
+    expect(r.counts).toEqual({ A1: 154, B2: 88 });
   });
 
   it("词框：A1 / · / 154 / 颗 分开识别", () => {

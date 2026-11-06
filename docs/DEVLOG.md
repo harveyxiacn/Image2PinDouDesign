@@ -216,6 +216,13 @@ echo "$html" | grep -oE '/assets/[A-Za-z0-9._-]+\.(js|css)' | sort -u
 - **验证**：`tsc -b` 通过；`npm test` 19 文件 227 例（新增 `editor-tools.test.tsx`：油漆桶、整图换色、对称、框选复制粘贴、按板制作与拖动打勾、成品效果、图纸文件 / 库存 CSV 往返、新版本提示；`advisor-benchmark.test.ts`：线稿 / 平涂 / 像素画 / 照片式四类合成图的推荐区间）；`npm run build` 通过；`scripts/smoke/browser-smoke.mjs`（Edge headless，亚古兽）25 项检查全部通过、零 console / page error。
 - **已知 / 未验证**：硬边、规则网格的线稿可能被识别为像素画而推荐很小的尺寸（真实线稿通常有抗锯齿，未复现）；首轮冒烟曾在框选步骤断开浏览器连接，鼠标坐标限定在可见区域后未再出现，根因未确认；新版本提示需部署后在真实 Service Worker 更新时验证；真机触控、读屏软件未测。
 
+## 5.9 2026-11-06 · 拼豆仓 Hub：色号解析、信任度容差、原生目录选择器自动化（未发布）
+
+- **色号规则按“字母 + 数字”处理**：图例色号是 `A1` / `G6` / `H19` 这类“英文字母 + 数字”，中文色名只作为描述文本，**不做中文名 → MARD 色号的映射**。`pindou-hub/web/src/lib/recognize/legend.ts` 新增 `INLINE_NAMED` 与 `parseInlineNamed`，支持 `A1 米黄 154`、`A1米黄 154`；`parseLegendWords` 支持 OCR 把“色号+中文名”粘成一个词（`A1米黄`）后与数量词框配对。新增 2 条用例覆盖文字行与词框两条路径。
+- **信任度不再“一刀切 69%”**：抽出 `pindou-hub/web/src/lib/recognize/trust.ts`，与 reconcile 共用容差 `max(2, round(3% × 较大值))`。实质差异 / 网格容量 / 抬头 / 调色板警告 → 封顶 69%；仅容差内差异或证据不完整（覆盖 <90% / 无图例 / 无网格）→ 封顶 99%；证据完整且无差异才允许 100%。新增 `trust.test.ts` 5 例，覆盖 `1401/1407` 与 `28/22` 两侧边界。
+- **原生目录选择器可自动化（测试侧）**：headed Chromium 下，用 Windows UI Automation 找到 `#32770` 文件夹对话框（`GetDlgItem` id 1152 的“文件夹:”编辑框 / 地址栏 id 41477），设置路径或导航；点“选择文件夹”后 Chrome 会弹出“允许网站查看文件？”权限气泡，必须在 Chrome 窗口的 UIA 树里点“查看文件”，`showDirectoryPicker()` 才会 resolve。实测返回 `TestSeries`，批量队列处理 2 张图。无头/无 UIA 环境仍保留 `<input webkitdirectory>` 回退；产品代码无需改动。
+- **验证**：`npm run build` 通过；`vitest` 207 例 / 15 文件全过；`npm run test:server` 5 例全过。改进清单已同步更新：`pindou-hub/docs/2026-11-06-拼豆仓改进清单.md`。
+
 ## 6. 发布记录汇总
 
 | # | 时间（本地） | 对应 commit | 服务器备份目录 | 结果 |
