@@ -44,6 +44,7 @@ export default function PatternCard({ pattern, stock }: { pattern: Pattern; stoc
           <span><span className="num">{fmt(totalOf(pattern.counts))}</span> <span className="meta">颗</span></span>
           <span><span className="num">{colors}</span> <span className="meta">色</span></span>
           {pattern.copies > 1 ? <span className="meta">×{pattern.copies} 份</span> : null}
+          {pattern.verifiedAt == null ? <span className="chip chip-amber pt-unverified">未核对</span> : null}
         </div>
         <ReadinessMeter pattern={pattern} stock={stock} />
       </div>

@@ -33,6 +33,21 @@ export async function bulkAddTag(ids: string[], tag: string): Promise<string> {
   return m;
 }
 
+/** 人工核对：只改 verifiedAt，不动识别数量；撤销会恢复原来的核对时间。 */
+export async function bulkSetVerified(ids: string[], verified = true): Promise<string> {
+  const at = Date.now();
+  const originals = pick(ids).filter((p) => (verified ? p.verifiedAt == null : p.verifiedAt != null));
+  if (!originals.length) {
+    const m = verified ? "所选图纸都已核对" : "所选图纸都还未核对";
+    toast(m);
+    return m;
+  }
+  await putRecords("patterns", originals.map((p) => ({ ...p, verifiedAt: verified ? at : undefined, updatedAt: at })));
+  const m = `${originals.length} 张图纸已标记为${verified ? "已核对" : "未核对"}`;
+  toast(m, { label: "撤销", run: () => { void restore(originals); } });
+  return m;
+}
+
 export async function bulkDelete(ids: string[]): Promise<string> {
   const originals = pick(ids);
   if (!originals.length) return "";

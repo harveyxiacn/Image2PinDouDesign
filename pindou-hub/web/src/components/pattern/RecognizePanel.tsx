@@ -5,7 +5,7 @@ import { enhanceInWorker, type EnhanceResult } from "../../lib/enhance";
 import { hubInfo, aiVision } from "../../lib/sync";
 import { loadPixelSource, saveImage } from "../../lib/images";
 import { METHOD_LABEL, totalOf, type Counts, type PatternStatus } from "../../lib/model";
-import { headerChecks } from "../../lib/batch";
+import { headerChecks, reviewReasonsFor } from "../../lib/batch";
 import { checkSize } from "../../lib/recognize/sizecheck";
 import { normalizeCode } from "../../lib/palette";
 import { DiffNumber, Icon, fmt, navigate, prefersReducedMotion, toast } from "../ui";
@@ -247,9 +247,11 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
       const heavy = !result || result.method === "none" || editedHeavily(result.counts, counts);
       const grid = !heavy ? result?.grid : null;
       const method = heavy ? "manual" : result!.method === "none" ? "manual" : result!.method;
+      const reasons = heavy || !result ? [] : reviewReasonsFor(result);
       const p = await createPattern(values, {
         kind: "recognized", method, counts, imageId: meta.id,
-        width: grid?.grid.cols, height: grid?.grid.rows, matrix: grid?.matrix, confidence: heavy ? 1 : result?.confidence
+        width: grid?.grid.cols, height: grid?.grid.rows, matrix: grid?.matrix, confidence: heavy ? 1 : result?.confidence,
+        reviewReasons: reasons.length ? reasons : undefined
       });
       toast("已保存到图库");
       setSaving(false); setSavedOk(true);

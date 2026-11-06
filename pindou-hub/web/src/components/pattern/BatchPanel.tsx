@@ -52,14 +52,14 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
     if (imgs.length < all.length) toast(`已忽略 ${all.length - imgs.length} 个非图片文件`);
   };
 
-  const saveAll = async () => {
+  const saveAll = async (acceptAll = false) => {
     setSaving(true);
     let n = 0;
     try {
       for (const it of batchStore.get()) {
-        if (it.state === "done" && !it.review && !it.savedId) { if (await saveItem(it, status)) n++; }
+        if (it.state === "done" && !it.savedId && (acceptAll || !it.review)) { if (await saveItem(it, status)) n++; }
       }
-      toast(n ? `已保存 ${n} 张到图库` : "没有可保存的");
+      toast(n ? (acceptAll ? `已保存 ${n} 张到图库，${n} 张未核对` : `已保存 ${n} 张到图库`) : "没有可保存的");
     } catch (e) { toast(e instanceof Error ? e.message : "保存失败"); }
     finally { setSaving(false); }
   };
@@ -69,6 +69,7 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
 
   const empty = items.length === 0;
   const native = isNative();
+  const unsavedDone = items.filter((it) => it.state === "done" && !it.savedId).length;
 
   return (
     <div className="bt-wrap stack">
@@ -162,8 +163,9 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
               <button type="button" aria-pressed={plan} onClick={() => setPlan(true)}>计划做</button>
             </div>
             <span className="spacer" />
-            <span className="meta">{sum.savable ? <><DiffNumber value={sum.savable} /> 张可直接保存</> : "没有可直接保存的"}{sum.review ? `，${sum.review} 张需要先检查` : ""}</span>
-            <button type="button" className="btn btn-iron" onClick={() => void saveAll()} disabled={!sum.savable || saving}>{saving ? "保存中…" : "全部保存到图库"}</button>
+            <span className="meta">{unsavedDone ? <><DiffNumber value={unsavedDone} /> 张待保存</> : "没有待保存的"}{sum.review ? `，${sum.review} 张带检查提示` : ""}</span>
+            {sum.savable && sum.review ? <button type="button" className="btn" onClick={() => void saveAll(false)} disabled={saving}>{saving ? "保存中…" : `只保存干净项 ${sum.savable}`}</button> : null}
+            <button type="button" className="btn btn-iron" onClick={() => void saveAll(true)} disabled={!unsavedDone || saving}>{saving ? "保存中…" : "接受全部并保存"}</button>
           </div>
           {sum.saved && !sum.savable ? <p className="meta bt-done"><a href="#/gallery">去图库看看 →</a></p> : null}
         </section>

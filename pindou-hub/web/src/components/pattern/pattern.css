@@ -58,8 +58,9 @@
 .pt-card:active { transform: scale(0.99); }
 .pt-card-body { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 .pt-card-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pt-card-stats { display: flex; gap: 12px; align-items: baseline; }
+.pt-card-stats { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
 .pt-card-stats .num { font-size: var(--t-h3); font-weight: 600; }
+.pt-unverified { margin-left: auto; align-self: center; height: 20px; padding: 0 6px; font-size: var(--t-small); white-space: nowrap; }
 
 /* 生成对比 */
 .gp-wrap { display: flex; flex-direction: column; gap: 16px; }

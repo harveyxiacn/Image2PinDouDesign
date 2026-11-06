@@ -6,13 +6,18 @@ import { stockByCode } from "../lib/inventory";
 import { STATUS_LABEL, totalOf, type ImageMeta, type Pattern, type PatternStatus } from "../lib/model";
 import { Icon, Sheet, fmt, fmtTime, navigate, useBlobUrl, useRoute } from "../components/ui";
 import { collectionsByTag, rangeIds } from "../lib/stockview";
-import { bulkAddTag, bulkDelete, bulkSetStatus } from "../components/stock/patternActions";
+import { bulkAddTag, bulkDelete, bulkSetStatus, bulkSetVerified } from "../components/stock/patternActions";
 import { useFlip } from "../components/stock/useFlip";
 import PatternCard from "../components/pattern/PatternCard";
 import "../components/pattern/pattern.css";
 import "./Gallery.css";
 
 type Sort = "updated" | "total";
+type VerifyFilter = "all" | "unverified" | "verified";
+
+function verifyFilterOf(value: string | null): VerifyFilter {
+  return value === "unverified" || value === "verified" ? value : "all";
+}
 
 function ImageTile({ img, patternId }: { img: ImageMeta; patternId?: string }) {
   const url = useBlobUrl(img.id);
@@ -77,6 +82,7 @@ export default function Gallery() {
   const data = useData();
   const tab = route.query.get("tab") === "images" ? "images" : "patterns";
   const [status, setStatus] = useState<PatternStatus | "all">("all");
+  const [verify, setVerify] = useState<VerifyFilter>(() => verifyFilterOf(route.query.get("verify")));
   const [tag, setTag] = useState(route.query.get("tag") ?? "");
   const [view, setView] = useState<"grid" | "tag">(route.query.get("group") === "tag" ? "tag" : "grid");
   const [q, setQ] = useState("");
@@ -93,6 +99,7 @@ export default function Gallery() {
   const qs = route.query.toString();
   useEffect(() => {
     setTag(route.query.get("tag") ?? "");
+    setVerify(verifyFilterOf(route.query.get("verify")));
     setView(route.query.get("group") === "tag" ? "tag" : "grid");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qs]);
@@ -106,12 +113,14 @@ export default function Gallery() {
   const changeView = (v: "grid" | "tag") => { setView(v); remember(tag, v); };
 
   const tags = useMemo(() => Array.from(new Set(data.patterns.filter((p) => !p.deleted).flatMap((p) => p.tags))).sort(), [data.patterns]);
+  const unverifiedCount = useMemo(() => data.patterns.filter((p) => !p.deleted && p.verifiedAt == null).length, [data.patterns]);
   const patterns = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return data.patterns
       .filter((p) => (status === "all" || p.status === status) && (!tag || p.tags.includes(tag)) && (!needle || p.name.toLowerCase().includes(needle) || p.tags.some((t) => t.toLowerCase().includes(needle))))
+      .filter((p) => verify === "all" || (verify === "unverified" ? p.verifiedAt == null : p.verifiedAt != null))
       .sort((a, b) => (sort === "total" ? totalOf(b.counts) - totalOf(a.counts) : b.updatedAt - a.updatedAt));
-  }, [data.patterns, status, tag, q, sort]);
+  }, [data.patterns, status, tag, q, sort, verify]);
   const sections = useMemo(() => {
     if (view !== "tag") return [];
     const byId = new Map(patterns.map((p, i) => [p.id, i]));
@@ -156,7 +165,7 @@ export default function Gallery() {
   return (
     <div>
       <div className="page-head">
-        <div><h1>图库</h1><p>{data.patterns.length} 张图纸 · {images.length} 张图片</p></div>
+        <div><h1>图库</h1><p>{data.patterns.length} 张图纸 · {unverifiedCount} 张未核对 · {images.length} 张图片</p></div>
         <div className="row">
           <div className="seg" role="group" aria-label="图库分类">
             <button aria-pressed={tab === "patterns"} onClick={() => navigate("/gallery")}>图纸</button>
@@ -184,6 +193,11 @@ export default function Gallery() {
               <select className="select" value={status} onChange={(e) => setStatus(e.target.value as PatternStatus | "all")} aria-label="状态">
                 <option value="all">全部状态</option>
                 {(Object.keys(STATUS_LABEL) as PatternStatus[]).map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
+              </select>
+              <select className="select" value={verify} onChange={(e) => setVerify(e.target.value as VerifyFilter)} aria-label="核对状态">
+                <option value="all">全部核对状态</option>
+                <option value="unverified">未核对 {unverifiedCount}</option>
+                <option value="verified">已核对</option>
               </select>
               {tags.length ? (
                 <select className="select" value={tag} onChange={(e) => changeTag(e.target.value)} aria-label="标签">
@@ -216,7 +230,7 @@ export default function Gallery() {
                   </section>
                 )) : <div className="ga-grid">{patterns.map((p) => <GalleryItem key={p.id} {...itemProps(p, p.id)} />)}</div>}
               </div>
-            ) : <div className="empty"><h3>没有符合条件的图纸</h3><button className="btn btn-sm" onClick={() => { setQ(""); setStatus("all"); changeTag(""); }}>清除筛选</button></div>}
+            ) : <div className="empty"><h3>没有符合条件的图纸</h3><button className="btn btn-sm" onClick={() => { setQ(""); setStatus("all"); setVerify("all"); changeTag(""); }}>清除筛选</button></div>}
           </>
         )
       ) : images.length ? (
@@ -232,6 +246,7 @@ export default function Gallery() {
           <span className="spacer" />
           <button className="btn btn-sm btn-ghost" onClick={() => { exitSelect(); setSay("已退出多选"); }} aria-label="退出多选"><Icon name="x" /></button>
           <div className="ga-bulk-acts">
+          <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetVerified(chosen))}>标记已核对</button>
           <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetStatus(chosen, "planned"))}>设为计划做</button>
           <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetStatus(chosen, "idea"))}>设为收藏</button>
           <button className="btn btn-sm" disabled={!chosen.length} onClick={() => setTagSheet(true)}>加标签</button>

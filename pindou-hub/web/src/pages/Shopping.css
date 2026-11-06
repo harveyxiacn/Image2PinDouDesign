@@ -1,6 +1,12 @@
 /* 采购清单页 */
-.shop-hero { display: flex; align-items: center; gap: 24px; padding: 18px 20px; flex-wrap: wrap; }
+.shop-hero { display: flex; align-items: flex-start; gap: 24px; padding: 18px 20px; flex-wrap: wrap; }
+.shop-hero-main { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .shop-hero .big { font-size: var(--t-display); font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.shop-kpis { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--ink-2); font-size: var(--t-small); }
+.shop-kpis b { color: var(--ink); font-weight: 600; }
+.shop-actions { flex-wrap: wrap; justify-content: flex-end; }
+.shop-plan-note { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+@media (max-width: 820px) { .shop-actions { justify-content: flex-start; } }
 .shop-opts { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; margin: 16px 0; }
 @media (max-width: 820px) { .shop-opts { grid-template-columns: minmax(0, 1fr); } }
 .shop-pats { display: flex; flex-direction: column; }
@@ -8,6 +14,8 @@
 .shop-pats label:last-child { border-bottom: 0; }
 .shop-pats input, .shop-check { width: 18px; height: 18px; accent-color: var(--iron); flex: none; }
 .shop-pats span.n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shop-pats label.is-off { opacity: 0.55; cursor: default; }
+.shop-pats .pt-unverified { margin-left: 0; }
 .shop-buy { width: 92px; text-align: right; }
 .shop-ctl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (pointer: coarse) { .shop-pats label { min-height: 44px; } .shop-pats input, .shop-check { width: 22px; height: 22px; } }

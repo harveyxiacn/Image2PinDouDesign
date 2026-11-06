@@ -1,0 +1,32 @@
+/* 采购方案页 */
+.purchase-top { display: flex; align-items: flex-start; gap: 20px; flex-wrap: wrap; }
+.purchase-kpis { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 12px 20px; flex: 1 1 520px; }
+.purchase-kpis > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.purchase-kpis b { font-size: var(--t-h3); font-weight: 600; line-height: 1.2; }
+.purchase-kpis .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.purchase-controls { align-items: flex-end; flex-wrap: wrap; }
+.purchase-check { min-height: 38px; }
+.purchase-check input { width: 18px; height: 18px; accent-color: var(--iron); }
+@media (max-width: 820px) {
+  .purchase-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .purchase-controls { align-items: stretch; }
+}
+
+.purchase-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 16px 0; }
+@media (max-width: 820px) { .purchase-cards { grid-template-columns: minmax(0, 1fr); } }
+.purchase-card { padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.purchase-card[data-best="true"] { border-color: var(--iron); background: var(--iron-wash); }
+.purchase-card h3 { font-size: var(--t-h3); }
+.purchase-price { font-size: var(--t-display); font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.purchase-card .btn { margin-top: auto; }
+.purchase-card .btn svg { width: 16px; height: 16px; }
+
+.purchase-section { margin: 16px 0; }
+.purchase-plans td { vertical-align: top; }
+.purchase-plans tr[data-best="true"] td { background: var(--iron-wash); }
+.purchase-best { margin-left: 6px; }
+.purchase-packs, .purchase-coverage { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.purchase-missing { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.purchase-chip { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px 0 4px; font-variant-numeric: tabular-nums; }
+.purchase-avoid { margin: 8px 0 0; padding-left: 18px; color: var(--ink-2); }
+.purchase-avoid li { margin: 4px 0; }

@@ -10,6 +10,7 @@ const Gallery = lazy(() => import("./pages/Gallery"));
 const PatternDetail = lazy(() => import("./pages/PatternDetail"));
 const Inventory = lazy(() => import("./pages/Inventory"));
 const Shopping = lazy(() => import("./pages/Shopping"));
+const Purchase = lazy(() => import("./pages/Purchase"));
 const History = lazy(() => import("./pages/History"));
 const Settings = lazy(() => import("./pages/Settings"));
 
@@ -19,6 +20,7 @@ const NAV: NavItem[] = [
   { href: "#/gallery", label: "图库", icon: "gallery", match: (p) => p.startsWith("/gallery") || p.startsWith("/pattern") },
   { href: "#/inventory", label: "豆盒库存", icon: "box", match: (p) => p.startsWith("/inventory") },
   { href: "#/shopping", label: "采购清单", icon: "cart", match: (p) => p.startsWith("/shopping") },
+  { href: "#/purchase", label: "采购方案", icon: "sparkle", match: (p) => p.startsWith("/purchase") },
   { href: "#/history", label: "记录", icon: "history", match: (p) => p.startsWith("/history") },
   { href: "#/settings", label: "同步与设置", icon: "sync", match: (p) => p.startsWith("/settings") }
 ];
@@ -33,6 +35,7 @@ function Page() {
     case "pattern": return <PatternDetail id={id ?? ""} />;
     case "inventory": return <Inventory />;
     case "shopping": return <Shopping />;
+    case "purchase": return <Purchase />;
     case "history": return <History />;
     case "settings": return <Settings />;
     default: return <Dashboard />;
@@ -41,7 +44,7 @@ function Page() {
 
 const TITLES: Record<string, string> = {
   "": "总览", add: "添加图纸", gallery: "图库", pattern: "图纸详情", inventory: "豆盒库存",
-  shopping: "采购清单", history: "记录", settings: "同步与设置"
+  shopping: "采购清单", purchase: "采购方案", history: "记录", settings: "同步与设置"
 };
 
 /** 路由切换：更新标签页标题，并把焦点移到新页面的 h1（键盘/读屏用户知道已到新页面）。首次载入不抢焦点。 */

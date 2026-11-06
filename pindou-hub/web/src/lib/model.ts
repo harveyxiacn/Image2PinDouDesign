@@ -20,8 +20,12 @@ export type Pattern = {
   /** 每格色号（生成或网格识别得到时保存），null 表示空格 */
   matrix?: Array<Array<string | null>>;
   counts: Counts;
-  /** 识别置信度 0–1；人工确认后置 1 */
+  /** 识别置信度 0–1；大幅手工修改后置 1（不等于“已核对”） */
   confidence?: number;
+  /** 人工点过“已核对”的时间；空表示未核对。 */
+  verifiedAt?: number;
+  /** 保存时记录自动检查给出的疑点，便于之后回看。 */
+  reviewReasons?: string[];
   status: PatternStatus;
   /** 计划做几份（采购清单按份数放大） */
   copies: number;

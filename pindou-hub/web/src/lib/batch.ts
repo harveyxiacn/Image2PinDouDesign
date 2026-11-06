@@ -84,12 +84,9 @@ export function mismatchCount(result: AnalyzeResult): number {
   return result.diff.filter((d) => d.legend !== d.grid).length;
 }
 
-/** 把一次识别结果归类，并给出“需要检查”的原因 */
-export function classify(result: AnalyzeResult): { state: "done" | "notchart" | "failed"; review: boolean; reasons: string[]; error?: string } {
-  if (result.isChart === false) return { state: "notchart", review: false, reasons: [], error: result.notChartReason };
-  if (result.method === "none" || !Object.keys(result.counts).length) {
-    return { state: "failed", review: false, reasons: [], error: "没有读到图例，也没能确定网格" };
-  }
+/** 把一次识别结果里“需要检查”的原因提取出来；保存时也写入 reviewReasons。 */
+export function reviewReasonsFor(result: AnalyzeResult): string[] {
+  if (result.isChart === false || result.method === "none" || !Object.keys(result.counts).length) return [];
   const reasons: string[] = [];
   if (result.confidence < LOW_CONFIDENCE) reasons.push("可信度偏低");
   const mm = mismatchCount(result);
@@ -97,6 +94,16 @@ export function classify(result: AnalyzeResult): { state: "done" | "notchart" | 
   const bad = headerChecks(result).filter((c) => c.ok === false);
   if (bad.length) reasons.push(`与图上标注不符：${bad.map((c) => c.label).join("、")}`);
   if (result.paletteWarning) reasons.push("色号体系可能不是 MARD");
+  return reasons;
+}
+
+/** 把一次识别结果归类，并给出“需要检查”的原因 */
+export function classify(result: AnalyzeResult): { state: "done" | "notchart" | "failed"; review: boolean; reasons: string[]; error?: string } {
+  if (result.isChart === false) return { state: "notchart", review: false, reasons: [], error: result.notChartReason };
+  if (result.method === "none" || !Object.keys(result.counts).length) {
+    return { state: "failed", review: false, reasons: [], error: "没有读到图例，也没能确定网格" };
+  }
+  const reasons = reviewReasonsFor(result);
   return { state: "done", review: reasons.length > 0, reasons };
 }
 
