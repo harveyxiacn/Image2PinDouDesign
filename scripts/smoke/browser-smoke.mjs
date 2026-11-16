@@ -277,6 +277,21 @@ try {
     return ok;
   });
 
+  await step("codes toggle on while editing; sheet PNG exports with legend", async () => {
+    const pressed = await evaluate("document.querySelector('[data-show-codes-toggle]')?.dataset.pressed ?? null");
+    await shot("04c-edit-codes", ".stage");
+    await evaluate("(() => { window.__dlr = null; if (window.__capOn) return; window.__capOn = true; const oc = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download && this.href.startsWith('blob:')) { const name = this.download; fetch(this.href).then((r) => r.blob()).then((b) => { const fr = new FileReader(); fr.onload = () => { window.__dlr = { name, size: b.size, data: fr.result }; }; fr.readAsDataURL(b); }).catch((e) => { window.__dlr = { error: String(e) }; }); return; } return oc.call(this); }; })()");
+    const clicked = await evaluate("(() => { const b = [...document.querySelectorAll('button')].find((el) => el.textContent.includes('下载高清色号图') && !el.disabled); if (!b) return false; b.click(); return true; })()");
+    if (!clicked) { console.log("sheet export button not found"); return false; }
+    await waitFor("!!window.__dlr", 60000);
+    const dl = await evaluate("window.__dlr");
+    if (dl.error || !String(dl.data).startsWith("data:image/png;base64,")) { console.log("sheet export", JSON.stringify({ ...dl, data: String(dl.data).slice(0, 40) })); return false; }
+    const png = Buffer.from(dl.data.split(",")[1], "base64");
+    writeFileSync(join(outDir, "04d-sheet-export.png"), png);
+    const w = png.readUInt32BE(16), h = png.readUInt32BE(20);
+    console.log("sheet export", dl.name, png.length, w, h, "codes toggle", pressed);
+    return pressed === "true" && w >= 600 && h > w * 0.5;
+  });
   await step("import design file adds a draft", async () => {
     const fixture = resolve(outDir, "fixture.pindou.json");
     writeFileSync(fixture, JSON.stringify({ format: "image2pindou-designs", version: 1, designs: [

@@ -986,6 +986,7 @@ export default function App() {
               design={activeDesign}
               palette={MARD_PALETTE}
               showLabels={settings.showLabels}
+              onShowLabelsChange={(next) => setSettings((current) => ({ ...current, showLabels: next }))}
               originalUrl={activeOriginalUrl}
               onDownload={activeDesign ? () => { void exportActivePng(); } : undefined}
               onExportPdf={activeDesign ? exportActivePdf : undefined}

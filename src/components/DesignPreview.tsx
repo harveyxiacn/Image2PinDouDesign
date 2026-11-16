@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { renderDesignToCanvas } from "../domain/rendering";
+import { labelsReadableOnScreen, zoomForReadableLabels } from "../domain/sheetLayout";
 import type { BeadDesign, PaletteColor } from "../domain/types";
 import { BEAD_PITCH_MM, physicalSizeCm } from "../domain/boards";
 import {
@@ -42,6 +43,8 @@ type DesignPreviewProps = {
   design?: BeadDesign;
   palette: PaletteColor[];
   showLabels: boolean;
+  // 编辑工具栏里的“显示色号”开关；与设置里的 showLabels 是同一个值。
+  onShowLabelsChange?: (next: boolean) => void;
   originalUrl?: string;
   onDownload?: () => void;
   isDownloading?: boolean;
@@ -79,6 +82,7 @@ export function DesignPreview({
   design,
   palette,
   showLabels,
+  onShowLabelsChange,
   originalUrl,
   onDownload,
   isDownloading = false,
@@ -102,6 +106,8 @@ export function DesignPreview({
   const previousZoomRef = useRef<PreviewZoom>("fit");
   const renderCellSizeRef = useRef(22);
   const [zoom, setZoom] = useState<PreviewZoom>("fit");
+  // 画布内格宽 × 当前显示倍率 = 屏幕上的格宽（CSS 像素），用来判断色号看不看得清。
+  const [screenCell, setScreenCell] = useState(0);
   const zoomRef = useRef<PreviewZoom>("fit");
   zoomRef.current = zoom;
   // 缩放时以光标 / 双指中心为锚点：自己设好滚动位置，别让“从适应屏幕放大”的居中逻辑覆盖。
@@ -251,6 +257,23 @@ export function DesignPreview({
     });
     setCanvasWidth(canvasRef.current.width);
   }, [activeTile, completedCells, design, focusCode, mode, palette, showLabels, repaintTick]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!design || !canvas) return;
+    const measure = () => {
+      const shown = canvas.getBoundingClientRect().width;
+      setScreenCell(canvas.width > 0 && shown > 0 ? renderCellSizeRef.current * shown / canvas.width : 0);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [design, zoom, canvasWidth, stageView]);
 
   // 新生成结果（新图纸或重新转换，pixelated 引用会变化）到达时做一次逐行“铺豆”揭示；
   // 单格编辑沿用同一引用，不会反复播放。动画只用 clip-path，结束与否不影响任何状态。
@@ -835,6 +858,8 @@ export function DesignPreview({
       setPasteArmed(false);
     }
     setStageView("pattern");
+    // 进入编辑时默认显示格内色号，方便核对和修改。
+    if (nextMode !== "view" && mode === "view" && !showLabels) onShowLabelsChange?.(true);
     if (nextMode !== "view" && zoom === "fit") {
       setZoom(1);
     }
@@ -1091,6 +1116,39 @@ export function DesignPreview({
                 )}
               </div>
             </div>
+            {stageView === "pattern" && (
+              <div className="label-controls">
+                <button
+                  type="button"
+                  className={`button small label-toggle ${showLabels ? "active" : ""}`}
+                  aria-pressed={showLabels}
+                  disabled={!onShowLabelsChange}
+                  onClick={() => onShowLabelsChange?.(!showLabels)}
+                  title="显示或隐藏格子里的色号（C）"
+                  data-show-codes-toggle
+                  data-pressed={showLabels ? "true" : "false"}
+                >
+                  显示色号
+                </button>
+                {showLabels && screenCell > 0 && !labelsReadableOnScreen(renderCellSizeRef.current, screenCell / renderCellSizeRef.current) && (
+                  <>
+                    <span className="label-too-small" role="status" data-codes-too-small>放大后显示色号</span>
+                    <button
+                      type="button"
+                      className="button small"
+                      data-zoom-to-codes
+                      onClick={() => {
+                        const target = zoomForReadableLabels(renderCellSizeRef.current);
+                        if (zoomRef.current === "fit") setZoom(clampZoom(target));
+                        else zoomTo(target);
+                      }}
+                    >
+                      放大到能看清色号
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             {stageView !== "pattern" && (
               <div className="compare-frame is-stage">
                 {stageView === "beads" ? (

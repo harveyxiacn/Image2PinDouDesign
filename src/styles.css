@@ -4248,3 +4248,28 @@ body {
   margin: 0;
   padding: 14px 22px 4px;
 }
+
+/* 编辑时的“显示色号”开关与放大提示 */
+.label-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: -4px 0 10px;
+}
+
+.label-controls .button {
+  min-height: 44px;
+}
+
+.label-toggle.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.label-too-small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}

@@ -27,11 +27,13 @@ describe("complete pattern export", () => {
     const canvas = document.createElement("canvas");
     renderDesignToCanvas(canvas, design, MARD_PALETTE, { cellSize: getHighResolutionCellSize(design), showLabels: true, boardLineEvery: 52, sheet: true });
     const labels = context.fillText.mock.calls.map((call) => call[0]);
-    expect(labels).toContain("57 × 60 格  ·  MARD 2 色  ·  2 颗豆  ·  每板 52 针");
-    expect(labels).toContain("H7 · 1 颗");
+    expect(labels).toContain("57 × 60 格  ·  2 种颜色  ·  共 2 颗豆  ·  每板 52 针");
+    expect(labels).toContain("H7 × 1");
     expect(labels.filter((label) => label === "60")).toHaveLength(2);
     expect(labels).not.toContain("A1");
     expect(context.drawImage).toHaveBeenCalledOnce();
+    expect(labels).toContain("合计：2 种颜色，2 颗豆");
+    expect(labels.indexOf("A4 × 1")).toBeLessThan(labels.indexOf("H7 × 1"));
     expect(canvas.height).toBeGreaterThan(60 * 32);
     expect(canvas.width * canvas.height).toBeLessThan(24_000_000);
   });
