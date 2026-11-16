@@ -1,13 +1,14 @@
 // 焦点：豆盒（compartment box）网格——一眼看出每个色号还剩多少、计划里哪里缺。
 import { useMemo, useState } from "react";
-import { Icon, fmt, DiffNumber } from "../components/ui";
+import { Icon, fmt, toast, DiffNumber } from "../components/ui";
 import { useData } from "../lib/db";
-import { demandByCode, isActive, stockByCode, compareCodes } from "../lib/inventory";
-import { ALL_CODES, PALETTE_KITS, colorOf, getPaletteKit, normalizeKitId } from "../lib/palette";
+import { demandByCode, isActive, stockByCode, compareCodes, inventoryExportCsv } from "../lib/inventory";
+import { ALL_CODES, PALETTE, PALETTE_KITS, colorOf, getPaletteKit, normalizeKitId } from "../lib/palette";
 import { levelOf, matchesQuery, seriesOf } from "../lib/stockview";
 import { BeadBox, type CellInfo } from "../components/stock/BeadBox";
 import { CodeSheet } from "../components/stock/CodeSheet";
 import { BatchEntry } from "../components/stock/BatchEntry";
+import { downloadText } from "../components/stock/download";
 import { KitInit } from "../components/stock/KitInit";
 import { useStockFlash } from "../components/stock/useStockFlash";
 import "./Inventory.css";
@@ -47,6 +48,12 @@ export default function Inventory() {
   const lowCount = Object.keys(stock).filter((c) => stock[c] > 0 && levelOf(stock[c], minStock[c] ?? lowStock) === "low").length;
   const hasAny = Object.keys(stock).length > 0;
 
+  const exportCsv = () => {
+    if (!inStock) { toast("还没有库存可导出"); return; }
+    downloadText(`拼豆仓库存-${new Date().toISOString().slice(0, 10)}.csv`, inventoryExportCsv(stock, PALETTE), "text/csv;charset=utf-8");
+    toast(`已导出 ${inStock} 色库存，可在图纸工坊用“从拼豆仓导入库存”读取`);
+  };
+
   return (
     <div>
       <div className="page-head">
@@ -58,7 +65,8 @@ export default function Inventory() {
       </div>
 
       <div className="inv-bar">
-        <div className="inv-summary"><span><b><DiffNumber value={totalBeads} /></b> 颗</span><span><b className="num">{inStock}</b> 色有货</span><span><b className="num">{lowCount}</b> 色偏少</span></div>
+        <div className="inv-summary"><span><b><DiffNumber value={totalBeads} /></b> 颗</span><span><b className="num">{inStock}</b> 色有货</span><span><b className="num">{lowCount}</b> 色偏少</span>
+          <button type="button" className="btn btn-sm btn-ghost" style={{ minHeight: 44 }} data-inventory-export-csv onClick={exportCsv} title="导出库存，可导入图纸工坊">导出库存 CSV</button></div>
         <div className="row">
           <div className="inv-scroll"><div className="seg" role="group" aria-label="筛选">
             {FILTERS.map(([id, label]) => <button key={id} aria-pressed={filter === id} onClick={() => { setFilter(id); setSeries(""); }}>{label}</button>)}

@@ -8,7 +8,9 @@ import { METHOD_LABEL, totalOf, type Counts, type PatternStatus } from "../../li
 import type { Matrix } from "../../lib/matrix";
 import { comparableMismatchCount, gridCapacity, headerChecks, mismatchCount, reviewReasonsFor } from "../../lib/batch";
 import { checkSize } from "../../lib/recognize/sizecheck";
-import { ALL_CODES, colorOf, normalizeCode } from "../../lib/palette";
+import { ALL_CODES, colorOf, managedCodes, normalizeCode, normalizeKitId } from "../../lib/palette";
+import { useData } from "../../lib/db";
+import { stockByCode } from "../../lib/inventory";
 import { countMatrixColors, countsEqual, matrixDiffCount, matrixEqual, normalizeMatrix, paintCells, replaceCode, type BrushSize, type MatrixCell } from "../../lib/matrixEdit";
 import { DiffNumber, Icon, fmt, navigate, prefersReducedMotion, toast } from "../ui";
 import ImageDrop from "./ImageDrop";
@@ -77,6 +79,8 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   /** 一次选了多张图（或点「多张截图拼接」）：交给页面决定是拼接还是批量；mode=stitch 表示用户已明确要拼接 */
   onMulti?: (files: File[], mode: "ask" | "stitch") => void;
 }) {
+  const hubData = useData();
+  const managedList = useMemo(() => managedCodes(normalizeKitId(hubData.prefs.kitId), stockByCode(hubData.txns)), [hubData.prefs.kitId, hubData.txns]);
   const [url, setUrl] = useState<string | null>(null);
   const [pixels, setPixels] = useState<Pixels | null>(null);
   const [region, setRegion] = useState<Rect | null>(null);
@@ -492,7 +496,10 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
     ])).filter((code) => colorOf(code));
     const set = new Set(present);
     present.sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0) || a.localeCompare(b));
-    return [...present, ...ALL_CODES.filter((code) => !set.has(code))];
+    // 图上有的 → 我管理的色号 → 套装外（仍可选，买来的图纸里可能有）
+    const mine = managedList.filter((code) => !set.has(code));
+    const inMine = new Set(managedList);
+    return [...present, ...mine, ...ALL_CODES.filter((code) => !set.has(code) && !inMine.has(code))];
   })();
   const reviewReasons = result ? reviewReasonsFor(result) : [];
   const verdictOk = !!result && result.confidence >= 0.9 && reviewReasons.length === 0;

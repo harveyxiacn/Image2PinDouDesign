@@ -16,6 +16,7 @@ import { matrixOf } from "../lib/matrix";
 import { parseTags } from "../components/pattern/SaveForm";
 import { WorkFields, draftToInput, newDraft, type WorkDraft } from "../components/worklog/WorkFields";
 import { WorkPanel } from "../components/worklog/WorkPanel";
+import { StockRecolorCard } from "../components/pattern/StockRecolor";
 import { completedPattern, withCompletionUndone } from "../lib/worklog";
 import { releaseImages } from "../lib/images";
 import "../components/pattern/pattern.css";
@@ -300,6 +301,8 @@ export default function PatternDetail({ id }: { id: string }) {
             </div>
             {editing ? <CountsEditor counts={editing} onChange={setEditing} /> : <DetailTable counts={editingCells && liveCounts ? liveCounts : pattern.counts} copies={copies} stock={stock} inventoryReady={inventoryReady} focusCode={focus} onPick={(c) => setFocus((f) => (f === c ? null : c))} />}
           </div>
+
+          <StockRecolorCard pattern={pattern} />
 
           <div className="panel panel-pad stack">
             <div className="pd-actions">

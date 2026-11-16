@@ -9,6 +9,7 @@ import { collectionsByTag, rangeIds } from "../lib/stockview";
 import { bulkAddTag, bulkDelete, bulkSetStatus, bulkSetVerified, reopenSummary, type RefundChoice } from "../components/stock/patternActions";
 import { useFlip } from "../components/stock/useFlip";
 import PatternCard from "../components/pattern/PatternCard";
+import { StockRecolorAllSheet, useRecolorCount } from "../components/pattern/StockRecolor";
 import { startVerify } from "../lib/verifySession";
 import { FLAG_TAG } from "../lib/verifyQueue";
 import "../components/pattern/pattern.css";
@@ -101,6 +102,8 @@ export default function Gallery() {
   // 把已完成的图纸改回别的状态前，先问扣掉的豆子要不要放回库存
   const [reopenAsk, setReopenAsk] = useState<{ status: PatternStatus; patterns: number; beads: number; colors: number } | null>(null);
   const [say, setSay] = useState("");
+  const [recolorAll, setRecolorAll] = useState(false);
+  const recolorCount = useRecolorCount();
   const anchor = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
@@ -220,6 +223,14 @@ export default function Gallery() {
         </div>
       ) : null}
 
+      {tab === "patterns" && recolorCount > 0 ? (
+        <div className="notice" role="note" data-recolor-banner>
+          <span><b>{recolorCount} 张图纸</b>用了你没管理的颜色。</span>
+          <span className="spacer" />
+          <button className="btn btn-sm" data-recolor-all onClick={() => setRecolorAll(true)}>全部按库存换色</button>
+        </div>
+      ) : null}
+
       {tab === "patterns" ? (
         data.patterns.length === 0 ? (
           <div className="empty pegboard ga-empty">
@@ -313,6 +324,7 @@ export default function Gallery() {
           </div>
         </Sheet>
       ) : null}
+      {recolorAll ? <StockRecolorAllSheet onClose={() => setRecolorAll(false)} onDone={(m) => { setSay(m); setRecolorAll(false); }} /> : null}
       {tagSheet ? <TagSheet tags={tags} count={chosen.length} onClose={() => setTagSheet(false)} onApply={(t) => { setTagSheet(false); void run(() => bulkAddTag(chosen, t)); }} /> : null}
     </div>
   );

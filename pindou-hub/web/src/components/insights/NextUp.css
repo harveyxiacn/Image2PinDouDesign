@@ -1,0 +1,29 @@
+/* 下一张拼什么：nu- 前缀，只用全局令牌，亮 / 暗两套自动跟随。 */
+.nu-list { list-style: none; margin: 0; padding: 0; }
+.nu-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main go" "chips go"; gap: 4px 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--rule-soft); }
+.nu-item .nu-main { grid-area: main; }
+.nu-item .nu-chips { grid-area: chips; padding-left: 68px; }
+.nu-item .nu-go { grid-area: go; min-height: 44px; min-width: 44px; white-space: nowrap; }
+.nu-main { display: flex; gap: 12px; align-items: center; min-height: 44px; min-width: 0; color: inherit; text-decoration: none; border-radius: var(--r-ctl); }
+.nu-main:hover { background: var(--rule-soft); }
+.nu-thumb { flex: 0 0 56px; width: 56px; border-radius: var(--r-ctl); overflow: hidden; }
+.nu-thumb .pt-thumb { width: 56px; }
+.nu-thumb .pt-thumb.ph span { display: none; }
+.nu-body { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.nu-name { font-weight: 600; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.nu-best { font-size: var(--t-small); }
+.nu-why { font-size: var(--t-small); color: var(--ink-2); line-height: 1.45; overflow-wrap: anywhere; }
+.nu-chips { list-style: none; margin: 0; display: flex; flex-wrap: wrap; gap: 4px 8px; padding: 0; }
+.nu-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px 2px 4px; border: 1px solid var(--rule-soft); border-radius: 999px; font-size: var(--t-small); }
+.nu-chip-low { border-color: var(--amber); }
+.nu-sub { font-size: var(--t-h4); margin: 16px 0 4px; }
+.nu-together { padding: 8px 0 0; }
+.nu-card .nu-main { padding: 0 16px; width: auto; }
+.nu-card-chips { padding: 8px 16px 12px 84px; }
+.nu-card { padding-bottom: 4px; }
+@media (max-width: 520px) {
+  .nu-item { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "chips" "go"; }
+  .nu-item .nu-chips { padding-left: 0; }
+  .nu-item .nu-go { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) { .nu-main { transition: none; } }

@@ -11,6 +11,7 @@ import { CodeSheet } from "../components/stock/CodeSheet";
 import { KitInit } from "../components/stock/KitInit";
 import { UsageChart } from "../components/dash/UsageChart";
 import { ForecastCard } from "../components/insights/ForecastCard";
+import { NextUpCard } from "../components/insights/NextUpCard";
 import { OrdersCard } from "../components/orders/OrdersCard";
 import { Collections } from "../components/dash/Collections";
 import "../components/stock/stock.css";
@@ -166,6 +167,7 @@ export default function Dashboard() {
         <div><span className="label">快用完</span><b style={{ color: low.length ? "var(--amber)" : undefined }}>{low.length}</b></div>
       </div>
 
+      <NextUpCard />
       <ForecastCard />
       <OrdersCard />
 

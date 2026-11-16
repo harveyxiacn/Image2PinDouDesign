@@ -208,3 +208,16 @@ export function countsToCsv(rows: Array<Record<string, string | number>>, column
   };
   return "﻿" + [columns.map(([, label]) => cell(label)).join(","), ...rows.map((row) => columns.map(([key]) => cell(row[key])).join(","))].join("\n");
 }
+
+/**
+ * 库存导出 CSV，格式与图纸工坊（根应用）的“库存 CSV”完全一致：BOM + 表头 色号,颜色,HEX,颗数 + 每行一个色号，
+ * 只含库存 > 0 的色号，行尾带换行。图纸工坊的“从拼豆仓导入库存”读的就是它。
+ */
+export function inventoryExportCsv(stock: Counts, palette: ReadonlyArray<{ code: string; nameZh: string; hex: string }>): string {
+  const cell = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const rows = palette
+    .filter((c) => (stock[c.code] ?? 0) > 0)
+    .sort((a, b) => compareCodes(a.code, b.code))
+    .map((c) => [c.code, c.nameZh, c.hex, String(stock[c.code])].map(cell).join(","));
+  return `\uFEFF色号,颜色,HEX,颗数\n${rows.join("\n")}\n`;
+}

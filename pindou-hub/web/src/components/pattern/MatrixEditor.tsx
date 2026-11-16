@@ -6,7 +6,9 @@ import { commitEdit, initEdit, redoEdit, undoEdit, type EditState } from "../../
 import { compareCodes } from "../../lib/inventory";
 import type { Matrix } from "../../lib/matrix";
 import type { Counts } from "../../lib/model";
-import { ALL_CODES, colorOf } from "../../lib/palette";
+import { ALL_CODES, colorOf, managedCodes, normalizeKitId } from "../../lib/palette";
+import { useData } from "../../lib/db";
+import { stockByCode } from "../../lib/inventory";
 import { fmt, toast } from "../ui";
 import MatrixView, { type MatrixTool } from "./MatrixView";
 import { cycleCode, editorKey } from "../../lib/shortcuts";
@@ -51,7 +53,11 @@ export default function MatrixEditor({ matrix: matrixProp, counts: countsProp, w
 
   // 现在图上用到的色号（按色号排序），放在选色列表前面
   const used = useMemo(() => Object.keys(countMatrixColors(st.matrix)).sort(compareCodes), [st.matrix]);
-  const rest = useMemo(() => ALL_CODES.filter((c) => !used.includes(c)), [used]);
+  // 画笔色默认列“我管理的色号”；套装外的色号放在最后一组，买来的图纸里有这些色时仍能选
+  const data = useData();
+  const managed = useMemo(() => managedCodes(normalizeKitId(data.prefs.kitId), stockByCode(data.txns)), [data.prefs.kitId, data.txns]);
+  const rest = useMemo(() => managed.filter((c) => !used.includes(c)), [managed, used]);
+  const outsideRest = useMemo(() => { const m = new Set(managed); return ALL_CODES.filter((c) => !m.has(c) && !used.includes(c)); }, [managed, used]);
 
   const apply = (next: { matrix: Matrix; counts: Counts }) => setSt((s) => commitEdit(s, next));
   const paint = (cells: MatrixCell[], code: string | null) => apply(paintCells(st.matrix, st.counts, cells, code, width, height));
@@ -129,7 +135,8 @@ export default function MatrixEditor({ matrix: matrixProp, counts: countsProp, w
             <select className="select" value={brush ?? ""} onChange={(e) => setBrush(e.target.value || null)}>
               {!brush ? <option value="">先选一个色号</option> : null}
               <optgroup label="图上用到的">{used.map((c) => <option key={c} value={c}>{c} · {colorOf(c)?.nameZh ?? "未知"}</option>)}</optgroup>
-              <optgroup label="全部色号">{rest.map((c) => <option key={c} value={c}>{c} · {colorOf(c)?.nameZh ?? "未知"}</option>)}</optgroup>
+              <optgroup label="我的色号">{rest.map((c) => <option key={c} value={c}>{c} · {colorOf(c)?.nameZh ?? "未知"}</option>)}</optgroup>
+              {outsideRest.length ? <optgroup label="套装外" data-outside-kit>{outsideRest.map((c) => <option key={c} value={c}>{c} · {colorOf(c)?.nameZh ?? "未知"}</option>)}</optgroup> : null}
             </select>
           </span>
         </label>

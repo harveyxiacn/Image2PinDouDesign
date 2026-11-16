@@ -1,0 +1,9 @@
+.sr-card { border-left: 4px solid var(--iron, #c2410c); }
+.sr-rows { display: flex; flex-direction: column; gap: 4px; max-height: 46vh; overflow-y: auto; }
+.sr-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; min-height: 44px; padding: 4px 0; border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.2)); }
+.sr-pair { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.sr-arrow { color: var(--ink-3); }
+.sr-meta { color: var(--ink-3); white-space: nowrap; }
+.sr-ack { display: flex; gap: 10px; align-items: flex-start; min-height: 44px; cursor: pointer; }
+.sr-ack input { width: 22px; height: 22px; flex: none; margin-top: 2px; }
+@media (max-width: 480px) { .sr-row { grid-template-columns: minmax(0, 1fr) auto; } .sr-row .chip { justify-self: start; } }

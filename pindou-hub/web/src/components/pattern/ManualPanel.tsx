@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { parseLegendText } from "../../lib/recognize/legend";
-import { ALL_CODES } from "../../lib/palette";
+import { ALL_CODES, managedCodes, normalizeKitId } from "../../lib/palette";
+import { useData } from "../../lib/db";
+import { stockByCode } from "../../lib/inventory";
 import { saveImage } from "../../lib/images";
 import type { Counts } from "../../lib/model";
 import { navigate, toast } from "../ui";
@@ -17,6 +19,9 @@ export default function ManualPanel() {
   const [image, setImage] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState("");
+  const data = useData();
+  const managed = useMemo(() => new Set(managedCodes(normalizeKitId(data.prefs.kitId), stockByCode(data.txns))), [data.prefs.kitId, data.txns]);
+  const outside = Object.keys(counts).filter((c) => !managed.has(c));
 
   const parse = () => {
     const reading = parseLegendText(text, VALID);
@@ -52,7 +57,9 @@ export default function ManualPanel() {
         </div>
       </section>
       <section className="stack">
-        <div className="panel"><div className="panel-head"><h3>用量</h3></div><CountsEditor counts={counts} onChange={setCounts} /></div>
+        <div className="panel"><div className="panel-head"><h3>用量</h3></div><CountsEditor counts={counts} onChange={setCounts} />
+          {outside.length ? <p className="meta" role="status" data-outside-hint style={{ padding: "0 14px 12px" }}>{outside.join("、")} 不在你的色卡套装里（也没有库存）。可以照常保存，只是这些颜色需要另外购买。</p> : null}
+        </div>
         <div className="panel panel-pad"><SaveForm defaultName="" busy={saving} disabled={!Object.keys(counts).length} onSave={save} /></div>
       </section>
     </div>

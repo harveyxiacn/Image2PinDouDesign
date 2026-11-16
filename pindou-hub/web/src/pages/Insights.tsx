@@ -6,6 +6,7 @@ import { stockByCode, isActive } from "../lib/inventory";
 import { demandRanking, familyBreakdown, monthlyActivity, readiness, recognitionQuality, stockHealth } from "../lib/insights";
 import { InsightEmpty, InsightPanel } from "../components/insights/Panel";
 import { ForecastPanel } from "../components/insights/ForecastPanel";
+import { NextUpPanel } from "../components/insights/NextUpPanel";
 import { ReadyList } from "../components/insights/ReadyList";
 import { DemandBars } from "../components/insights/DemandBars";
 import { FamilyBars } from "../components/insights/FamilyBars";
@@ -62,6 +63,8 @@ export default function Insights() {
             {!active.length ? noPlan : !inventoryReady ? noInv : <ReadyList rows={ready} stock={stock} />}
           </InsightPanel>
         </div>
+
+        <NextUpPanel />
 
         <ForecastPanel />
 

@@ -28,3 +28,13 @@ export function normalizeCode(input: string): string | null {
   const text = input.normalize("NFKC").toUpperCase().replace(/\s+/g, "");
   return byCode.has(text) ? text : null;
 }
+
+/**
+ * “我管理的色号”：所选套装里的色号，加上套装外但库存里有货的色号。
+ * 选色、换色、按库存生成都以它为准；套装里暂时用完的颜色仍算在内（用完了是去补货，而不是换成别的颜色）。
+ */
+export function managedCodes(kitId: string | null | undefined, stock: Record<string, number> = {}): string[] {
+  const set = new Set<string>(getPaletteKit(kitId).codes.filter((code) => byCode.has(code)));
+  for (const [code, qty] of Object.entries(stock)) if (qty > 0 && byCode.has(code)) set.add(code);
+  return [...set].sort(compareCodes);
+}

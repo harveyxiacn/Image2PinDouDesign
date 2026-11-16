@@ -47,11 +47,30 @@ export type Pattern = {
   consumed?: boolean;
   /** 拼装模式的进度（随图纸同步），见 lib/build.ts */
   build?: BuildState;
+  /** 按库存换色后留下的原始数据，用来“恢复原色”；只在第一次换色时记录，见 lib/recolor.ts。旧版本会忽略这个字段。 */
+  stockRecolor?: StockRecolor;
   /** 完工记录：每完成一次一条（复制、重新打开后再完成都各记一条）；旧设备会忽略这个字段，见 lib/worklog.ts */
   works?: WorkEntry[];
   createdAt: number;
   updatedAt: number;
   deleted?: boolean;
+};
+
+/** 按库存换色的记录：map = 换色对照（原色号 → 新色号），orig* 是换色前的原样。 */
+export type StockRecolor = {
+  at: number;
+  mode: "managed" | "instock";
+  map: Array<[string, string]>;
+  origCounts: Counts;
+  /** 换色前的格子（压缩存储，新老记录通用）；没有保存格子的图纸没有这一项 */
+  origMatrixRle?: string;
+  /** 换色前的预览图（images 里的 id）；换色时重新画了预览图才有 */
+  origPreviewId?: string;
+  /** 换色前没有预览图、换色时新画了一张：恢复原色时把它拿掉 */
+  previewAdded?: boolean;
+  /** 换色前的“已核对”时间和颜色匹配度：换色时清掉，恢复原色时放回 */
+  origVerifiedAt?: number;
+  origColorMatch?: number;
 };
 
 /** 一次完工。at = 完成时间（毫秒）；photoId 是 images 集合里的成品照片（和图纸原图同一套存储与同步）。 */

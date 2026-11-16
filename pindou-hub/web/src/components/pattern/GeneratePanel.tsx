@@ -8,6 +8,7 @@ import { stockByCode } from "../../lib/inventory";
 import { loadPixelSource, saveImage } from "../../lib/images";
 import { BOARD_CHOICES, buildConversionSettings, DEFAULT_GENERATE_OPTIONS, previewCellSize, startGeneration, type BoardChoice, type GenerateJob } from "../../lib/generate";
 import { PALETTE, normalizeKitId } from "../../lib/palette";
+import { effectiveColorCount, loadOnlyStock, saveOnlyStock } from "../../lib/managed";
 import { fmt, navigate, toast } from "../ui";
 import ImageDrop from "./ImageDrop";
 import MatrixView from "./MatrixView";
@@ -42,7 +43,9 @@ export default function GeneratePanel({ file, onFile, onClear }: { file: File | 
   const [ch, setCh] = useState(64);
   const [maxColors, setMaxColors] = useState<MaxColors>(24);
   const [kitId, setKitId] = useState(() => normalizeKitId(data.prefs.kitId || DEFAULT_GENERATE_OPTIONS.kitId));
-  const [onlyStock, setOnlyStock] = useState(false);
+  const [onlyStock, setOnlyStock] = useState(() => loadOnlyStock());
+  const pickOnlyStock = (on: boolean) => { setOnlyStock(on); saveOnlyStock(on); };
+  const usedColors = useMemo(() => effectiveColorCount(kitId, stock, onlyStock), [kitId, stock, onlyStock]);
   const [dither, setDither] = useState(false);
   const [outline, setOutline] = useState(false);
   const [ignoreWhite, setIgnoreWhite] = useState(true);
@@ -144,8 +147,9 @@ export default function GeneratePanel({ file, onFile, onClear }: { file: File | 
           ) : null}
           <label className="field"><span>色卡套装</span>
             <select className="select" value={kitId} onChange={(e) => setKitId(e.target.value)}>{PALETTE_KITS.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}</select>
+            <span className="meta" role="status" data-generate-colors={usedColors}>这次会用到 {usedColors} 种颜色{onlyStock ? "（套装里有货的）" : "（整个套装，缺货的也算）"}</span>
           </label>
-          <label className="pt-check"><input type="checkbox" checked={onlyStock} onChange={(e) => setOnlyStock(e.target.checked)} />只用库存里有的颜色{onlyStock ? <span className="meta">（{ownedAll.length} 色有货）</span> : null}</label>
+          <label className="pt-check"><input type="checkbox" data-generate-only-stock checked={onlyStock} onChange={(e) => pickOnlyStock(e.target.checked)} />只用库存里有的颜色{onlyStock ? <span className="meta">（{ownedAll.length} 色有货）</span> : null}</label>
           <label className="pt-check"><input type="checkbox" checked={ignoreWhite} onChange={(e) => setIgnoreWhite(e.target.checked)} />忽略白底</label>
           <label className="pt-check"><input type="checkbox" checked={outline} onChange={(e) => setOutline(e.target.checked)} />黑色勾边</label>
           <label className="pt-check"><input type="checkbox" checked={dither} onChange={(e) => setDither(e.target.checked)} />抖动（照片渐变更细腻）</label>
