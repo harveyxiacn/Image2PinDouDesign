@@ -45,6 +45,8 @@ Everything runs **client-side** — images never leave the device, and the built
 - Adjustments: brightness/contrast, color simplification, dithering (Floyd-Steinberg or Bayer ordered), and non-destructive outer H7 black outlining.
 - Palette panel, stats table, grid/color-code preview with zoom.
 - High-resolution PNG sheets with four-side coordinates, every-cell codes, 5-cell guides, physical board boundaries, and a color/count legend; printable board pages and CSV counts.
+- **Smart background removal** in the crop dialog: plain, two-tone and gradient backgrounds are removed locally (Lab color distance, adaptive tolerance, shadow and fringe clean-up, thin enclosed gaps removed while eyes / white clothing are kept) with no model download; busy photo backgrounds use the on-device matting model, and fall back to the local method when the model cannot load. Strength presets (保守 / 标准 / 强力), before/after preview, tap-to-remove / tap-to-keep corrections with undo.
+- **Keyboard, mouse and touch operation**: paste an image with Ctrl+V; tool keys V / B / G / I / E / M, `+` `-` `0` zoom, `C` toggles cell codes, `?` opens the shortcut list; Ctrl+wheel zooms at the cursor (50–400%), middle-button or view-mode drag pans; two-finger pinch and pan on touch screens. Regenerating a pattern keeps hand edits on the undo stack.
 - Installable **PWA** (works offline once loaded) that prompts you to refresh when a new version is available.
 
 ### 角色原图生成精细图纸
