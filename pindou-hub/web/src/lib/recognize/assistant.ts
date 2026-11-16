@@ -280,7 +280,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     } else {
       const t1 = performance.now();
       try {
-        const r = await withDeadline(signal, CELL_BUDGET_MS, (sig) => readCellCodes(src, hiSrc, grid!, reading!, sig, legend && legend.items.length >= 3 ? { allowed: legendCodeList(legend), legendColors: legend.colors ?? null } : {}));
+        const r = await withDeadline(signal, CELL_BUDGET_MS, (sig) => readCellCodes(src, hiSrc, grid!, reading!, sig, legend && legend.items.length >= 3 ? { allowed: legendCodeList(legend), legendColors: legend.colors ?? null, legendCounts: legend.counts } : {}));
         // 有可信图例（≥3 色）时，图例就是这张图的色号全集：格内 OCR 读出图例之外的色号（如把 “A1” 读成 “P11”）一律不采用，
         // 否则会把一整簇颜色改名，再被“补全图例”当成漏读色号重复计数。
         if (legend && legend.items.length >= 3) {
@@ -1044,7 +1044,7 @@ function pickCells(reading: GridReading, clusterId: number, n: number, used: Set
  */
 async function readCellCodes(
   src: PixelSource, hi: PixelSource, grid: GridDetection, reading: GridReading, signal: AbortSignal,
-  gopts: { allowed?: string[] | null; legendColors?: Record<string, { r: number; g: number; b: number }> | null } = {}
+  gopts: { allowed?: string[] | null; legendColors?: Record<string, { r: number; g: number; b: number }> | null; legendCounts?: Record<string, number> | null } = {}
 ): Promise<{ votes: Record<number, string>; total: number; recovered: number; glyph: number; merged: number; cellCodes?: Record<number, string> }> {
   const { ocrWords } = await import("./ocr");
   const f = hi.width / src.width;
@@ -1186,7 +1186,7 @@ async function readCellCodes(
       const { readNearColorCells } = await import("./glyph");
       const cc = readNearColorCells(hi, f, grid, reading, votes, gopts);
       const { outlierInkCells } = await import("./glyph");
-      for (const i of outlierInkCells(hi, f, grid, reading)) cc[i] = "";
+      for (const i of outlierInkCells(hi, f, grid, reading, { legendCounts: gopts.legendCounts })) cc[i] = "";
       if (Object.keys(cc).length) cellCodes = cc;
     } catch (err) {
       if (signal.aborted) throw err;
@@ -1267,11 +1267,17 @@ function wordsToLines(words: Array<{ text: string; bbox: { x0: number; y0: numbe
   return lines.map((l) => l.sort((p, q) => p.bbox.x0 - q.bbox.x0).map((w) => w.text).join(" ")).join("\n");
 }
 
-/** 读图片上方的抬头条带（到网格上沿为止，最多 320px），解析尺寸 / 色数 / 总数。小字所以放大到 3 倍，识别不出再换整块文字模式。 */
+/** 抬头条带高度：到网格上沿为止；上限 320px，但高分辨率 / 竖长图按图高的 30% 放宽（小图行为不变）。 */
+export function headerStripHeight(gridTop: number, imageHeight: number): number {
+  const cap = Math.max(320, Math.round(0.3 * imageHeight));
+  return Math.max(24, Math.min(gridTop, cap));
+}
+
+/** 读图片上方的抬头条带（到网格上沿为止，上限见 headerStripHeight），解析尺寸 / 色数 / 总数。小字所以放大到 3 倍，识别不出再换整块文字模式。 */
 async function readHeader(src: PixelSource, hi: PixelSource, signal: AbortSignal, bottom: number): Promise<HeaderInfo> {
   const { ocrWords } = await import("./ocr");
   const f = hi.width / src.width;
-  const hh = Math.max(24, Math.min(bottom, 320));
+  const hh = headerStripHeight(bottom, src.height);
   const rr = scaleRect({ x: 0, y: 0, width: src.width, height: hh }, f);
   const raw = cropSource(hi, rr);
   const box = contentBox(raw, 4);

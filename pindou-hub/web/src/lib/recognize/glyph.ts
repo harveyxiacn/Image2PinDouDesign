@@ -307,6 +307,8 @@ export type GlyphReadOptions = {
   /** 图例色块的实际颜色（色号 → RGB）：有则作为该色号的颜色参照 */
   legendColors?: Record<string, { r: number; g: number; b: number }> | null;
   whitelist?: string;
+  /** 图例写明的各色号数量（用来给“擦掉离群墨迹格”封顶） */
+  legendCounts?: Record<string, number> | null;
 };
 
 /**
@@ -564,11 +566,43 @@ export function readNearColorCells(
   return out;
 }
 
+/** 一格内中央区域的墨迹形状（与 cellSignature 同一采样窗口）：峰值强度 + 墨迹包围盒（签名网格坐标）。没有墨迹返回 null。 */
+function cellInkShape(lum: Lum, grid: GlyphGrid, f: number, cell: number): { amp: number; x0: number; x1: number; y0: number; y1: number } | null {
+  const pw = grid.pitchX * f, ph = grid.pitchY * f;
+  if (pw < 8 || ph < 8) return null;
+  const ox = (grid.x0 + (cell % grid.cols) * grid.pitchX) * f, oy = (grid.y0 + Math.floor(cell / grid.cols) * grid.pitchY) * f;
+  const raw = new Float32Array(SIG_W * SIG_H);
+  for (let j = 0; j < SIG_H; j += 1) for (let i = 0; i < SIG_W; i += 1) {
+    raw[j * SIG_W + i] = bil(lum, ox + (0.1 + 0.8 * (i + 0.5) / SIG_W) * pw, oy + (0.25 + 0.5 * (j + 0.5) / SIG_H) * ph);
+  }
+  const base = median(raw);
+  const dev = Array.from(raw, (v) => Math.abs(v - base));
+  const amp = [...dev].sort((a, b) => a - b)[Math.floor(dev.length * 0.95)];
+  if (amp < 12) return null;
+  const thr = 0.4 * amp;
+  let x0 = SIG_W, x1 = -1, y0 = SIG_H, y1 = -1;
+  for (let j = 0; j < SIG_H; j += 1) for (let i = 0; i < SIG_W; i += 1) {
+    if (dev[j * SIG_W + i] < thr) continue;
+    if (i < x0) x0 = i; if (i > x1) x1 = i; if (j < y0) y0 = j; if (j > y1) y1 = j;
+  }
+  return x1 < 0 ? null : { amp, x0, x1, y0, y1 };
+}
+
+export type OutlierInkOptions = {
+  /** 图例写明的各色号数量：簇对应的色号在图例里且有数量时，擦除后簇内格数不得少于该数量 */
+  legendCounts?: Record<string, number> | null;
+};
+
 /**
  * 水印 / 杂物压在空白格上造成的“假有字格”：浅色（白）簇里的有字格，字形与簇里多数格子的字形完全不像 → 判为空格。
  * 返回要当成空格的格序号。
+ *
+ * 近白簇里也可能真有另一个色号的豆子（字形当然不同）。所以证据不足时宁可保留，两道保险：
+ *  1. 字号字位像色号：墨迹包围盒高度、垂直位置与多数格子相差不超过 1 个采样行，宽度没有贯穿格子，强度不低于多数格子的 70% ——
+ *     水印带（贯穿整格）、淡碎片（强度低）、错位的残片（位置 / 高度不对）都过不了这关；
+ *  2. 图例：簇对应的色号在图例里有数量时，擦除后簇内格数不得少于图例数量（按最不像的先擦）。
  */
-export function outlierInkCells(hi: PixelSource, f: number, grid: GlyphGrid, reading: GridReading): number[] {
+export function outlierInkCells(hi: PixelSource, f: number, grid: GlyphGrid, reading: GridReading, opts: OutlierInkOptions = {}): number[] {
   const out: number[] = [];
   if (!reading.clusters || !reading.cellInk) return out;
   const lum = lumOf(hi);
@@ -594,9 +628,28 @@ export function outlierInkCells(hi: PixelSource, f: number, grid: GlyphGrid, rea
     const cs = sigs.map((s) => dot(s, cen));
     // 多数格子字形高度一致（中位数 ≥ 0.9）、只有极少数（≤ 20%）明显不像（< 0.75）才算杂物
     if (median(cs) < 0.9) continue;
-    const bad = used.filter((_, t) => cs[t] < 0.75);
-    if (bad.length > 0.2 * used.length) continue;
-    out.push(...bad);
+    const badIdx = used.map((_, t) => t).filter((t) => cs[t] < 0.75);
+    if (badIdx.length > 0.2 * used.length) continue;
+    // 保险 1：形状像一个印在格中央的色号（与多数格子同高、同位置、强度相当、没有贯穿整格）的格子，当作真豆子保留
+    const shapes = used.map((i) => cellInkShape(lum, grid, f, i));
+    const good = shapes.filter((s, t): s is NonNullable<typeof s> => !!s && cs[t] >= 0.75);
+    let bad = badIdx;
+    if (good.length >= 6) {
+      const mAmp = median(good.map((s) => s.amp)), mH = median(good.map((s) => s.y1 - s.y0)), mC = median(good.map((s) => s.y0 + s.y1));
+      bad = badIdx.filter((t) => {
+        const s = shapes[t];
+        if (!s) return true;
+        const codeLike = s.amp >= 0.7 * mAmp && Math.abs((s.y1 - s.y0) - mH) <= 1 && Math.abs((s.y0 + s.y1) - mC) <= 2 && s.x1 - s.x0 <= SIG_W - 3;
+        return !codeLike;
+      });
+    }
+    // 保险 2：图例数量封顶，不让簇内剩余格数低于图例写的数量
+    const lc = opts.legendCounts?.[c.colorCode] ?? (c.code ? opts.legendCounts?.[c.code] : undefined);
+    if (lc && lc > 0) {
+      const room = Math.max(0, cells.length - lc);
+      if (bad.length > room) bad = [...bad].sort((p, q) => cs[p] - cs[q]).slice(0, room);
+    }
+    for (const t of bad) out.push(used[t]);
   }
   return out;
 }
