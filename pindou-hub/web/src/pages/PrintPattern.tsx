@@ -8,8 +8,9 @@ import { matrixOf, type Matrix } from "../lib/matrix";
 import { colorOf } from "../lib/palette";
 import {
   DEFAULT_PRINT_OPTIONS, PRINT_BOARD_SIZES, axisLabels, boardLayout, displayBoardCol, displayColumns, heavyBoundaries, heavyRows,
-  overviewLayout, pageCount, pageMm, planPrint, symbolMap, textColorFor,
-  type PlanBoard, type PrintOptions, type PrintPlan
+  MIN_CODE_CELL_MM, MIN_SYMBOL_CELL_MM, SYMBOL_MARKS, SYMBOL_SHAPES, legendCapacity, overviewLayout, pageCount, pageMm, paginateLegend, planPrint,
+  suggestBoardSize, symbolMap, symbolSpec, textColorFor,
+  type PlanBoard, type PrintOptions, type PrintPlan, type SymbolSpec
 } from "../lib/printPlan";
 import type { ColorCount } from "../lib/build";
 import { Icon, fmt } from "../components/ui";
@@ -42,22 +43,47 @@ function LazyPage({ force, children, ...rest }: { force: boolean; children: () =
   return <section ref={ref} {...rest}>{seen || force ? children() : <div className="pp-placeholder" aria-hidden="true">正在准备…</div>}</section>;
 }
 
+const INK = "#111111";
+
+/** 符号图形（画在 10×10 的格子里）：外形 × 填充 × 角标，见 lib/printPlan.ts。 */
+function SymbolParts({ spec }: { spec: SymbolSpec }) {
+  const solid = spec.fill === "solid";
+  return (
+    <>
+      <path d={SYMBOL_SHAPES[spec.shape]} fill={solid ? INK : "none"} stroke={INK} strokeWidth={solid ? 0 : 1} strokeLinejoin="round" />
+      {spec.fill === "dot" ? <circle cx={5} cy={5} r={1.15} fill={INK} /> : null}
+      {spec.fill === "slash" ? <path d="M2.4 7.6L7.6 2.4" stroke={INK} strokeWidth={1} /> : null}
+      {SYMBOL_MARKS[spec.mark].map(([mx, my], i) => <circle key={i} cx={mx} cy={my} r={0.6} fill={INK} />)}
+    </>
+  );
+}
+function specOf(symbols: Map<string, string>, code: string): SymbolSpec | undefined {
+  const id = symbols.get(code);
+  return id === undefined ? undefined : symbolSpec(Number(id));
+}
+function SymIcon({ spec }: { spec: SymbolSpec }) {
+  return <svg className="pp-sym" viewBox="0 0 10 10" width="4mm" height="4mm" aria-hidden="true"><SymbolParts spec={spec} /></svg>;
+}
+
 function Swatch({ code, style }: { code: string; style?: CSSProperties }) {
   return <i className="pp-sw" style={{ background: hexOf(code), ...style }} aria-hidden="true" />;
 }
 
-function CountList({ counts, symbols, style, withName }: { counts: ColorCount[]; symbols: Map<string, string>; style: PrintOptions["style"]; withName?: boolean }) {
+function CountList({ counts, symbols, style, withName, cols }: { counts: ColorCount[]; symbols: Map<string, string>; style: PrintOptions["style"]; withName?: boolean; cols?: number }) {
   return (
-    <ul className="pp-counts">
-      {counts.map((c) => (
-        <li key={c.code} data-legend-code={c.code}>
+    <ul className="pp-counts" style={cols ? { gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` } : undefined}>
+      {counts.map((c) => {
+        const spec = style === "symbol" ? specOf(symbols, c.code) : undefined;
+        return (
+        <li key={c.code} data-legend-code={c.code} data-legend-symbol={spec ? symbols.get(c.code) : undefined}>
+          {spec ? <SymIcon spec={spec} /> : null}
           <Swatch code={c.code} />
           <b className="pp-code">{c.code}</b>
-          {style === "symbol" && symbols.get(c.code) ? <span className="pp-sym">{symbols.get(c.code)}</span> : null}
           {withName ? <span className="pp-name">{colorOf(c.code)?.nameZh ?? ""}</span> : null}
           <span className="pp-n num">{fmt(c.count)}</span>
         </li>
-      ))}
+        );
+      })}
     </ul>
   );
 }
@@ -91,7 +117,8 @@ function BoardSheet({ name, pb, matrix, plan, opts, symbols }: { name: string; p
   const labels = axisLabels(board.w, opts.mirror);
   const hv = heavyBoundaries(board.w, opts.mirror);
   const hr = heavyRows(board.h);
-  const showText = lay.cellMm >= 3.2;
+  const showCode = lay.cellMm >= MIN_CODE_CELL_MM;
+  const showSym = lay.cellMm >= MIN_SYMBOL_CELL_MM;
   const thin: string[] = []; const heavy: string[] = [];
   for (let d = 0; d <= board.w; d += 1) (hv[d] ? heavy : thin).push(`M${d * U} 0V${board.h * U}`);
   for (let r = 0; r <= board.h; r += 1) (hr[r] ? heavy : thin).push(`M0 ${r * U}H${board.w * U}`);
@@ -101,13 +128,13 @@ function BoardSheet({ name, pb, matrix, plan, opts, symbols }: { name: string; p
       const code = cellAt(matrix, board.x0 + cols[dx], board.y0 + y);
       if (!code) continue;
       const hex = hexOf(code);
-      const sym = opts.style === "symbol" ? symbols.get(code) : undefined;
-      const text = sym ?? code;
-      const fs = sym ? U * 0.62 : Math.min(U * 0.5, (U - 1) / (Math.max(2, text.length) * 0.62));
+      const spec = opts.style === "symbol" ? specOf(symbols, code) : undefined;
+      const fs = Math.min(U * 0.5, (U - 1) / (Math.max(2, code.length) * 0.62));
       cells.push(
         <g key={`${dx}-${y}`}>
           {opts.style === "fill" ? <rect x={dx * U} y={y * U} width={U} height={U} fill={hex} /> : null}
-          {showText ? <text x={dx * U + U / 2} y={y * U + U / 2} fontSize={fs} textAnchor="middle" dominantBaseline="central" fill={textColorFor(hex, opts.style)} fontFamily="var(--font-code), monospace" fontWeight={600}>{text}</text> : null}
+          {spec ? (showSym ? <g transform={`translate(${dx * U} ${y * U})`}><SymbolParts spec={spec} /></g> : null)
+            : showCode ? <text x={dx * U + U / 2} y={y * U + U / 2} fontSize={fs} textAnchor="middle" dominantBaseline="central" fill={textColorFor(hex, opts.style)} fontFamily="var(--font-code), monospace" fontWeight={600}>{code}</text> : null}
         </g>
       );
     }
@@ -142,7 +169,9 @@ function BoardSheet({ name, pb, matrix, plan, opts, symbols }: { name: string; p
   );
 }
 
-function OverviewSheet({ name, matrix, width, height, plan, opts, symbols }: { name: string; matrix: Matrix; width: number; height: number; plan: PrintPlan; opts: PrintOptions; symbols: Map<string, string> }) {
+type LegendInfo = { pages: ColorCount[][]; cols: number };
+
+function OverviewSheet({ name, matrix, width, height, plan, opts, symbols, legend }: { name: string; matrix: Matrix; width: number; height: number; plan: PrintPlan; opts: PrintOptions; symbols: Map<string, string>; legend: LegendInfo }) {
   const lay = overviewLayout(opts.paper, opts.orientation, width, height);
   const cells: ReactNode[] = [];
   for (let y = 0; y < height; y += 1) {
@@ -150,9 +179,9 @@ function OverviewSheet({ name, matrix, width, height, plan, opts, symbols }: { n
       const code = cellAt(matrix, x, y);
       if (!code) continue;
       const dx = opts.mirror ? width - 1 - x : x;
-      const sym = opts.style === "symbol" ? symbols.get(code) : undefined;
+      const spec = opts.style === "symbol" ? specOf(symbols, code) : undefined;
       cells.push(<rect key={`${x}-${y}`} x={dx * U} y={y * U} width={U} height={U} fill={hexOf(code)} fillOpacity={opts.style === "fill" ? 1 : 0.5} />);
-      if (sym && lay.cellMm >= 2.4) cells.push(<text key={`t${x}-${y}`} x={dx * U + U / 2} y={y * U + U / 2} fontSize={U * 0.62} textAnchor="middle" dominantBaseline="central" fill="#111">{sym}</text>);
+      if (spec && lay.cellMm >= 2.4) cells.push(<g key={`t${x}-${y}`} transform={`translate(${dx * U} ${y * U})`}><SymbolParts spec={spec} /></g>);
     }
   }
   const nonEmpty = new Set(plan.boards.map((b) => b.number));
@@ -178,9 +207,27 @@ function OverviewSheet({ name, matrix, width, height, plan, opts, symbols }: { n
         {cells}
         {marks}
       </svg>
-      <section className="pp-legend" data-print-legend aria-label="图例">
-        <b>图例 · 色号 / 颜色 / 名称 / 总数</b>
-        <CountList counts={plan.totals} symbols={symbols} style={opts.style} withName />
+      {legend.pages[0].length ? (
+        <section className="pp-legend" data-print-legend aria-label="图例">
+          <b>图例{legend.pages.length > 1 ? `（第 1 / ${legend.pages.length} 页）` : ""} · {opts.style === "symbol" ? "符号 / 颜色 / 色号 / 名称 / 总数" : "色号 / 颜色 / 名称 / 总数"}</b>
+          <CountList counts={legend.pages[0]} symbols={symbols} style={opts.style} withName cols={legend.cols} />
+        </section>
+      ) : null}
+    </>
+  );
+}
+
+/** 图例放不下总览页时的续页。 */
+function LegendSheet({ name, page, pages, items, opts, symbols, cols }: { name: string; page: number; pages: number; items: ColorCount[]; opts: PrintOptions; symbols: Map<string, string>; cols: number }) {
+  return (
+    <>
+      <header className="pp-head">
+        <h2>{name}</h2>
+        <p>图例（续）· 第 {page} / {pages} 页</p>
+      </header>
+      <section className="pp-legend" data-print-legend aria-label="图例（续）">
+        <b>图例（续）· {opts.style === "symbol" ? "符号 / 颜色 / 色号 / 名称 / 总数" : "色号 / 颜色 / 名称 / 总数"}</b>
+        <CountList counts={items} symbols={symbols} style={opts.style} withName cols={cols} />
       </section>
     </>
   );
@@ -208,6 +255,21 @@ export default function PrintPattern({ id }: { id: string }) {
     return planPrint(matrix, width, height, opts.boardSize, opts.scope === "range" ? opts.rangeText : undefined);
   }, [pattern, matrix, width, height, opts.boardSize, opts.scope, opts.rangeText]);
   const symbols = useMemo(() => symbolMap(plan?.totals ?? []), [plan]);
+  const legend = useMemo<LegendInfo>(() => {
+    if (!plan || !width || !height) return { pages: [[]], cols: 4 };
+    const cap = legendCapacity(opts.paper, opts.orientation, overviewLayout(opts.paper, opts.orientation, width, height).gridH);
+    return { pages: paginateLegend(plan.totals, cap), cols: cap.cols };
+  }, [plan, width, height, opts.paper, opts.orientation]);
+
+  // 格子太小印不出色号：没自己选过板大小就自动换小一点的板并说明；选过的只给建议
+  const minMm = opts.style === "symbol" ? MIN_SYMBOL_CELL_MM : MIN_CODE_CELL_MM;
+  const sizeFix = useMemo(() => (plan && width && height ? suggestBoardSize(opts.paper, opts.orientation, width, height, opts.boardSize, minMm) : null), [plan, width, height, opts.paper, opts.orientation, opts.boardSize, minMm]);
+  const [autoPick, setAutoPick] = useState<{ from: number; to: number; fromMm: number; toMm: number } | null>(null);
+  useEffect(() => {
+    if (!sizeFix || boardSizeTouched) return;
+    setAutoPick({ from: opts.boardSize, to: sizeFix.size, fromMm: sizeFix.fromMm, toMm: sizeFix.cellMm });
+    setOpts((o) => ({ ...o, boardSize: sizeFix.size }));
+  }, [sizeFix, boardSizeTouched]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 打印前把所有选中的页面画出来（beforeprint 同步刷新），打印后恢复按需渲染
   useEffect(() => {
@@ -261,8 +323,10 @@ export default function PrintPattern({ id }: { id: string }) {
     );
   }
 
-  const pages = pageCount(plan, opts.overview);
-  const small = plan.boards.length ? boardLayout(opts.paper, opts.orientation, Math.min(opts.boardSize || Infinity, width), Math.min(opts.boardSize || Infinity, height)).cellMm < 3.2 : false;
+  const legendExtra = opts.overview ? legend.pages.length - 1 : 0;
+  const pages = pageCount(plan, opts.overview, legendExtra);
+  const sizeText = (s: number) => (s > 0 ? `${s}×${s}` : "整张图一块板");
+  const mmText = (v: number) => `${v.toFixed(1)} 毫米`;
   const paperName = opts.paper === "a4" ? "A4" : "letter";
   return (
     <div className="pp" data-print-root data-pattern={pattern.id} data-printing={printing ? "true" : undefined}>
@@ -281,7 +345,7 @@ export default function PrintPattern({ id }: { id: string }) {
 
         <div className="panel panel-pad pp-opts" data-print-options>
           <label className="field"><span>拼豆板大小</span>
-            <select className="select" value={opts.boardSize} onChange={(e) => { setTouched(true); set({ boardSize: Number(e.target.value) }); }} aria-label="拼豆板大小">
+            <select className="select" value={opts.boardSize} onChange={(e) => { setTouched(true); setAutoPick(null); set({ boardSize: Number(e.target.value) }); }} aria-label="拼豆板大小">
               {[...new Set<number>([...PRINT_BOARD_SIZES, opts.boardSize])].map((s) => <option key={s} value={s}>{boardSizeLabel(s)}</option>)}
             </select>
           </label>
@@ -322,17 +386,31 @@ export default function PrintPattern({ id }: { id: string }) {
           共 {pages} 页{opts.overview ? "（含总览）" : ""}，{plan.boards.length} 块板
           {plan.skippedEmpty.length ? `；空板 ${plan.skippedEmpty.join("、")} 号不打印` : ""}
           {plan.rangeError ? `；${plan.rangeError}` : ""}
-          {small ? "；格子偏小，建议换小一点的板" : ""}
         </p>
+        {autoPick && opts.boardSize === autoPick.to ? (
+          <p className="meta pp-note" role="status" data-print-size-note="auto">
+            “{sizeText(autoPick.from)}”时每格只有 {mmText(autoPick.fromMm)}，印出来{opts.style === "symbol" ? "符号" : "色号"}会看不清，已自动改成 {sizeText(autoPick.to)}（每格 {mmText(autoPick.toMm)}）。想改回可以在上面的“拼豆板大小”里选。
+          </p>
+        ) : sizeFix ? (
+          <p className="meta pp-note" role="status" data-print-size-note="suggest">
+            现在每格只有 {mmText(sizeFix.fromMm)}，印出来{opts.style === "symbol" ? "符号" : "色号"}会看不清。建议改用 {sizeText(sizeFix.size)}（每格 {mmText(sizeFix.cellMm)}）。{" "}
+            <button type="button" className="btn btn-sm" data-print-size-apply onClick={() => { setTouched(true); setAutoPick(null); set({ boardSize: sizeFix.size }); }}>改用 {sizeText(sizeFix.size)}</button>
+          </p>
+        ) : null}
       </div>
 
       <div className="pp-stage" ref={stageRef}>
         <div className="pp-pages" style={{ ["--pw" as string]: `${page.w}mm`, ["--ph" as string]: `${page.h}mm`, ["--pz" as string]: zoom }}>
           {opts.overview ? (
             <LazyPage force={printing} className="pp-page" data-print-page="overview">
-              {() => <OverviewSheet name={pattern.name} matrix={matrix} width={width} height={height} plan={plan} opts={opts} symbols={symbols} />}
+              {() => <OverviewSheet name={pattern.name} matrix={matrix} width={width} height={height} plan={plan} opts={opts} symbols={symbols} legend={legend} />}
             </LazyPage>
           ) : null}
+          {opts.overview ? legend.pages.slice(1).map((items, i) => (
+            <LazyPage key={`legend-${i}`} force={printing} className="pp-page" data-print-page="legend" data-legend-page={i + 2}>
+              {() => <LegendSheet name={pattern.name} page={i + 2} pages={legend.pages.length} items={items} opts={opts} symbols={symbols} cols={legend.cols} />}
+            </LazyPage>
+          )) : null}
           {plan.boards.map((pb) => (
             <LazyPage key={pb.number} force={printing} className="pp-page" data-print-page="board" data-board={pb.number}>
               {() => <BoardSheet name={pattern.name} pb={pb} matrix={matrix} plan={plan} opts={opts} symbols={symbols} />}

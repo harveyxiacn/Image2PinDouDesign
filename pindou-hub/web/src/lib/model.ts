@@ -32,6 +32,8 @@ export type Pattern = {
   colorMatch?: number;
   /** 人工点过“已核对”的时间；空表示未核对。 */
   verifiedAt?: number;
+  /** 识别时图例 / 图上标注的总颗数（保存时记下，快速核对用它和实际用量比；旧图纸没有）。 */
+  statedTotal?: number;
   /** 保存时记录自动检查给出的疑点，便于之后回看。 */
   reviewReasons?: string[];
   /** 快速核对里标“有问题”时留的简短原因（同时给图纸加“待复查”标签）；标为没问题时清除。 */
@@ -56,6 +58,8 @@ export type Pattern = {
 export type WorkEntry = {
   id: string;
   at: number;
+  /** 这条记录建立的时间（毫秒）；用来找出“这次完成”留下的那条。旧记录没有，从 id 里读。 */
+  createdAt?: number;
   /** 完成时的份数，用来算颗数；旧记录没有则按图纸当前份数 */
   copies?: number;
   photoId?: string;
@@ -130,6 +134,8 @@ export type SharedPrefs = {
   sellerId?: string;
   /** 隐藏内置默认卖家（至少还有一个自定义卖家时才生效） */
   sellerDefaultHidden?: boolean;
+  /** 已删除卖家的墓碑（删除时间），按卖家合并时用，见 lib/prefsMerge.ts；过期清理 */
+  sellersDeleted?: Array<{ id: string; at: number }>;
   updatedAt: number;
   deleted?: boolean;
 };
@@ -152,6 +158,8 @@ export type DeviceSettings = {
   cursor: number;
   lastSyncAt: number;
   autoSync: boolean;
+  /** 与 Hub 对账用的标记（见 syncPlan.SyncMark）：Hub 最后一次确认“你已拿到序号 ≤ seq 的变更”时发的口令。老版本忽略。 */
+  syncMark?: { seq: number; token: string };
 };
 
 export const DEFAULT_PREFS: SharedPrefs = {

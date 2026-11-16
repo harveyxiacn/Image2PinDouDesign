@@ -14,7 +14,7 @@ import {
 } from "./model";
 import { isBuildState, mergeBuild, sameBuild, type BuildState } from "./build";
 import { bumpStamp } from "./syncPlan";
-import { mergePrefsOrders, readOrders } from "./orders";
+import { reconcilePrefsRecord } from "./prefsMerge";
 
 const DB_NAME = "pindou-hub";
 const DB_VERSION = 1;
@@ -235,7 +235,7 @@ export async function mergeRemote(changes: Array<{ collection: CollectionName; i
   const tx = db.transaction([...COLLECTIONS], "readwrite");
   let applied = 0;
   const pendingBuild = new Map<string, BuildState>();
-  const pendingOrders = new Map<string, { local: unknown[]; remote: unknown[] }>();
+  const pendingPrefs = new Map<string, object[]>();
   for (const change of changes) {
     if (!COLLECTIONS.includes(change.collection)) continue;
     const map = raw[change.collection] as Map<string, { updatedAt: number }>;
@@ -249,13 +249,12 @@ export async function mergeRemote(changes: Array<{ collection: CollectionName; i
         pendingBuild.set(change.id, mergeBuild(pendingBuild.get(change.id) ?? lb, rb) as BuildState);
       }
     }
-    // 在途订单合并钩子：偏好整条记录仍按后写者胜，但 prefs.orders 按“每张订单后写者胜 + 收货记录取并集”合并，
-    // 避免两台设备各自记了订单 / 到货时，一边的被另一边整条覆盖。
+    // 偏好合并钩子：偏好整条记录仍按后写者胜，但 prefs.orders（每张订单后写者胜 + 收货记录并集）和
+    // prefs.sellers（每个卖家后写者胜 + 删除墓碑）按各自的规则合并；这里只记下两边的来源，决定见 prefsMerge.ts。
     if (change.collection === "prefs" && !change.deleted && local && !(local as { deleted?: boolean }).deleted) {
-      const lo = (local as { orders?: unknown }).orders;
-      const ro = (change.data as { orders?: unknown } | null)?.orders;
-      if (Array.isArray(lo) && lo.length && Array.isArray(ro)) pendingOrders.set(change.id, { local: lo, remote: ro });
-      else if (Array.isArray(lo) && lo.length && local.updatedAt < change.updatedAt) pendingOrders.set(change.id, { local: lo, remote: [] });
+      const list = pendingPrefs.get(change.id) ?? [local as object];
+      if (change.data && typeof change.data === "object") list.push(change.data as object);
+      pendingPrefs.set(change.id, list);
     }
     if (local && local.updatedAt >= change.updatedAt) continue;
     const record = { ...(change.data as object), id: change.id, updatedAt: change.updatedAt, deleted: change.deleted || undefined };
@@ -274,13 +273,13 @@ export async function mergeRemote(changes: Array<{ collection: CollectionName; i
     if (m && !sameBuild(m, cur.build)) rewrite.push({ ...cur, build: m });
   }
   if (rewrite.length) await putRecords("patterns", rewrite);
+  // 偏好：胜出的那条记录若缺少另一边的订单 / 卖家，就当作一次本机修改写回（putRecords 会给它更新的时间戳并进发件箱），让对方也收到
   const prefsRewrite: Array<{ id: string; updatedAt: number }> = [];
-  for (const [id, pending] of pendingOrders) {
-    const cur = (raw.prefs as unknown as Map<string, { id: string; updatedAt: number; deleted?: boolean; orders?: unknown }>).get(id);
+  for (const [id, sources] of pendingPrefs) {
+    const cur = (raw.prefs as unknown as Map<string, { id: string; updatedAt: number; deleted?: boolean }>).get(id);
     if (!cur || cur.deleted) continue;
-    const merged = mergePrefsOrders({ orders: pending.local }, { orders: pending.remote }, Date.now());
-    const mergedAll = mergePrefsOrders({ orders: merged }, { orders: cur.orders }, Date.now());
-    if (JSON.stringify(mergedAll) !== JSON.stringify(readOrders({ orders: cur.orders }))) prefsRewrite.push({ ...cur, orders: mergedAll } as { id: string; updatedAt: number });
+    const next = reconcilePrefsRecord(cur as typeof cur & { orders?: unknown; sellers?: unknown; sellersDeleted?: unknown }, sources, Date.now());
+    if (next) prefsRewrite.push(next);
   }
   if (prefsRewrite.length) await putRecords("prefs", prefsRewrite as never);
   return applied;

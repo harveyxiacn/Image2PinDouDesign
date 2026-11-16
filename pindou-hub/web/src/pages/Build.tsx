@@ -13,6 +13,7 @@ import { Icon, Sheet, navigate, prefersReducedMotion } from "../components/ui";
 import BuildCanvas, { type BuildCanvasApi, type StrokeEvent } from "../components/build/BuildCanvas";
 import { buildKey, isTypingTarget } from "../lib/shortcuts";
 import BoardMap from "../components/build/BoardMap";
+import { accrue, cleanTimeMap, createTracker, currentMs, deviceKey, noteInput, sameTimeMap, setVisible, timeLabel, totalMs, withOwnTime, type TimeMap, type Tracker } from "../lib/buildTime";
 import "./Build.css";
 
 const EMPTY: Matrix = [];
@@ -46,6 +47,24 @@ export default function Build({ id }: { id: string }) {
   const flagsRef = useRef<Uint8Array>(new Uint8Array(0));
   const undoRef = useRef<Undo[]>([]);
   const lastMatrix = useRef<{ matrix: Matrix; width: number; height: number } | null>(null);
+  // ---- 拼装用时：只在页面可见且最近有操作时计时；每台设备只写自己那一项，见 lib/buildTime.ts ----
+  const devKey = useRef(deviceKey(getSnapshot().device.deviceId));
+  const trk = useRef<Tracker>(createTracker(Date.now(), typeof document === "undefined" || document.visibilityState === "visible"));
+  const timeBase = useRef(0); // 本机此前已经记下的毫秒
+  const timeOthers = useRef<TimeMap>({}); // 其他设备记下的
+  const timeWritten = useRef(0);
+  const [, setClock] = useState(0);
+  const ownMs = () => { trk.current = accrue(trk.current, Date.now()); return timeBase.current + trk.current.acc; };
+  const timeMapNow = () => withOwnTime(timeOthers.current, devKey.current, ownMs());
+  const takeTimes = (tm: unknown, reset: boolean) => {
+    const all = cleanTimeMap(tm) ?? {};
+    const { [devKey.current]: own, ...others } = all;
+    timeOthers.current = others;
+    const mine = own ?? 0;
+    if (reset) { timeBase.current = mine; trk.current = { ...accrue(trk.current, Date.now()), acc: 0 }; }
+    else if (mine > ownMs()) timeBase.current = mine - trk.current.acc;
+    timeWritten.current = ownMs();
+  };
 
   // ---- 读取已保存的进度（只在第一次拿到图纸时）；之后图纸被改动则迁移完成标记 ----
   useEffect(() => {
@@ -58,6 +77,7 @@ export default function Build({ id }: { id: string }) {
       const rs = restoreState(saved, boards, size);
       flagsRef.current = flags;
       resetAtRef.current = saved?.resetAt ?? 0;
+      takeTimes(saved?.timeMs, true);
       seenBuild.current = saved;
       lastMatrix.current = { matrix, width, height };
       setBoardSizeState(size);
@@ -104,16 +124,18 @@ export default function Build({ id }: { id: string }) {
   const timer = useRef<number | undefined>(undefined);
   const flush = useCallback(() => {
     window.clearTimeout(timer.current);
-    if (!dirty.current) return;
-    dirty.current = false;
     const l = live.current;
     if (!l.ready) return;
     const p = getSnapshot().patterns.find((x) => x.id === id);
     if (!p || p.deleted) return;
-    const next: BuildState = { boardSize: l.boardSize, board: l.board, colorIndex: l.colorIndex, mode: l.mode, done: encodeDone(l.matrix, flagsRef.current, l.width, l.height), updatedAt: Date.now(), ...(resetAtRef.current > 0 ? { resetAt: resetAtRef.current } : {}) };
+    const tm = timeMapNow();
+    if (!dirty.current && sameTimeMap(tm, p.build?.timeMs)) return;
+    dirty.current = false;
+    const next: BuildState = { boardSize: l.boardSize, board: l.board, colorIndex: l.colorIndex, mode: l.mode, done: encodeDone(l.matrix, flagsRef.current, l.width, l.height), updatedAt: Date.now(), ...(resetAtRef.current > 0 ? { resetAt: resetAtRef.current } : {}), ...(tm ? { timeMs: tm } : {}) };
     const old = p.build;
-    if (!old && next.done === `w${l.width}`) return; // 还没拼过任何格子：不要因为打开页面就改图纸
-    if (old && old.boardSize === next.boardSize && old.board === next.board && old.colorIndex === next.colorIndex && old.mode === next.mode && old.done === next.done && (old.resetAt ?? 0) === (next.resetAt ?? 0)) return;
+    if (!old && next.done === `w${l.width}` && totalMs(tm) < 60_000) return; // 还没拼过任何格子（也没拼满一分钟）：不要因为打开页面就改图纸
+    if (old && old.boardSize === next.boardSize && old.board === next.board && old.colorIndex === next.colorIndex && old.mode === next.mode && old.done === next.done && (old.resetAt ?? 0) === (next.resetAt ?? 0) && sameTimeMap(old.timeMs, next.timeMs)) return;
+    timeWritten.current = ownMs();
     seenBuild.current = next; // 自己写的不用再当作“别的设备的进度”合并回来（否则刚撤销的格子会被并回）
     void putRecords("patterns", [{ ...p, build: next, updatedAt: Math.max(Date.now(), p.updatedAt + 1) }]);
   }, [id]);
@@ -125,6 +147,24 @@ export default function Build({ id }: { id: string }) {
     timer.current = window.setTimeout(() => flushRef.current(), 1500);
   }
   useEffect(() => { if (ready) markDirty(); }, [boardSize, boardIdx, ci, mode, ready]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 计时：有操作就续上；切到后台就停；每 30 秒刷新显示，攒够 2 分钟写一次（离开页面时也会写）
+  useEffect(() => {
+    const onInput = () => { trk.current = noteInput(trk.current, Date.now()); };
+    const onVis = () => { trk.current = setVisible(trk.current, document.visibilityState === "visible", Date.now()); if (document.visibilityState === "hidden") flushRef.current(); };
+    const events = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"] as const;
+    for (const ev of events) window.addEventListener(ev, onInput, { passive: true });
+    document.addEventListener("visibilitychange", onVis);
+    const iv = window.setInterval(() => {
+      if (!live.current.ready) return;
+      if (ownMs() - timeWritten.current >= 120_000) markDirty();
+      setClock((c) => c + 1);
+    }, 30_000);
+    return () => {
+      for (const ev of events) window.removeEventListener(ev, onInput);
+      document.removeEventListener("visibilitychange", onVis);
+      window.clearInterval(iv);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const onHide = () => { if (document.visibilityState === "hidden") flushRef.current(); };
     const onPageHide = () => flushRef.current();
@@ -145,9 +185,11 @@ export default function Build({ id }: { id: string }) {
     seenBuild.current = pb;
     if (!isBuildState(pb)) return;
     const l = live.current;
-    const mine: BuildState = { boardSize: l.boardSize, board: l.board, colorIndex: l.colorIndex, mode: l.mode, done: encodeDone(matrix, flagsRef.current, width, height), updatedAt: Date.now(), ...(resetAtRef.current > 0 ? { resetAt: resetAtRef.current } : {}) };
+    const mt = timeMapNow();
+    const mine: BuildState = { boardSize: l.boardSize, board: l.board, colorIndex: l.colorIndex, mode: l.mode, done: encodeDone(matrix, flagsRef.current, width, height), updatedAt: Date.now(), ...(resetAtRef.current > 0 ? { resetAt: resetAtRef.current } : {}), ...(mt ? { timeMs: mt } : {}) };
     const merged = mergeBuild(mine, pb);
     if (!merged) return;
+    takeTimes(merged.timeMs, (merged.resetAt ?? 0) > resetAtRef.current);
     if (merged.done === mine.done && (merged.resetAt ?? 0) === resetAtRef.current) return;
     flagsRef.current = decodeDone(merged.done, matrix, width, height);
     resetAtRef.current = merged.resetAt ?? 0;
@@ -238,6 +280,10 @@ export default function Build({ id }: { id: string }) {
   const resetAll = () => {
     flagsRef.current = newFlags(width, height);
     resetAtRef.current = Math.max(Date.now(), resetAtRef.current + 1);
+    timeOthers.current = {}; // 清空重来：之前的用时一并作废，重新计
+    timeBase.current = 0;
+    trk.current = { ...accrue(trk.current, Date.now()), acc: 0 };
+    timeWritten.current = 0;
     undoRef.current = [];
     setDismissed(false);
     setConfirmReset(false);
@@ -339,6 +385,7 @@ export default function Build({ id }: { id: string }) {
 
   const hex = cur ? colorOf(cur.code)?.hex ?? "#d4d4d8" : "transparent";
   const colorDone = !!cur && colorProg.total > 0 && colorProg.done >= colorProg.total;
+  const timeText = timeLabel(totalMs(timeOthers.current) + ownMs());
   const R = 17;
   const C = 2 * Math.PI * R;
   const canvasLabel = cur ? `第 ${boardIdx + 1} 板的拼豆图，当前颜色 ${cur.code}，${cur.count} 颗，已拼 ${colorProg.done} 颗` : `第 ${boardIdx + 1} 板没有豆子`;
@@ -371,7 +418,7 @@ export default function Build({ id }: { id: string }) {
       <div className="bd-tools">
         <button type="button" className="btn btn-sm" aria-pressed={mode === "row"} onClick={toggleMode} data-build-mode-toggle title="按行拼（R）" aria-keyshortcuts="R">按行</button>
         <button type="button" className="btn btn-sm" onClick={() => setDragMode((v) => (v === "mark" ? "pan" : "mark"))} data-build-drag-toggle data-build-drag={dragMode} aria-label={dragMode === "mark" ? "单指拖动：连续标记。点一下切换成平移" : "单指拖动：平移。点一下切换成连续标记"} title="单指拖动是连续标记还是平移（双指始终缩放和平移）">{dragMode === "mark" ? "拖动标记" : "拖动平移"}</button>
-        <span className="meta bd-sub" aria-hidden="true">本板 {boardProg.done}/{boardProg.total}</span>
+        <span className="meta bd-sub" aria-hidden="true">本板 {boardProg.done}/{boardProg.total}{timeText ? <span data-build-time title="拼装用时：只算页面在前台、有操作的时间"> · 用时 {timeText}</span> : null}</span>
         <button type="button" className="btn btn-sm" onClick={undo} disabled={!undoRef.current.length} aria-label="撤销上一步" title="撤销上一步（Z）" aria-keyshortcuts="Z Control+Z" data-build-undo>撤销</button>
       </div>
 

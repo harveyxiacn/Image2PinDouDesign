@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  axisLabels, boardLayout, displayBoardCol, displayColumns, heavyBoundaries, overviewLayout, pageCount, parseRange, planPrint, symbolMap, textColorFor
+  MIN_CODE_CELL_MM, SYMBOL_CAPACITY, SYMBOL_FILLS, SYMBOL_MARKS, SYMBOL_SHAPES, axisLabels, boardLayout, cellMmFor, legendCapacity, paginateLegend, suggestBoardSize, symbolSpec, displayBoardCol, displayColumns, heavyBoundaries, overviewLayout, pageCount, parseRange, planPrint, symbolMap, textColorFor
 } from "../lib/printPlan";
 import type { Matrix } from "../lib/matrix";
 
@@ -83,6 +83,24 @@ describe("colour and layout", () => {
     expect(map.get("A1")).not.toBe(map.get("B1"));
     expect(map.size).toBe(2);
   });
+  it("gives every colour a distinct symbol, deterministic per pattern", () => {
+    const totals = Array.from({ length: 240 }, (_, i) => ({ code: `C${i}`, count: 1000 - i }));
+    const a = symbolMap(totals);
+    expect(a.size).toBe(240);
+    const keys = new Set([...a.values()].map((id) => JSON.stringify(symbolSpec(Number(id)))));
+    expect(keys.size).toBe(240);
+    expect(symbolMap(totals)).toEqual(a);
+    // 颗数最多的拿到最清楚的（无角标的实心图形）
+    expect(symbolSpec(Number(a.get("C0")))).toMatchObject({ fill: "solid", mark: 0 });
+  });
+  it("symbol capacity covers a full kit and stops cleanly past it", () => {
+    expect(SYMBOL_CAPACITY).toBe(SYMBOL_SHAPES.length * SYMBOL_FILLS.length * SYMBOL_MARKS.length);
+    expect(SYMBOL_CAPACITY).toBeGreaterThanOrEqual(291);
+    expect(symbolSpec(SYMBOL_CAPACITY)).toBeUndefined();
+    expect(symbolSpec(-1)).toBeUndefined();
+    const over = symbolMap(Array.from({ length: SYMBOL_CAPACITY + 3 }, (_, i) => ({ code: `X${i}`, count: 5 })));
+    expect(over.size).toBe(SYMBOL_CAPACITY);
+  });
   it("fits a 29x29 board on A4 and Letter, both orientations", () => {
     for (const paper of ["a4", "letter"] as const) for (const o of ["portrait", "landscape"] as const) {
       const l = boardLayout(paper, o, 29, 29);
@@ -92,5 +110,70 @@ describe("colour and layout", () => {
       expect(l.side).toBe(o === "landscape");
     }
     expect(overviewLayout("a4", "portrait", 104, 104).gridW).toBeLessThanOrEqual(190);
+  });
+});
+
+describe("legend pagination", () => {
+  const items = (n: number) => Array.from({ length: n }, (_, i) => ({ code: `C${i}`, count: n - i }));
+  it("keeps everything on the overview page when it fits", () => {
+    const cap = legendCapacity("a4", "portrait", 100);
+    expect(cap.first).toBeGreaterThan(30);
+    const pages = paginateLegend(items(20), cap);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toHaveLength(20);
+  });
+  it("continues on following pages without losing or repeating entries", () => {
+    const cap = legendCapacity("a4", "portrait", 156);
+    const all = items(221);
+    const pages = paginateLegend(all, cap);
+    expect(pages.length).toBeGreaterThanOrEqual(2);
+    expect(pages[0].length).toBeLessThanOrEqual(cap.first);
+    for (const p of pages.slice(1)) expect(p.length).toBeLessThanOrEqual(cap.rest);
+    expect(pages.flat().map((c) => c.code)).toEqual(all.map((c) => c.code));
+  });
+  it("a tall drawing leaves no room on page 1: legend starts on the next page", () => {
+    const cap = legendCapacity("a4", "landscape", 400);
+    expect(cap.first).toBe(0);
+    const pages = paginateLegend(items(10), cap);
+    expect(pages[0]).toEqual([]);
+    expect(pages.flat()).toHaveLength(10);
+  });
+  it("capacity rows fit inside the paper", () => {
+    for (const paper of ["a4", "letter"] as const) for (const o of ["portrait", "landscape"] as const) {
+      const g = overviewLayout(paper, o, 104, 104).gridH;
+      const cap = legendCapacity(paper, o, g);
+      expect(cap.cols).toBeGreaterThanOrEqual(1);
+      expect(cap.restRows).toBeGreaterThan(5);
+      expect(g + cap.firstRows * 5.4).toBeLessThan(pageCountH(paper, o));
+    }
+  });
+});
+
+function pageCountH(paper: "a4" | "letter", o: "portrait" | "landscape"): number {
+  const h = paper === "a4" ? 297 : 279.4;
+  const w = paper === "a4" ? 210 : 215.9;
+  return o === "landscape" ? w : h;
+}
+
+describe("small cells: suggest a smaller board", () => {
+  it("whole-image board of a big chart is too small, a smaller board fixes it", () => {
+    expect(cellMmFor("a4", "portrait", 104, 104, 0)).toBeLessThan(MIN_CODE_CELL_MM);
+    const fix = suggestBoardSize("a4", "portrait", 104, 104, 0)!;
+    expect(fix.size).toBeGreaterThan(0);
+    expect(fix.cellMm).toBeGreaterThanOrEqual(MIN_CODE_CELL_MM);
+    expect(fix.fromMm).toBeLessThan(MIN_CODE_CELL_MM);
+    // 挑的是够大的里面最大的那块
+    const bigger = [58, 52, 36, 29, 20, 15].filter((s) => s > fix.size);
+    for (const s of bigger) expect(cellMmFor("a4", "portrait", 104, 104, s)).toBeLessThan(MIN_CODE_CELL_MM);
+  });
+  it("no suggestion when cells are already big enough or the image is small", () => {
+    expect(suggestBoardSize("a4", "portrait", 29, 29, 29)).toBeNull();
+    expect(suggestBoardSize("a4", "portrait", 20, 20, 0)).toBeNull();
+  });
+  it("a smaller threshold (symbols) accepts bigger boards", () => {
+    const code = suggestBoardSize("a4", "portrait", 104, 104, 58);
+    const sym = suggestBoardSize("a4", "portrait", 104, 104, 58, 2.2);
+    expect(code).not.toBeNull();
+    expect(sym).toBeNull();
   });
 });

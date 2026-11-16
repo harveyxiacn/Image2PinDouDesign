@@ -9,7 +9,7 @@ import MatrixView from "../components/pattern/MatrixView";
 import ZoomImage from "../components/pattern/ZoomImage";
 import {
   FLAG_TAG, REASON_MAX, applyFlag, applyOk, currentId, decide, newSession, progress, revertDecision, setOrder, summarize,
-  swipeAxis, swipeDecision, swipeProgress, undo, type Decision, type QueueOrder, type Session
+  swipeAxis, swipeDecision, swipeProgress, totalChecks, undo, type Decision, type QueueOrder, type Session
 } from "../lib/verifyQueue";
 import { loadSession, saveSession } from "../lib/verifySession";
 import "../components/pattern/pattern.css";
@@ -198,6 +198,7 @@ export default function Verify() {
   const entries = Object.entries(pattern.counts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
   const gridTotal = matrix ? matrix.reduce((a, row) => a + row.reduce((b, c) => b + (c ? 1 : 0), 0), 0) : null;
   const gridDiff = gridTotal != null && gridTotal !== total;
+  const stated = totalChecks(total, gridTotal, pattern.statedTotal).stated;
   const showSource = !narrow || pane === "source";
   const showResult = !narrow || pane === "result";
 
@@ -250,6 +251,7 @@ export default function Verify() {
             {pattern.confidence != null ? <span className={`chip ${confClass(pattern.confidence)}`} data-verify-confidence>整体可信度 {Math.round(pattern.confidence * 100)}%</span> : <span className="chip">没有可信度</span>}
             {pattern.colorMatch != null ? <span className="chip">颜色匹配 {Math.round(pattern.colorMatch * 100)}%</span> : null}
             {gridTotal != null ? <span className={`chip ${gridDiff ? "chip-amber" : "chip-leaf"}`} data-verify-gridtotal>格子 {fmt(gridTotal)} 颗{gridDiff ? ` ≠ 用量 ${fmt(total)} 颗` : " = 用量"}</span> : null}
+            {stated ? <span className={`chip ${stated.same ? "chip-leaf" : "chip-amber"}`} data-verify-statedtotal>图上标注 {fmt(stated.value)} 颗{stated.same ? " = 用量" : ` ≠ 用量 ${fmt(total)} 颗`}</span> : null}
             {pattern.tags.includes(FLAG_TAG) ? <span className="chip chip-iron">之前标过{FLAG_TAG}</span> : null}
           </div>
           {pattern.reviewReasons?.length ? (

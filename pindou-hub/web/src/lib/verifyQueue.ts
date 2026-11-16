@@ -70,6 +70,18 @@ export function summarize(items: QueueItem[], s: Session): Summary {
   return { ok: by("ok"), flag: by("flag"), skip: by("skip"), left: pending(items, s).length };
 }
 
+// ---- 总数核对 ----
+
+export type TotalCheck = { value: number; same: boolean };
+/** 用量合计与“格子数”“图上标注总数”的对照；没有的那项为 null（旧图纸没存标注总数，就只比格子数）。 */
+export function totalChecks(used: number, gridTotal: number | null, statedTotal: unknown): { grid: TotalCheck | null; stated: TotalCheck | null } {
+  const stated = typeof statedTotal === "number" && Number.isFinite(statedTotal) && statedTotal > 0 ? Math.round(statedTotal) : null;
+  return {
+    grid: gridTotal == null ? null : { value: gridTotal, same: gridTotal === used },
+    stated: stated == null ? null : { value: stated, same: stated === used }
+  };
+}
+
 // ---- 图纸改动（纯函数，调用方负责写库） ----
 
 export function cleanReason(text: string): string { return text.replace(/\s+/g, " ").trim().slice(0, REASON_MAX); }

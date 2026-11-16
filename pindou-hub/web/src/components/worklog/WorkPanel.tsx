@@ -1,6 +1,7 @@
 // 图纸详情页里的“完工记录”：列出每次完成，可补记、编辑、删除（删除可撤销）。
 import { useState } from "react";
 import { putRecords } from "../../lib/db";
+import { releaseImages } from "../../lib/images";
 import type { Pattern } from "../../lib/model";
 import { dateInputValue, durationLabel, withWorkAdded, withWorkPatch, withWorkRemoved, worksOf } from "../../lib/worklog";
 import { Icon, Sheet, toast, useBlobUrl } from "../ui";
@@ -19,7 +20,10 @@ export function WorkPanel({ pattern }: { pattern: Pattern }) {
   if (!entries.length && pattern.status !== "done") return null;
 
   const stamp = (p: Pattern) => Math.max(Date.now(), p.updatedAt + 1);
-  const undoTo = (before: Pattern) => () => void putRecords("patterns", [{ ...before, updatedAt: Math.max(Date.now(), stamp(before)) + 2 }]);
+  const undoTo = (before: Pattern, drop: Array<string | undefined> = []) => async () => {
+    await putRecords("patterns", [{ ...before, updatedAt: Math.max(Date.now(), stamp(before)) + 2 }]);
+    releaseImages(drop, 0); // 撤销后这次新存的照片没人用了
+  };
 
   const save = async () => {
     if (!editing || busy) return;
@@ -34,12 +38,15 @@ export function WorkPanel({ pattern }: { pattern: Pattern }) {
       // 清空的字段要真的清掉（sanitizeEntry 会丢掉空串、undefined）
       await putRecords("patterns", [next]);
       setEditing(null);
-      toast(photoFailed ? "已保存，但照片没存上" : editing.id ? "完工记录已更新" : "已记下这次完成", { label: "撤销", run: undoTo(before) });
+      const oldPhoto = editing.id ? entries.find((e) => e.id === editing.id)?.photoId : undefined;
+      if (oldPhoto && oldPhoto !== input.photoId) releaseImages([oldPhoto]); // 换掉或去掉的旧照片
+      toast(photoFailed ? "已保存，但照片没存上" : editing.id ? "完工记录已更新" : "已记下这次完成", { label: "撤销", run: undoTo(before, [input.photoId !== oldPhoto ? input.photoId : undefined]) });
     } finally { setBusy(false); }
   };
   const remove = async (id: string) => {
     const before = pattern;
     await putRecords("patterns", [withWorkRemoved(pattern, id)]);
+    releaseImages([entries.find((e) => e.id === id)?.photoId]);
     toast("已删除这条完工记录", { label: "撤销", run: undoTo(before) });
   };
 

@@ -1,7 +1,8 @@
 // 本地图库：图片按内容 SHA-256 存进 IndexedDB，元数据进 images 集合并同步到 Hub。
 import type { PixelSource } from "@engine/types";
-import { getBlob, getSnapshot, putBlob, putRecords } from "./db";
-import type { ImageMeta } from "./model";
+import { exportRecords, getBlob, getSnapshot, putBlob, putRecords, softDelete } from "./db";
+import { unusedImageIds } from "./imageRefs";
+import type { ImageMeta, Pattern } from "./model";
 
 const MAX_STORED_EDGE = 4096;
 const MAX_STORED_BYTES = 6 * 1024 * 1024;
@@ -157,6 +158,24 @@ export async function saveImage(input: Blob, name: string, role: ImageMeta["role
   const meta: ImageMeta = { id, name, mime: blob.type || "image/png", width, height, bytes: blob.size, thumbId: thumbId ?? "", role, createdAt: now, updatedAt: now };
   await putRecords("images", [meta]);
   return meta;
+}
+
+/**
+ * 成品照片不再被任何完工记录/图纸引用时，清掉它的图库记录（图片按内容哈希共用，仍被引用的一律不动）。
+ * 延迟一会儿再检查，给“撤销”留出时间；检查时按最新数据重算，所以撤销之后不会误清。
+ * 只清图库记录（墓碑，随同步传播）；本机的图片数据由整机的存储管理处理，这里不碰。
+ */
+export function releaseImages(ids: Array<string | undefined>, delayMs = 15_000): void {
+  const list = ids.filter((x): x is string => !!x);
+  if (!list.length) return;
+  const run = () => {
+    try {
+      const patterns = exportRecords().filter((r) => r.collection === "patterns").map((r) => r.data as Pattern);
+      const dead = unusedImageIds(list, patterns, getSnapshot().images);
+      if (dead.length) void softDelete("images", dead).catch(() => undefined);
+    } catch { /* 清理失败不影响使用 */ }
+  };
+  if (delayMs <= 0) run(); else setTimeout(run, delayMs);
 }
 
 async function dims(blob: Blob): Promise<{ width: number; height: number }> {

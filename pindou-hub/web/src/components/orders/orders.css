@@ -15,7 +15,7 @@
 .ord-actions .btn { min-height: 36px; }
 .ord-empty { margin: 8px 0 0; }
 .ord-toggle { margin-top: 8px; }
-.ord-edit-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 8px; align-items: center; }
+.ord-edit-row { display: grid; grid-template-columns: minmax(0, 1fr) 88px 96px; gap: 8px; align-items: center; }
 .ord-edit-row .input { width: 100%; text-align: right; }
 @media (pointer: coarse) { .ord-actions .btn, .ord-toggle { min-height: 44px; } }
 
@@ -25,3 +25,9 @@
 .ord-transit input { width: 18px; height: 18px; accent-color: var(--iron); flex: none; }
 @media (pointer: coarse) { .ord-transit label { min-height: 44px; } .ord-transit input { width: 22px; height: 22px; } }
 .shop-transit-tag { display: inline-block; margin-top: 2px; font-size: var(--t-small); color: var(--ink-2); }
+
+/* 总览里的在途订单小卡片 */
+.ord-dash { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 16px; margin-top: 16px; }
+.ord-dash-main { min-width: 0; flex: 1 1 220px; }
+.ord-dash-main b { font-variant-numeric: tabular-nums; }
+.ord-dash .btn { min-height: 44px; }

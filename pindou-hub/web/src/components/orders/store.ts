@@ -6,11 +6,11 @@ import { allocatePrices, parseFen } from "../../lib/pricing";
 import { purchaseTxns } from "../../lib/stockview";
 import {
   applyReceipt, cancelOrder, liveBatchesFor, makeOrder, orderTitle, pruneOrders, readOrders, recordOrder, reopenOrder, revertReceipt,
-  editItems, editMeta, sumCounts, outstandingByCode, type NewOrderInput, type Order
+  editItems, editMeta, sumCounts, outstandingByCode, transitByCode, type NewOrderInput, type Order
 } from "../../lib/orders";
 import { deviceId } from "../stock/actions";
 import { fmt, toast } from "../ui";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 /** 当前订单列表 + 仍然有效的入库批次（给页面渲染用）。 */
 export function useOrders(): { orders: Order[]; live: Set<string> } {
@@ -19,6 +19,20 @@ export function useOrders(): { orders: Order[]; live: Set<string> } {
     const orders = readOrders(prefs);
     return { orders, live: liveBatchesFor(orders, txns) };
   }, [prefs, txns]);
+}
+
+const SUBTRACT_KEY = "ph.shop.subtractTransit";
+
+/**
+ * 在途订单还欠的数量，和“扣掉在途订单”开关（采购清单、采购方案共用，只影响这台设备的显示）。
+ * 开关记在本机 localStorage，不同步；读写失败时本次仍然生效。
+ */
+export function useTransit() {
+  const { orders, live } = useOrders();
+  const transit = useMemo(() => transitByCode(orders, live), [orders, live]);
+  const [subtract, setSubtract] = useState(() => { try { return localStorage.getItem(SUBTRACT_KEY) !== "0"; } catch { return true; } });
+  const pickSubtract = (on: boolean) => { setSubtract(on); try { localStorage.setItem(SUBTRACT_KEY, on ? "1" : "0"); } catch { /* 本次仍然生效 */ } };
+  return { orders, live, transit, transitTotal: sumCounts(transit), subtract, pickSubtract };
 }
 
 /** 读取最新订单，用 fn 改写，清理后写回偏好。旧版 lastOrder 在这里一并折进 orders（并标记已迁移）。 */

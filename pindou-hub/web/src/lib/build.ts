@@ -1,6 +1,7 @@
 // 拼装模式的纯逻辑：分板、板内按色统计、完成标记的紧凑编码、进度与“下一步”状态机、按行游程。
 // 不依赖 React / DOM，方便单测。坐标一律用整张图的坐标；格子下标 = y * width + x。
 import type { Matrix } from "./matrix";
+import { cleanTimeMap, mergeTimeMaps, sameTimeMap, type TimeMap } from "./buildTime";
 
 export type BuildMode = "color" | "row";
 
@@ -14,6 +15,8 @@ export type BuildState = {
   updatedAt: number;
   /** 最近一次“清空重来”的时间（毫秒）。没有就是没清空过。合并时清空之前的进度一律作废，见 mergeBuild。 */
   resetAt?: number;
+  /** 拼装用时：{ 设备短码: 该设备累计毫秒 }，合并时按设备取较大值再相加，见 lib/buildTime.ts。旧版本设备会忽略它。 */
+  timeMs?: TimeMap;
 };
 
 export const BOARD_SIZES = [29, 52, 58, 0] as const;
@@ -375,6 +378,7 @@ export function mergeBuild(a: BuildState | undefined, b: BuildState | undefined)
   const pool = sources.length ? sources : [newerOf(a, b)];
   const newest = pool.reduce(newerOf);
   let done = newest.done;
+  const timeMs = pool.length === 2 ? mergeTimeMaps(pool[0].timeMs, pool[1].timeMs) : cleanTimeMap(newest.timeMs);
   if (pool.length === 2) {
     const u = unionDone(pool[0].done, pool[1].done);
     done = u ?? newest.done;
@@ -386,6 +390,7 @@ export function mergeBuild(a: BuildState | undefined, b: BuildState | undefined)
     done, updatedAt: Math.max(a.updatedAt, b.updatedAt)
   };
   if (reset > 0) out.resetAt = reset;
+  if (timeMs) out.timeMs = timeMs;
   return out;
 }
 
@@ -393,7 +398,7 @@ export function mergeBuild(a: BuildState | undefined, b: BuildState | undefined)
 export function sameBuild(a: BuildState | undefined, b: BuildState | undefined): boolean {
   if (!a || !b) return a === b;
   return a.boardSize === b.boardSize && a.board === b.board && a.colorIndex === b.colorIndex && a.mode === b.mode
-    && (a.resetAt ?? 0) === (b.resetAt ?? 0) && normalizeDone(a.done) === normalizeDone(b.done);
+    && (a.resetAt ?? 0) === (b.resetAt ?? 0) && normalizeDone(a.done) === normalizeDone(b.done) && sameTimeMap(a.timeMs, b.timeMs);
 }
 
 // ---------- 拖动连续标记 ----------

@@ -144,6 +144,16 @@ export function orderTotals(order: Order, live?: LiveBatches): OrderTotals {
   };
 }
 
+/** 在途订单概况（总览卡片用）：几张、还差多少颗、最早的一张下单几天了。 */
+export function openOrderSummary(orders: Order[], now: number, live?: LiveBatches): { count: number; leftBeads: number; oldestDays: number } {
+  const open = orders.filter((o) => isOpen(statusOf(o, live)));
+  return {
+    count: open.length,
+    leftBeads: open.reduce((a, o) => a + sumCounts(outstandingByCode(o, live)), 0),
+    oldestDays: open.reduce((a, o) => Math.max(a, ageDays(o, now)), 0)
+  };
+}
+
 /** 下单多少天了。 */
 export function ageDays(order: Order, now: number): number {
   return Math.max(0, Math.floor((now - order.at) / DAY));
@@ -412,15 +422,45 @@ export function mergeOrders(a: Order[] | undefined, b: Order[] | undefined): Ord
   for (const o of [...(a ?? []), ...(b ?? [])]) {
     const cur = byId.get(o.id);
     if (!cur) { byId.set(o.id, o); continue; }
-    const [win, lose] = o.updatedAt > cur.updatedAt ? [o, cur] : [cur, o];
+    // updatedAt 相同时按内容定胜负，保证 mergeOrders(a, b) 与 mergeOrders(b, a) 结果一样
+    const oWins = o.updatedAt !== cur.updatedAt ? o.updatedAt > cur.updatedAt : stableStringify(o) > stableStringify(cur);
+    const [win, lose] = oWins ? [o, cur] : [cur, o];
     const receipts = new Map<string, OrderReceipt>();
     for (const r of [...(lose.receipts ?? []), ...(win.receipts ?? [])]) receipts.set(r.batchId, r);
     const merged: Order = { ...win };
-    if (receipts.size) merged.receipts = [...receipts.values()].sort((x, y) => x.at - y.at); else delete merged.receipts;
+    if (receipts.size) merged.receipts = [...receipts.values()].sort((x, y) => x.at - y.at || (x.batchId < y.batchId ? -1 : x.batchId > y.batchId ? 1 : 0)); else delete merged.receipts;
     merged.status = statusOf(merged);
     byId.set(o.id, merged);
   }
   return [...byId.values()].sort((x, y) => y.at - x.at || (x.id < y.id ? -1 : 1));
+}
+
+/** 键顺序无关的 JSON 文本，用来比较两份数据“内容是否一样”。undefined 的键当作不存在。 */
+export function stableStringify(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(o[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(v) ?? "null";
+}
+
+/**
+ * 同步合并钩子的决定：保留下来的那条偏好记录 kept，和另外几份来源 others（本机原来的 / 远端来的）里的订单，
+ * 合并后与 kept 里的订单不同，就返回要写回的订单列表（调用方把它当一次本机修改写回，让对方也收到）；一样就返回 null。
+ * - 合并 = 每张订单后写者胜 + 收货记录并集，与来源顺序无关（可交换）、重复执行结果不变（幂等）。
+ * - 旧版本设备保存的偏好没有 orders 字段时，others 里的订单会被补回来。
+ * - 只有“清理掉过期的已结束订单”造成的差别不算差别（不写回），避免两台设备时钟差一点就来回改写。
+ * - 写回的结果再和同一批来源合并仍是它自己，所以两台设备最多多交换一轮就收敛。
+ */
+export function reconcileOrders(kept: { orders?: unknown } | undefined, others: Array<{ orders?: unknown } | undefined>, now: number): Order[] | null {
+  const own = readOrders({ orders: kept?.orders });
+  let full = own;
+  for (const o of others) full = mergeOrders(full, readOrders({ orders: o?.orders }));
+  const same = (x: Order[], y: Order[]) => stableStringify(x) === stableStringify(y);
+  if (same(full, own)) return null;
+  const result = pruneOrders(full, now);
+  return same(result, own) ? null : result;
 }
 
 /** 偏好记录合并用：本地与远端 prefs.orders 的并集（原始数据先规整）。 */

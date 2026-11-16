@@ -16,7 +16,8 @@ import { matrixOf } from "../lib/matrix";
 import { parseTags } from "../components/pattern/SaveForm";
 import { WorkFields, draftToInput, newDraft, type WorkDraft } from "../components/worklog/WorkFields";
 import { WorkPanel } from "../components/worklog/WorkPanel";
-import { completedPattern } from "../lib/worklog";
+import { completedPattern, withCompletionUndone } from "../lib/worklog";
+import { releaseImages } from "../lib/images";
 import "../components/pattern/pattern.css";
 import "./PatternDetail.css";
 
@@ -128,7 +129,13 @@ export default function PatternDetail({ id }: { id: string }) {
     if (s === "done") { setConfirm(true); return; }
     if (pattern.status === "done" && reopenPlan.ask) { setReopen(s); return; }
     // 没扣过库存的完成（或扣的记录已找不到）：直接改状态；若带着“已扣库存”标记则一并清掉
-    void putRecords("patterns", [pattern.status === "done" ? reopenedPattern(pattern, s) : { ...pattern, status: s, updatedAt: Math.max(Date.now(), pattern.updatedAt + 1) }]);
+    if (pattern.status !== "done") { void putRecords("patterns", [{ ...pattern, status: s, updatedAt: Math.max(Date.now(), pattern.updatedAt + 1) }]); return; }
+    // 刚刚才标记完成、记录还是空白的，多半是点错了：把那条空记录一起撤掉（可撤销）；有照片/备注的真实记录不动
+    const before = pattern;
+    const at = Date.now();
+    const { pattern: cleaned, removed } = withCompletionUndone(pattern, at, { onlyBlankWithin: 30 * 60_000 });
+    void putRecords("patterns", [reopenedPattern(cleaned, s, at)]);
+    if (removed) toast(`已改回${STATUS_LABEL[s]}，刚才那条空白的完工记录也撤掉了`, { label: "撤销", run: () => void putRecords("patterns", [{ ...before, updatedAt: Date.now() + 2 }]) });
   };
 
   /** 重新打开已完成的图纸。refund = 把当初扣的豆子用新的“调整”流水放回库存；否则库存保持不变。 */
@@ -138,9 +145,13 @@ export default function PatternDetail({ id }: { id: string }) {
     const at = Date.now();
     const refunds = refund ? refundTxns(reopenPlan.originals, pattern, STATUS_LABEL[s], data.device.deviceId, at) : [];
     if (refunds.length) await putRecords("txns", refunds);
-    await putRecords("patterns", [reopenedPattern(pattern, s, at)]);
+    // 选“放回库存”= 当初点错了：这次完成留下的完工记录一并撤掉；选“保持已扣除”= 做成了，记录留着
+    const { pattern: cleaned, removed } = refund ? withCompletionUndone(pattern, at) : { pattern, removed: undefined };
+    await putRecords("patterns", [reopenedPattern(cleaned, s, at)]);
+    releaseImages([removed?.photoId]);
     const back = refunds.reduce((a, t) => a + t.delta, 0);
-    toast(back > 0 ? `已改回${STATUS_LABEL[s]}，${fmt(back)} 颗豆子放回了库存` : `已改回${STATUS_LABEL[s]}，库存保持已扣除`, {
+    const tail = removed ? "，这次的完工记录也撤掉了" : "";
+    toast(back > 0 ? `已改回${STATUS_LABEL[s]}，${fmt(back)} 颗豆子放回了库存${tail}` : `已改回${STATUS_LABEL[s]}，库存保持已扣除${tail}`, {
       label: "撤销",
       run: async () => {
         if (refunds.length) await softDelete("txns", refunds.map((t) => t.id));
@@ -167,11 +178,12 @@ export default function PatternDetail({ id }: { id: string }) {
         run: async () => {
           await softDelete("txns", txns.map((t) => t.id));
           await putRecords("patterns", [{ ...before, updatedAt: Date.now() }]);
+          releaseImages([input.input.photoId], 0); // 撤销后这次新存的成品照片没人用了
         }
       });
     } else {
       await finish(pattern);
-      toast("已标记完成", { label: "撤销", run: () => void putRecords("patterns", [{ ...before, updatedAt: Date.now() }]) });
+      toast("已标记完成", { label: "撤销", run: async () => { await putRecords("patterns", [{ ...before, updatedAt: Date.now() }]); releaseImages([input.input.photoId], 0); } });
     }
   };
 

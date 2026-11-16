@@ -12,7 +12,7 @@ export function cleanCounts(counts: Counts): Counts {
 export async function createPattern(values: SaveValues, extra: {
   kind: PatternKind; method: CountMethod; counts: Counts; imageId?: string; previewId?: string;
   width?: number; height?: number; matrix?: Pattern["matrix"]; confidence?: number; colorMatch?: number;
-  reviewReasons?: string[]; verifiedAt?: number;
+  reviewReasons?: string[]; verifiedAt?: number; statedTotal?: number;
 }): Promise<Pattern> {
   const now = Date.now();
   const pattern: Pattern = {
@@ -20,7 +20,7 @@ export async function createPattern(values: SaveValues, extra: {
     imageId: extra.imageId, previewId: extra.previewId, width: extra.width, height: extra.height,
     matrixRle: extra.matrix?.length ? encodeMatrix(extra.matrix) : undefined,
     counts: cleanCounts(extra.counts), confidence: extra.confidence, colorMatch: extra.colorMatch,
-    reviewReasons: extra.reviewReasons, verifiedAt: extra.verifiedAt,
+    reviewReasons: extra.reviewReasons, verifiedAt: extra.verifiedAt, statedTotal: extra.statedTotal,
     status: values.status, copies: values.copies, tags: values.tags, notes: "", createdAt: now, updatedAt: now
   };
   await putRecords("patterns", [pattern]);

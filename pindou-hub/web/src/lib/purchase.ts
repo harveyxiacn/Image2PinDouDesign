@@ -601,6 +601,8 @@ export type SellerQuote = {
   total: number;
   /** 买不了的色号（没有可用的包）；非空表示这个卖家供不齐 */
   unfulfilled: string[];
+  /** 需求特别大、包规格又多，单色组合的搜索被收窄过的色号：这些色号的结果不保证是最省的 */
+  narrowed?: string[];
 };
 
 /** 同一份采购清单在各个卖家那里的最低总价，从低到高；供不齐的排在后面。 */
@@ -609,7 +611,8 @@ export function compareSellers(need: Counts, demand: Counts, sellers: Seller[], 
     const plans = buildPurchasePlans(need, demand, price1200, prefer, seller);
     const best = plans.find((p) => p.cheapest) ?? plans[0];
     const recommended = plans.find((p) => p.recommended) ?? best;
-    return { seller, best, recommended, total: best.totalCost, unfulfilled: best.unfulfilled ?? [] };
+    const narrowed = narrowedCodes(need, seller);
+    return { seller, best, recommended, total: best.totalCost, unfulfilled: best.unfulfilled ?? [], ...(narrowed.length ? { narrowed } : {}) };
   });
   return quotes.sort((a, b) => (a.unfulfilled.length - b.unfulfilled.length) || (a.total - b.total) || a.seller.name.localeCompare(b.seller.name));
 }
@@ -718,6 +721,61 @@ export function estimateCostForRows(rows: Array<{ code: string; qty: number }>, 
   for (const ls of fixed) for (const l of ls) merged.set(l.id, { ...l, n: (merged.get(l.id)?.n ?? 0) + l.n });
   const lines = [...merged.values()].filter((l) => l.n > 0).sort((a, b) => b.beads - a.beads);
   return { cost: linesCost(lines), beads: linesBeads(lines), packs: countsOfLines(lines), lines };
+}
+
+// ---------- 任意规格的包数文字 / 运费说明 / 搜索收窄提示（采购清单、采购方案共用） ----------
+
+/** “2×4000 + 3×1200”；没有包返回“—”。规格从大到小，默认卖家的文字与 formatPacks 完全一样。 */
+export function formatPackLines(lines: PackLine[]): string {
+  const parts = [...lines].filter((l) => l.n > 0).sort((a, b) => b.beads - a.beads || a.price - b.price).map((l) => `${l.n}×${l.beads}`);
+  return parts.length ? parts.join(" + ") : "—";
+}
+
+/** 把几组包数按（规格 + 价格）加起来，从大到小。 */
+export function mergePackLines(...lists: PackLine[][]): PackLine[] {
+  const merged = new Map<string, PackLine>();
+  for (const list of lists) for (const l of list) {
+    const key = `${l.id}|${l.beads}|${l.price}`;
+    const cur = merged.get(key);
+    merged.set(key, cur ? { ...cur, n: cur.n + l.n } : { ...l });
+  }
+  return [...merged.values()].filter((l) => l.n > 0).sort((a, b) => b.beads - a.beads || a.price - b.price);
+}
+
+/** 一个方案里所有色号补充包的包数（任意规格）。 */
+export function planPackLines(plan: Pick<PurchasePlan, "items">): PackLine[] {
+  return mergePackLines(...plan.items.map((i) => i.lines ?? []));
+}
+
+/** 方案的补充包文字；旧数据没有 lines 时退回 4000/1200/500 三格。 */
+export function formatPlanPacks(plan: Pick<PurchasePlan, "items" | "packs">): string {
+  const lines = planPackLines(plan);
+  return lines.length ? formatPackLines(lines) : formatPacks(plan.packs);
+}
+
+export type ShipNote = { shipping: number; gap: number; total: number; text: string };
+/** 商品金额 goods 在这个卖家下的运费、还差多少包邮、总价和一句说明（没有运费也没有门槛时 text 为空）。 */
+export function shipNote(seller: Pick<Seller, "shipping" | "freeShipping">, goods: number): ShipNote {
+  const shipping = shippingFor(seller, goods);
+  const gap = freeShippingGap(seller, goods);
+  let text = "";
+  if (shipping > 0) text = `运费 ${formatMoney(shipping)}${gap > 0 ? `，再买 ${formatMoney(gap)} 包邮` : ""}`;
+  else if (seller.shipping > 0 && goods > 0) text = "已达包邮门槛，不收运费";
+  return { shipping, gap, total: Math.round((goods + shipping) * 100) / 100, text };
+}
+
+/** 这个色号的单色组合搜索会不会被收窄（需求特别大、包规格多时）；收窄后结果不保证最省。 */
+export function searchNarrowed(x: number, code: string, offers: SellerPack[]): boolean {
+  const need = Math.max(0, Math.round(Number.isFinite(x) ? x : 0));
+  const list = sortOffers(offers.filter((o) => o.scope !== "A-M" || isAM(code)));
+  if (need <= 0 || list.length < 2) return false;
+  let combos = 1;
+  for (let i = 0; i < list.length - 1; i++) combos *= Math.ceil(need / list[i].beads) + 1;
+  return combos > COMBO_LIMIT;
+}
+
+export function narrowedCodes(need: Counts, seller: Pick<Seller, "packs">): string[] {
+  return Object.keys(need).filter((code) => searchNarrowed(need[code] ?? 0, code, seller.packs)).sort(compareCodes);
 }
 
 /** 下单快照在多少天内默认用于入库。 */

@@ -1,6 +1,7 @@
 // 完工记录的纯逻辑：条目增删、作品集清单、汇总、分组筛选，以及“真实完成日期优先、旧记录按扣库存估算”的月度完成数。
 // 不碰存储、不依赖 React，时钟与 id 都可注入，便于单元测试。
 import { refundedIds } from "./inventory";
+import { totalMs } from "./buildTime";
 import { totalOf, uid, type Pattern, type Txn, type WorkEntry } from "./model";
 
 // ---------- 条目 ----------
@@ -18,6 +19,7 @@ export function sanitizeEntry(e: unknown): WorkEntry | null {
   const at = typeof r.at === "number" && Number.isFinite(r.at) && r.at > 0 ? r.at : 0;
   if (!at || typeof r.id !== "string" || !r.id) return null;
   const out: WorkEntry = { id: r.id, at };
+  if (typeof r.createdAt === "number" && Number.isFinite(r.createdAt) && r.createdAt > 0) out.createdAt = r.createdAt;
   if (typeof r.copies === "number" && r.copies >= 1) out.copies = Math.min(99, Math.round(r.copies));
   if (typeof r.photoId === "string" && r.photoId) out.photoId = r.photoId;
   const note = clean(typeof r.note === "string" ? r.note : undefined, 500);
@@ -39,10 +41,12 @@ export function worksOf(p: Pick<Pattern, "works">): WorkEntry[] {
   return list.sort((a, b) => b.at - a.at);
 }
 
-/** 拼装模式如果记录了用时（毫秒）就读出来；字段由拼装模式那边决定，这里只做宽松读取。 */
+/** 拼装模式记录的用时（毫秒）：各设备的累计相加（timeMs）；也宽松地读更早约定的 activeMs / elapsedMs / durationMs。 */
 export function buildDurationMs(build: unknown): number | undefined {
   if (!build || typeof build !== "object") return undefined;
   const b = build as Record<string, unknown>;
+  const sum = totalMs(b.timeMs);
+  if (sum > 0) return sum;
   for (const k of ["activeMs", "elapsedMs", "durationMs"]) {
     const v = b[k];
     if (typeof v === "number" && Number.isFinite(v) && v > 0) return Math.round(v);
@@ -62,15 +66,15 @@ function stamp(p: Pattern, now: number): number {
   return Math.max(now, p.updatedAt + 1);
 }
 
-export function newEntry(input: WorkInput, copies: number, id = uid("w")): WorkEntry {
-  const e = sanitizeEntry({ ...input, id, copies: Math.max(1, copies || 1) });
+export function newEntry(input: WorkInput, copies: number, id = uid("w"), createdAt?: number): WorkEntry {
+  const e = sanitizeEntry({ ...input, id, copies: Math.max(1, copies || 1), createdAt });
   return e ?? { id, at: 1 };
 }
 
 /** 标记完成并追加一条完工记录（已完成的再完成一次，也是追加）。 */
 export function completedPattern(p: Pattern, input: WorkInput, opts: { id?: string; now?: number } = {}): Pattern {
   const now = opts.now ?? Date.now();
-  const entry = newEntry(input, p.copies, opts.id);
+  const entry = newEntry(input, p.copies, opts.id, now);
   return { ...p, status: "done", works: [...worksOf(p), entry], updatedAt: stamp(p, now) };
 }
 
@@ -81,12 +85,47 @@ export function withWorkPatch(p: Pattern, entryId: string, patch: Partial<Omit<W
 
 /** 补一条记录（旧的已完成图纸没有记录时用），不改状态。 */
 export function withWorkAdded(p: Pattern, input: WorkInput, opts: { id?: string; now?: number } = {}): Pattern {
-  return { ...p, works: [...worksOf(p), newEntry(input, p.copies, opts.id)], updatedAt: stamp(p, opts.now ?? Date.now()) };
+  const now = opts.now ?? Date.now();
+  return { ...p, works: [...worksOf(p), newEntry(input, p.copies, opts.id, now)], updatedAt: stamp(p, now) };
 }
 
 export function withWorkRemoved(p: Pattern, entryId: string, now = Date.now()): Pattern {
   const list = worksOf(p).filter((e) => e.id !== entryId);
   return { ...p, works: list.length ? list : undefined, updatedAt: stamp(p, now) };
+}
+
+/** 这条记录是什么时候建的：优先 createdAt；旧记录从 id 里的时间戳读；都没有就用完成日期。 */
+export function entryCreatedAt(e: WorkEntry): number {
+  if (e.createdAt) return e.createdAt;
+  const m = /^w([0-9a-z]{8})[0-9a-z]{12}$/.exec(e.id);
+  if (m) {
+    const t = parseInt(m[1], 36);
+    if (t > 946_684_800_000 && t < 4_102_444_800_000) return t;
+  }
+  return e.at;
+}
+
+/** 最近建的一条（“这次完成”留下的那条）。 */
+export function lastCompletionEntry(p: Pick<Pattern, "works">): WorkEntry | undefined {
+  let best: WorkEntry | undefined;
+  for (const e of worksOf(p)) if (!best || entryCreatedAt(e) > entryCreatedAt(best) || (entryCreatedAt(e) === entryCreatedAt(best) && e.at > best.at)) best = e;
+  return best;
+}
+
+/** 只有日期、没有照片/备注/评分/标签/用时的记录。 */
+export function isBlankEntry(e: WorkEntry): boolean {
+  return !e.photoId && !e.note && !e.rating && !e.tag && !e.durationMs;
+}
+
+/**
+ * “标记完成是点错了”：撤掉最近那次完成留下的记录。onlyBlankWithin 给出时，只在记录还是空白、且是不久前建的才撤
+ * （没扣库存、没问用户的情形，避免误删真实记录）。返回新图纸和被撤掉的记录；没有可撤的就原样返回。
+ */
+export function withCompletionUndone(p: Pattern, now: number, opts: { onlyBlankWithin?: number } = {}): { pattern: Pattern; removed?: WorkEntry } {
+  const e = lastCompletionEntry(p);
+  if (!e) return { pattern: p };
+  if (opts.onlyBlankWithin != null && !(isBlankEntry(e) && now - entryCreatedAt(e) <= opts.onlyBlankWithin && now >= entryCreatedAt(e))) return { pattern: p };
+  return { pattern: withWorkRemoved(p, e.id, now), removed: e };
 }
 
 // ---------- 日期输入 ----------

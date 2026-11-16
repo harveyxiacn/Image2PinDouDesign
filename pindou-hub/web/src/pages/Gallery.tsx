@@ -10,6 +10,7 @@ import { bulkAddTag, bulkDelete, bulkSetStatus, bulkSetVerified, reopenSummary, 
 import { useFlip } from "../components/stock/useFlip";
 import PatternCard from "../components/pattern/PatternCard";
 import { startVerify } from "../lib/verifySession";
+import { FLAG_TAG } from "../lib/verifyQueue";
 import "../components/pattern/pattern.css";
 import "./Gallery.css";
 
@@ -123,6 +124,7 @@ export default function Gallery() {
   const changeView = (v: "grid" | "tag") => { setView(v); remember(tag, v); };
 
   const tags = useMemo(() => Array.from(new Set(data.patterns.filter((p) => !p.deleted).flatMap((p) => p.tags))).sort(), [data.patterns]);
+  const flaggedCount = useMemo(() => data.patterns.filter((p) => !p.deleted && p.tags.includes(FLAG_TAG)).length, [data.patterns]);
   const unverifiedCount = useMemo(() => data.patterns.filter((p) => !p.deleted && p.verifiedAt == null).length, [data.patterns]);
   const patterns = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -204,6 +206,7 @@ export default function Gallery() {
               <Icon name="check" />快速核对 {verifyN} 张
             </button>
           ) : null}
+          <a className="btn" href="#/works" data-gallery-works>作品集</a>
           <a className="btn btn-iron" href="#/add"><Icon name="plus" />添加</a>
         </div>
       </div>
@@ -240,6 +243,9 @@ export default function Gallery() {
                 <option value="unverified">未核对 {unverifiedCount}</option>
                 <option value="verified">已核对</option>
               </select>
+              {flaggedCount > 0 || tag === FLAG_TAG ? (
+                <button type="button" className="btn" aria-pressed={tag === FLAG_TAG} data-gallery-flagged onClick={() => changeTag(tag === FLAG_TAG ? "" : FLAG_TAG)} title="快速核对时标过“有问题”的图纸">{FLAG_TAG} {flaggedCount}</button>
+              ) : null}
               {tags.length ? (
                 <select className="select" value={tag} onChange={(e) => changeTag(e.target.value)} aria-label="标签">
                   <option value="">全部标签</option>

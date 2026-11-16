@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FLAG_TAG, applyFlag, applyOk, currentId, decide, newSession, orderQueue, parseSession, pending, progress, revertDecision, serializeSession, setOrder, summarize, swipeAxis, swipeDecision, swipeProgress, undo, type QueueItem } from "./verifyQueue";
+import { FLAG_TAG, applyFlag, applyOk, currentId, decide, newSession, orderQueue, parseSession, pending, progress, revertDecision, serializeSession, setOrder, summarize, swipeAxis, swipeDecision, swipeProgress, totalChecks, undo, type QueueItem } from "./verifyQueue";
 import type { Pattern } from "./model";
 
 const it_ = (id: string, confidence: number | undefined, createdAt: number, verifiedAt?: number, deleted?: boolean): QueueItem => ({ id, confidence, createdAt, verifiedAt, deleted });
@@ -99,5 +99,17 @@ describe("resume", () => {
   it("a resumed session continues where it left off", () => {
     const s = parseSession(serializeSession(decide(newSession(), "c", "skip")))!;
     expect(currentId(items, s)).toBe("b");
+  });
+});
+
+describe("totalChecks", () => {
+  it("compares the used total with the grid and the stated total", () => {
+    expect(totalChecks(100, 100, 100)).toEqual({ grid: { value: 100, same: true }, stated: { value: 100, same: true } });
+    expect(totalChecks(100, 98, 104)).toEqual({ grid: { value: 98, same: false }, stated: { value: 104, same: false } });
+  });
+  it("older patterns have no stated total: only the grid is compared", () => {
+    expect(totalChecks(100, 100, undefined)).toEqual({ grid: { value: 100, same: true }, stated: null });
+    expect(totalChecks(100, null, 0).stated).toBeNull();
+    expect(totalChecks(100, null, "x").grid).toBeNull();
   });
 });

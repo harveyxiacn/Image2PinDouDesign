@@ -2,7 +2,8 @@
 .pp-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px 16px; align-items: end; }
 .pp-check { display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: var(--t-body); cursor: pointer; }
 .pp-check input { width: 18px; height: 18px; accent-color: var(--iron); }
-.pp-summary { margin: 10px 0 16px; }
+.pp-summary { margin: 10px 0 6px; }
+.pp-note { margin: 0 0 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .pp-empty { margin-top: 24px; }
 .pp-none { padding: 24px 0; }
 
@@ -32,6 +33,7 @@
 .pp-counts, .pp-legend .pp-counts { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(26mm, 1fr)); gap: 1mm 3mm; }
 .pp-legend .pp-counts { grid-template-columns: repeat(auto-fill, minmax(44mm, 1fr)); }
 .pp-counts li { display: flex; align-items: center; gap: 1.5mm; min-width: 0; font-size: 3.1mm; break-inside: avoid; }
+.pp-sym { flex: none; display: block; }
 .pp-sw { flex: none; width: 4mm; height: 4mm; border: 0.2mm solid #000; border-radius: 0.6mm; }
 .pp-code { font-family: var(--font-code); }
 .pp-name { color: #444; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

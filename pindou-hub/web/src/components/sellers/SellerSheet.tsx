@@ -17,7 +17,7 @@ export async function saveSellerPatch(make: (prefs: SharedPrefs) => SellerPatch)
     const prefs = getSnapshot().prefs;
     const patch = make(prefs);
     const next: SharedPrefs = { ...prefs, ...patch, updatedAt: nextStamp(prefs.updatedAt) };
-    for (const key of ["sellers", "sellerId", "sellerDefaultHidden"] as const) if (patch[key] === undefined) delete next[key];
+    for (const key of ["sellers", "sellerId", "sellerDefaultHidden", "sellersDeleted"] as const) if (patch[key] === undefined) delete next[key];
     await putRecords("prefs", [next]);
     return true;
   } catch {

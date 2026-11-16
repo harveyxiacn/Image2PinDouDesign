@@ -3,7 +3,8 @@ import { getSnapshot, putRecords, softDelete } from "../../lib/db";
 import { planReopen, refundTxns, reopenedPattern } from "../../lib/inventory";
 import { STATUS_LABEL, type Pattern, type PatternStatus, type Txn } from "../../lib/model";
 import { withStatus, withTag } from "../../lib/stockview";
-import { completedPattern } from "../../lib/worklog";
+import { completedPattern, withCompletionUndone } from "../../lib/worklog";
+import { releaseImages } from "../../lib/images";
 import { toast } from "../ui";
 import { fmt } from "../ui";
 
@@ -48,15 +49,21 @@ export async function bulkSetStatus(ids: string[], status: PatternStatus, what =
   const snap = getSnapshot();
   const now = Date.now();
   const refunds: Txn[] = [];
+  const released: Array<string | undefined> = [];
   const next = originals.map((p) => {
     // 批量标记完成：记一条今天的完工记录（可以之后在图纸详情里补照片和备注）
     if (status === "done") return completedPattern(p, { at: now }, { now });
     if (p.status !== "done") return withStatus(p, status);
-    if (choice === "refund") refunds.push(...refundTxns(planReopen(p, snap.txns).originals, p, STATUS_LABEL[status], snap.device.deviceId, now));
-    return reopenedPattern(p, status, now);
+    const plan = planReopen(p, snap.txns);
+    if (choice === "refund") refunds.push(...refundTxns(plan.originals, p, STATUS_LABEL[status], snap.device.deviceId, now));
+    // 选“放回库存”= 点错了：这次完成留下的完工记录一并撤掉（没扣过库存的，只撤刚建不久的空白记录）；“保持已扣除”不动记录
+    const cleaned = choice === "refund" ? withCompletionUndone(p, now, plan.ask ? {} : { onlyBlankWithin: 30 * 60_000 }) : { pattern: p, removed: undefined };
+    released.push(cleaned.removed?.photoId);
+    return reopenedPattern(cleaned.pattern, status, now);
   });
   if (refunds.length) await putRecords("txns", refunds);
   await putRecords("patterns", next);
+  releaseImages(released);
   const back = refunds.reduce((a, t) => a + t.delta, 0);
   const m = `${what}${originals.length} 张图纸已设为${STATUS_LABEL[status]}${back > 0 ? `，${fmt(back)} 颗豆子已放回库存` : ""}`;
   toast(m, { label: "撤销", run: () => {

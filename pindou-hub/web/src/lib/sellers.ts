@@ -1,8 +1,9 @@
 // 卖家资料：每个卖家有自己的包规格/价格、套装、运费和包邮门槛。
 // 内置的“默认报价”就是用户 2026-11-06 确认的那份报价，数字不变；自定义卖家只存在共享偏好里
 // （prefs.sellers / prefs.sellerId），随偏好一起同步，不新增同步集合。
-// 并发编辑：偏好整条记录“后写者胜”（与其他偏好一致）。保存时总是基于本机当下最新的偏好改，
-// 所以只会在“两台设备在同一次同步间隔里都改了卖家”时丢掉先写的那一次。
+// 并发编辑：偏好整条记录“后写者胜”（与其他偏好一致），但卖家按“每个卖家后写者胜”合并（每个卖家有自己的 updatedAt），
+// 删除记成墓碑 prefs.sellersDeleted（过期后清理）。两台设备改不同的卖家不会互相覆盖；合并的决定见 prefsMerge.ts，
+// 挂在 db.mergeRemote 里。选中的 sellerId / sellerDefaultHidden 仍随整条偏好后写者胜。旧版本写的记录照常读取。
 import { getSnapshot } from "./db";
 import type { SharedPrefs } from "./model";
 
@@ -13,6 +14,27 @@ export const KNOWN_KIT_COLORS = [221, 265, 295] as const;
 export const MAX_SELLERS = 12;
 export const MAX_PACKS = 5;
 export const MAX_KITS = 6;
+
+/** 卖家被删除的记录：删除时间 at。之后没有比它更新的编辑，这个卖家就保持已删除。 */
+export type SellerTomb = { id: string; at: number };
+/** 墓碑保留多久、最多几条；过期后旧设备再同步回来的同 id 卖家会重新出现，这是可接受的代价。 */
+export const TOMB_KEEP_DAYS = 60;
+export const MAX_TOMBS = 40;
+
+export function normalizeTombs(raw: unknown): SellerTomb[] {
+  const best = new Map<string, number>();
+  for (const t of Array.isArray(raw) ? raw : []) {
+    const id = typeof (t as SellerTomb)?.id === "string" ? (t as SellerTomb).id : "";
+    const at = Number((t as SellerTomb)?.at);
+    if (!id || !Number.isFinite(at) || at <= 0) continue;
+    best.set(id, Math.max(best.get(id) ?? 0, at));
+  }
+  return [...best].map(([id, at]) => ({ id, at })).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+export function pruneTombs(tombs: SellerTomb[], now: number): SellerTomb[] {
+  return tombs.filter((t) => now - t.at <= TOMB_KEEP_DAYS * 86_400_000).sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : 1)).slice(0, MAX_TOMBS).sort((a, b) => (a.id < b.id ? -1 : 1));
+}
 
 export type SellerPack = {
   id: string;
@@ -137,7 +159,7 @@ export function validateSeller(seller: Seller): string | null {
   return null;
 }
 
-type SellerFields = Pick<SharedPrefs, "sellers" | "sellerId" | "sellerDefaultHidden">;
+type SellerFields = Pick<SharedPrefs, "sellers" | "sellerId" | "sellerDefaultHidden" | "sellersDeleted">;
 
 /** 偏好里的自定义卖家（已清洗、去重、限量）。 */
 export function customSellers(prefs: SellerFields | null | undefined): Seller[] {
@@ -170,10 +192,11 @@ export function activeSeller(): Seller {
   try { return currentSeller(getSnapshot().prefs); } catch { return builtinSeller(); }
 }
 
-export type SellerPatch = Partial<Pick<SharedPrefs, "sellers" | "sellerId" | "sellerDefaultHidden">>;
+export type SellerPatch = Partial<Pick<SharedPrefs, "sellers" | "sellerId" | "sellerDefaultHidden" | "sellersDeleted">>;
 
-function patchFor(prefs: SellerFields, customs: Seller[], sellerId: string | undefined, hidden: boolean | undefined): SellerPatch {
-  return { sellers: customs, sellerId, sellerDefaultHidden: hidden && customs.length ? true : undefined };
+/** 写回偏好的字段；墓碑总是带上（没有就是 undefined，保存时会去掉这个键）。 */
+function patchFor(prefs: SellerFields, customs: Seller[], sellerId: string | undefined, hidden: boolean | undefined, tombs: SellerTomb[] = normalizeTombs(prefs.sellersDeleted)): SellerPatch {
+  return { sellers: customs, sellerId, sellerDefaultHidden: hidden && customs.length ? true : undefined, sellersDeleted: tombs.length ? tombs : undefined };
 }
 
 export function newSellerId(now = Date.now(), rand = Math.random()): string {
@@ -199,13 +222,16 @@ export function upsertSeller(prefs: SellerFields, seller: Seller, now = Date.now
   const i = customs.findIndex((s) => s.id === clean.id);
   if (i >= 0) customs[i] = clean;
   else if (customs.length < MAX_SELLERS) customs.push(clean);
-  return patchFor(prefs, customs, select ? clean.id : prefs.sellerId, prefs.sellerDefaultHidden);
+  return patchFor(prefs, customs, select ? clean.id : prefs.sellerId, prefs.sellerDefaultHidden, normalizeTombs(prefs.sellersDeleted).filter((t) => t.id !== clean.id));
 }
 
 /** 删除自定义卖家（内置不可删）；删掉当前选中的就回到默认。 */
-export function removeSeller(prefs: SellerFields, id: string): SellerPatch {
-  const customs = customSellers(prefs).filter((s) => s.id !== id);
-  return patchFor(prefs, customs, prefs.sellerId === id ? undefined : prefs.sellerId, prefs.sellerDefaultHidden);
+export function removeSeller(prefs: SellerFields, id: string, now = Date.now()): SellerPatch {
+  const before = customSellers(prefs);
+  const customs = before.filter((s) => s.id !== id);
+  // 记一个墓碑，另一台设备同步到时才知道是“删除了”而不是“没有这个卖家”
+  const tombs = before.length === customs.length ? normalizeTombs(prefs.sellersDeleted) : [...normalizeTombs(prefs.sellersDeleted).filter((t) => t.id !== id), { id, at: Math.max(now, (before.find((s) => s.id === id)?.updatedAt ?? 0) + 1) }];
+  return patchFor(prefs, customs, prefs.sellerId === id ? undefined : prefs.sellerId, prefs.sellerDefaultHidden, pruneTombs(tombs, now));
 }
 
 export function selectSeller(prefs: SellerFields, id: string | undefined): SellerPatch {

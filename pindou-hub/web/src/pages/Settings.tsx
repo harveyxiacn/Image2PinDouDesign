@@ -168,6 +168,7 @@ function PrefsSection() {
           <label className="field"><span>默认色卡套装</span><select className="select" value={kit} onChange={(e) => setKit(e.target.value)}>{PALETTE_KITS.map((k) => <option key={k.id} value={k.id}>{k.name}（{k.codes.length} 色）</option>)}</select></label>
         </div>
         <div className="row"><button className="btn btn-primary" onClick={save}>保存偏好</button><span className="meta">偏好会随同步在所有设备间共享。</span></div>
+        <p className="meta"><a href="#/purchase?sellers=1" data-settings-sellers>卖家资料</a>：各家的报价、运费和包邮门槛，在采购方案里选用。</p>
       </div>
     </section>
   );

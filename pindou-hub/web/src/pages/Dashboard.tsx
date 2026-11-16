@@ -11,6 +11,7 @@ import { CodeSheet } from "../components/stock/CodeSheet";
 import { KitInit } from "../components/stock/KitInit";
 import { UsageChart } from "../components/dash/UsageChart";
 import { ForecastCard } from "../components/insights/ForecastCard";
+import { OrdersCard } from "../components/orders/OrdersCard";
 import { Collections } from "../components/dash/Collections";
 import "../components/stock/stock.css";
 import "./Dashboard.css";
@@ -166,6 +167,7 @@ export default function Dashboard() {
       </div>
 
       <ForecastCard />
+      <OrdersCard />
 
       <div className="dash-two">
         <section className="panel" aria-labelledby="dash-col-h">

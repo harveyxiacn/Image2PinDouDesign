@@ -323,6 +323,7 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
         : heavy || !result ? [] : reviewReasonsFor(result);
       const p = await createPattern(values, {
         kind: "recognized", method, counts, imageId: meta.id,
+        statedTotal: result?.legend?.statedTotal ?? undefined,
         width: keepMatrix ? result?.grid?.grid.cols : undefined,
         height: keepMatrix ? result?.grid?.grid.rows : undefined,
         matrix: savedMatrix,

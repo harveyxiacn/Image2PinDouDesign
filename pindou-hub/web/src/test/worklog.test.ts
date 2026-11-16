@@ -19,7 +19,7 @@ describe("entries", () => {
   it("completedPattern appends and keeps earlier completions (finish again)", () => {
     const first = completedPattern(pat("a", { copies: 2 }), { at: d(2026, 3, 1) }, { id: "w1", now: 100 });
     expect(first.status).toBe("done");
-    expect(first.works).toEqual([{ id: "w1", at: d(2026, 3, 1), copies: 2 }]);
+    expect(first.works).toEqual([{ id: "w1", at: d(2026, 3, 1), copies: 2, createdAt: 100 }]);
     const again = completedPattern({ ...first, status: "making" }, { at: d(2026, 5, 1), note: "再拼一份" }, { id: "w2", now: 200 });
     expect(worksOf(again).map((e) => e.id)).toEqual(["w2", "w1"]);
     expect(again.updatedAt).toBeGreaterThan(first.updatedAt);

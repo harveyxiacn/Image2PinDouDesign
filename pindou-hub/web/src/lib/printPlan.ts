@@ -133,15 +133,53 @@ export function textColorFor(hex: string | undefined, style: PrintStyle): string
   return style === "fill" ? labelTextColor(hex) : "#111111";
 }
 
-/** 符号表：按整图颗数从多到少依次分配；超过符号数的色号回退用色号文字（返回 undefined）。 */
-export const SYMBOLS = [
-  "●", "■", "▲", "◆", "★", "✚", "✖", "○", "□", "△", "◇", "☆", "♥", "♣", "♠", "♦",
-  "◐", "◑", "▼", "◀", "▶", "◢", "◣", "◤", "◥", "✿", "❖", "✦", "✧", "※", "＃", "＠",
-  "＆", "＄", "％", "＋", "＝", "？", "！", "Ω", "Σ", "Δ", "Π", "Ψ", "Ξ", "Λ", "Φ", "Γ"
+// ---------- 符号：形状 × 填充 × 角标，一个色号一个，不会重复 ----------
+// 用矢量图形而不是字体符号：黑白打印、小格子里也清楚，不依赖字体。图形都画在 10×10 的格子里，格子里留边。
+export type SymbolFill = "solid" | "hollow" | "dot" | "slash";
+export type SymbolSpec = { shape: number; fill: SymbolFill; mark: number };
+
+function starPath(): string {
+  const pts: string[] = [];
+  for (let i = 0; i < 10; i += 1) {
+    const r = i % 2 === 0 ? 4.6 : 1.9;
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    pts.push(`${i ? "L" : "M"}${(5 + r * Math.cos(a)).toFixed(2)} ${(5.4 + r * Math.sin(a)).toFixed(2)}`);
+  }
+  return `${pts.join("")}Z`;
+}
+
+/** 10 种外形：圆、方、四个方向的三角、菱形、加号、叉、星。 */
+export const SYMBOL_SHAPES: readonly string[] = [
+  "M1.4 5A3.6 3.6 0 1 1 8.6 5A3.6 3.6 0 1 1 1.4 5Z",
+  "M1.6 1.6H8.4V8.4H1.6Z",
+  "M5 1.4L8.9 8.4H1.1Z",
+  "M1.1 1.6H8.9L5 8.6Z",
+  "M1.4 5L8.4 1.1V8.9Z",
+  "M8.6 5L1.6 1.1V8.9Z",
+  "M5 1L9 5L5 9L1 5Z",
+  "M3.9 1.4H6.1V3.9H8.6V6.1H6.1V8.6H3.9V6.1H1.4V3.9H3.9Z",
+  "M2.3 1.2L5 3.9L7.7 1.2L8.8 2.3L6.1 5L8.8 7.7L7.7 8.8L5 6.1L2.3 8.8L1.2 7.7L3.9 5L1.2 2.3Z",
+  starPath()
 ];
+export const SYMBOL_FILLS: readonly SymbolFill[] = ["solid", "hollow", "dot", "slash"];
+/** 角标：格子角上的小黑点（0 = 没有）。形状×填充用完（颗数最少的那些色）才会用到。 */
+export const SYMBOL_MARKS: ReadonlyArray<ReadonlyArray<readonly [number, number]>> = [
+  [], [[0.7, 0.7]], [[9.3, 0.7]], [[0.7, 9.3]], [[9.3, 9.3]], [[0.7, 0.7], [9.3, 9.3]], [[9.3, 0.7], [0.7, 9.3]], [[0.7, 0.7], [9.3, 0.7]], [[0.7, 9.3], [9.3, 9.3]]
+];
+export const SYMBOL_CAPACITY = SYMBOL_SHAPES.length * SYMBOL_FILLS.length * SYMBOL_MARKS.length;
+
+/** 第 i 个符号：先把“实心 / 空心 / 带点 / 带斜线”的 10 种外形用完，再加角标。超出容量返回 undefined（几乎不会发生）。 */
+export function symbolSpec(i: number): SymbolSpec | undefined {
+  if (!Number.isInteger(i) || i < 0 || i >= SYMBOL_CAPACITY) return undefined;
+  const per = SYMBOL_SHAPES.length * SYMBOL_FILLS.length;
+  const j = i % per;
+  return { mark: Math.floor(i / per), fill: SYMBOL_FILLS[Math.floor(j / SYMBOL_SHAPES.length)], shape: j % SYMBOL_SHAPES.length };
+}
+
+/** 符号表：按整图颗数从多到少依次分配（totals 已排好序），每个色号一个、互不相同；值是符号序号，用 symbolSpec 取图形。同一张图纸每次结果一样。 */
 export function symbolMap(totals: ColorCount[]): Map<string, string> {
   const map = new Map<string, string>();
-  totals.forEach((c, i) => { if (i < SYMBOLS.length) map.set(c.code, SYMBOLS[i]); });
+  totals.forEach((c, i) => { if (i < SYMBOL_CAPACITY) map.set(c.code, String(i)); });
   return map;
 }
 
@@ -184,7 +222,59 @@ export function overviewLayout(paper: PaperSize, orientation: Orientation, w: nu
   return { pageW, pageH, margin: PAGE_MARGIN_MM, cellMm, gridW: cellMm * w, gridH: cellMm * h, side: false };
 }
 
-/** 页数（总览 + 每块非空板），供界面显示。 */
-export function pageCount(plan: PrintPlan, overview: boolean): number {
-  return plan.boards.length + (overview ? 1 : 0);
+/** 页数（总览 + 图例续页 + 每块非空板），供界面显示。 */
+export function pageCount(plan: PrintPlan, overview: boolean, legendExtraPages = 0): number {
+  return plan.boards.length + (overview ? 1 + legendExtraPages : 0);
+}
+
+// ---------- 图例分页 ----------
+// 总览页上半是整张图，下半放图例；颜色多了放不下就接到后面的“图例（续）”页，不让它溢出到第二张纸上。
+const LEGEND_COL_MM = 44;
+const LEGEND_GAP_MM = 3;
+const LEGEND_ROW_MM = 5.4; // 一行：4mm 色块 + 行距，留足余量
+const LEGEND_HEAD_MM = 20; // 页眉（标题 + 最多两行说明）
+const LEGEND_TITLE_MM = 6;
+
+export type LegendCapacity = { cols: number; firstRows: number; restRows: number; first: number; rest: number };
+
+/** 总览页（图占 gridH 毫米高）和续页各能放多少条图例。 */
+export function legendCapacity(paper: PaperSize, orientation: Orientation, gridH: number): LegendCapacity {
+  const { w, h } = pageMm(paper, orientation);
+  const contentW = w - 2 * PAGE_MARGIN_MM;
+  const contentH = h - 2 * PAGE_MARGIN_MM - 1;
+  const cols = Math.max(1, Math.floor((contentW + LEGEND_GAP_MM) / (LEGEND_COL_MM + LEGEND_GAP_MM)));
+  const firstRows = Math.max(0, Math.floor((contentH - LEGEND_HEAD_MM - gridH - 2 * 3 - LEGEND_TITLE_MM) / LEGEND_ROW_MM));
+  const restRows = Math.max(1, Math.floor((contentH - LEGEND_HEAD_MM - LEGEND_TITLE_MM) / LEGEND_ROW_MM));
+  return { cols, firstRows, restRows, first: firstRows * cols, rest: restRows * cols };
+}
+
+/** 图例按页切开：第一段在总览页（可能是空的），其余是续页。 */
+export function paginateLegend<T>(items: T[], cap: LegendCapacity): T[][] {
+  const pages: T[][] = [items.slice(0, cap.first)];
+  for (let i = cap.first; i < items.length; i += cap.rest) pages.push(items.slice(i, i + cap.rest));
+  return pages;
+}
+
+// ---------- 格子太小时换小一点的板 ----------
+/** 格子小于这个尺寸，色号印出来看不清。 */
+export const MIN_CODE_CELL_MM = 3.2;
+/** 符号比文字能缩得更小。 */
+export const MIN_SYMBOL_CELL_MM = 2.2;
+
+/** 按这个板大小，一页上一格是多少毫米。 */
+export function cellMmFor(paper: PaperSize, orientation: Orientation, width: number, height: number, boardSize: number): number {
+  const w = boardSize > 0 ? Math.min(boardSize, width) : width;
+  const h = boardSize > 0 ? Math.min(boardSize, height) : height;
+  return boardLayout(paper, orientation, w, h).cellMm;
+}
+
+/** 当前板大小下格子偏小时，挑能让格子不小于 minMm 的最大板；都不行就用最小的。不偏小返回 null。 */
+export function suggestBoardSize(paper: PaperSize, orientation: Orientation, width: number, height: number, boardSize: number, minMm = MIN_CODE_CELL_MM): { size: number; cellMm: number; fromMm: number } | null {
+  const fromMm = cellMmFor(paper, orientation, width, height, boardSize);
+  if (fromMm >= minMm) return null;
+  const sizes = PRINT_BOARD_SIZES.filter((s) => s > 0).sort((a, b) => b - a);
+  const pick = sizes.find((s) => cellMmFor(paper, orientation, width, height, s) >= minMm) ?? sizes[sizes.length - 1];
+  const cellMm = cellMmFor(paper, orientation, width, height, pick);
+  if (cellMm <= fromMm) return null; // 已经是最小的板了，再换也没用
+  return { size: pick, cellMm, fromMm };
 }

@@ -939,6 +939,35 @@ try {
     if (!hash.startsWith("#/pattern/")) throw new Error("Esc did not leave build mode: " + hash);
     return "Esc → " + hash;
   });
+  await step("polish: gallery chips, shopping seller + shipping line, purchase transit note, settings seller link, build time, print symbols", async () => {
+    const out = {};
+    await go("#/gallery");
+    out.galleryWorks = await evaluate(`!!document.querySelector('[data-gallery-works]')`);
+    await go("#/shopping");
+    out.shopSeller = await evaluate(`(document.querySelector('[data-shop-seller]')?.innerText ?? '').replace(/\\s+/g, ' ').slice(0, 40)`);
+    await go("#/purchase");
+    out.purchaseSeller = await evaluate(`!!document.querySelector('[data-purchase-seller]')`);
+    await go("#/settings");
+    out.settingsSellers = await evaluate(`!!document.querySelector('[data-settings-sellers]')`);
+    const id = patternId(); if (!id) throw new Error("no saved pattern");
+    await go("#/build/" + id);
+    await waitFor(`document.querySelector('[data-build-root]')`, 15000, "build page");
+    await sleep(500);
+    out.buildTime = await evaluate(`(document.querySelector('[data-build-time]')?.innerText ?? '').replace(/\\s+/g, ' ')`);
+    await go("#/print/" + id);
+    await waitFor(`document.querySelector('[data-print-root] [data-print-page]')`, 10000, "print pages");
+    await evaluate(`(() => { const sel = [...document.querySelectorAll('[data-print-options] select, [data-print-options] button, [data-print-options] input')].find((el) => /符号/.test(el.innerText || el.value || el.parentElement?.innerText || '')); if (sel?.tagName === 'SELECT') { const o = [...sel.options].find((x) => /符号/.test(x.text)); if (o) { sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true })); } } else sel?.click(); })()`);
+    await sleep(600);
+    await evaluate(`window.dispatchEvent(new Event('beforeprint'))`);
+    await sleep(1000);
+    out.printPages = await evaluate(`document.querySelectorAll('[data-print-page]').length`);
+    out.printLegendPages = await evaluate(`document.querySelectorAll('[data-print-page="legend"]').length`);
+    await shot("53-print-symbols");
+    await evaluate(`window.dispatchEvent(new Event('afterprint'))`);
+    if (!out.galleryWorks || !out.purchaseSeller || !out.settingsSellers) throw new Error("missing entry point: " + JSON.stringify(out));
+    // 用时标签只在累计满一分钟后出现（设计如此），这里只记录不强求
+    return JSON.stringify(out);
+  });
   checks.push({ check: "token contrast (light)", ok: true, detail: JSON.stringify(await evaluate(CONTRAST)) });
   await setViewport(390, 844, true);
   for (const [hash, name] of [["#/", "m1-dashboard"], ["#/inventory", "m2-inventory"], ["#/add?mode=recognize", "m3-add"], ["#/add?mode=batch", "m8-batch"], ["#/gallery", "m4-gallery"], ["#/shopping", "m5-shopping"], ["#/purchase", "m5b-purchase"], ["#/insights", "m5c-insights"], ["#/works", "m5d-works"], ["#/settings", "m6-settings"]]) {

@@ -6,13 +6,15 @@ import { copyText } from "../components/stock/download";
 import { putRecords, useData } from "../lib/db";
 import { PRICE_1200_CHOICES, normalizePrice1200, price1200Of } from "../lib/forecast";
 import { demandByCode, isActive, needAfterStock, stockByCode, withLoss as applyLoss } from "../lib/inventory";
+import { subtractTransit } from "../lib/orders";
 import { totalOf } from "../lib/model";
 import { SellerSheet, sellerSummary, saveSellerPatch } from "../components/sellers/SellerSheet";
 import { currentSeller, listSellers, selectSeller } from "../lib/sellers";
-import { recordPlacedOrder } from "../components/orders/store";
+import { recordPlacedOrder, useTransit } from "../components/orders/store";
+import { TransitNote } from "../components/orders/TransitNote";
 import {
-  PURCHASE_OFFERS, PURCHASE_PREFER_LABEL, applyPlanToEdits, buildPurchasePlans, compareSellers, formatMoney, formatPacks, formatPurchaseText, groupSupplements,
-  kitOffer, leftoverBreakdown, parsePrefer, recommendationReason, type PurchaseOffer, type PurchasePlan, type PurchasePrefer
+  PURCHASE_OFFERS, PURCHASE_PREFER_LABEL, applyPlanToEdits, buildPurchasePlans, compareSellers, formatMoney, formatPlanPacks, formatPurchaseText, groupSupplements,
+  kitOffer, leftoverBreakdown, narrowedCodes, parsePrefer, recommendationReason, type PurchaseOffer, type PurchasePlan, type PurchasePrefer
 } from "../lib/purchase";
 import "./Purchase.css";
 
@@ -103,7 +105,7 @@ export default function Purchase() {
   const [onlyVerified, setOnlyVerified] = useState(route.query.get("verified") === "1");
   // 1200 颗装单价是一个全家同步的偏好（prefs.price1200）：采购、采购清单、补货预告都读它
   const price1200 = price1200Of(data.prefs);
-  const [sellerOpen, setSellerOpen] = useState(false);
+  const [sellerOpen, setSellerOpen] = useState(() => route.query.get("sellers") === "1");
   // 当前卖家：内置默认卖家沿用 price1200；自定义卖家用自己的价格
   const seller = useMemo(() => currentSeller(data.prefs), [data.prefs]);
   const sellers = useMemo(() => listSellers(data.prefs), [data.prefs]);
@@ -132,7 +134,17 @@ export default function Purchase() {
   // 方案按“含损耗、已扣库存”的缺口计算（库存还没录入时不扣，与采购清单一致）
   const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
-  const planNeed = useMemo(() => needAfterStock(demand, inventoryReady ? stock : {}, lossRate), [demand, stock, inventoryReady, lossRate]);
+  // 在途订单当作“已经到手”的库存来扣，和采购清单一致；开关与采购清单共用
+  const { transit, transitTotal, subtract, pickSubtract } = useTransit();
+  const stockPlus = useMemo(() => {
+    if (!subtract || !transitTotal) return stock;
+    const out = { ...stock };
+    for (const [code, n] of Object.entries(transit)) out[code] = Math.max(0, out[code] ?? 0) + n;
+    return out;
+  }, [stock, transit, transitTotal, subtract]);
+  const planNeed = useMemo(() => needAfterStock(demand, inventoryReady || (subtract && transitTotal > 0) ? stockPlus : {}, lossRate), [demand, stockPlus, inventoryReady, subtract, transitTotal, lossRate]);
+  // 在途订单实际抵掉了多少缺口（不管开关开不开，数字一样）
+  const transitCovered = useMemo(() => (transitTotal ? subtractTransit(needAfterStock(demand, inventoryReady ? stock : {}, lossRate), transit).coveredTotal : 0), [transitTotal, transit, demand, inventoryReady, stock, lossRate]);
   const plans = useMemo(() => buildPurchasePlans(planNeed, demand, price1200, prefer, seller), [planNeed, demand, price1200, prefer, seller]);
   const quotes = useMemo(() => (sellers.length > 1 ? compareSellers(planNeed, demand, sellers, price1200, prefer) : []), [planNeed, demand, sellers, price1200, prefer]);
 
@@ -145,6 +157,7 @@ export default function Purchase() {
   const recommended = plans.find((p) => p.recommended) ?? best;
   const leastWaste = plans.find((p) => p.leastWaste) ?? best;
   const reason = recommendationReason(plans, prefer);
+  const narrowed = useMemo(() => narrowedCodes(planNeed, seller), [planNeed, seller]);
   const leftover = recommended ? leftoverBreakdown(recommended) : null;
   // 复制采购清单的同时保存下单快照：入库时可以按“当时下的单”核对
   const copyPlan = async (plan: PurchasePlan) => {
@@ -226,6 +239,14 @@ export default function Purchase() {
         </div>
       ) : null}
 
+      <TransitNote transitTotal={transitTotal} covered={transitCovered} subtract={subtract} onToggle={pickSubtract} />
+
+      {narrowed.length ? (
+        <div className="notice" role="note" data-purchase-narrowed>
+          <span><b>{narrowed.slice(0, 4).join("、")}{narrowed.length > 4 ? " 等" : ""}</b> 需要的颗数很大，包规格又多，为了不卡住，算法只看了一部分组合：这些色号的买法不保证是最省的。</span>
+        </div>
+      ) : null}
+
       {!scoped.length ? (
         <div className="panel empty pegboard"><h3>没有已核对的图纸</h3><p>先把图库里的图纸标为“已核对”，或关掉“只算已核对”。</p><a className="btn" href="#/gallery?verify=unverified">去图库核对</a></div>
       ) : (
@@ -240,7 +261,7 @@ export default function Purchase() {
               <div className="purchase-reco-nums">
                 <div><span className="label">总价{recommended.shipping ? "（含运费）" : ""}</span><b className="num purchase-price">{formatMoney(recommended.totalCost)}</b>{recommended.shipping ? <span className="meta">商品 {formatMoney(recommended.goodsCost ?? 0)} + 运费 {formatMoney(recommended.shipping)}</span> : null}</div>
                 <div><span className="label">浪费</span><b className="num">{pct(recommended.wastePct)}</b><span className="meta">{fmt(recommended.wasteBeads)} 颗用不上</span></div>
-                <div><span className="label">一共买到</span><b className="num">{fmt(recommended.totalBeads)}</b><span className="meta">颗 · 补充包 {formatPacks(recommended.packs)}</span></div>
+                <div><span className="label">一共买到</span><b className="num">{fmt(recommended.totalBeads)}</b><span className="meta">颗 · 补充包 {formatPlanPacks(recommended)}</span></div>
               </div>
               <p className="purchase-why"><b>为什么推荐：</b>{reason}</p>
               <ShipLine plan={recommended} />
@@ -284,6 +305,7 @@ export default function Purchase() {
                       <span className="meta">
                         {q.unfulfilled.length ? `买不齐：${q.unfulfilled.slice(0, 6).join("、")}${q.unfulfilled.length > 6 ? " 等" : ""}（没有可用的包）` : q.best.name}
                         {q.best.shipping ? ` · 含运费 ${formatMoney(q.best.shipping)}` : ""}
+                        {q.narrowed?.length ? <span data-seller-narrowed={q.seller.id}> · 需求很大，搜索被缩小过，不保证最省</span> : null}
                       </span>
                       <span className="meta seller-compare-sum">
                         {q.seller.id === seller.id ? "" : q.unfulfilled.length ? "" : diff === 0 ? "与当前相同" : diff < 0 ? `比当前省 ${formatMoney(-diff)}` : `比当前贵 ${formatMoney(diff)}`}
@@ -311,7 +333,7 @@ export default function Purchase() {
                       <td className="r">{fmt(plan.totalBeads)}</td>
                       <td className="r">{pct(plan.wastePct)}<div className="meta">{fmt(plan.wasteBeads)} 颗</div></td>
                       <td className="purchase-coverage">{plan.coverage} 色{plan.missing.length ? ` · 缺 ${plan.missing.length}` : " · 全覆盖"}</td>
-                      <td className="purchase-packs">{formatPacks(plan.packs)}</td>
+                      <td className="purchase-packs">{formatPlanPacks(plan)}</td>
                       <td><a className="btn btn-sm" href={shoppingHref(plan.id)}>应用</a></td>
                     </tr>
                   ))}

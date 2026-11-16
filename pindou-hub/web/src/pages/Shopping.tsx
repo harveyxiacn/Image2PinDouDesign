@@ -7,8 +7,10 @@ import { countsToCsv, demandByCode, isActive, needAfterStock, shoppingList, stoc
 import { colorOf } from "../lib/palette";
 import { totalOf } from "../lib/model";
 import { OrdersSection } from "../components/orders/OrdersSection";
-import { cancelOne, recordPlacedOrder, useOrders } from "../components/orders/store";
-import { isOpen, statusOf, subtractTransit, sumCounts, transitByCode } from "../lib/orders";
+import { cancelOne, recordPlacedOrder, useTransit } from "../components/orders/store";
+import { TransitNote } from "../components/orders/TransitNote";
+import { isOpen, statusOf, subtractTransit } from "../lib/orders";
+import { currentSeller, withPrice1200 } from "../lib/sellers";
 import { excludeForTag, shareText } from "../lib/stockview";
 import { commitPurchase } from "../components/stock/actions";
 import { normalizePrice1200, price1200Of } from "../lib/forecast";
@@ -16,8 +18,8 @@ import { PriceNote } from "../components/stock/PriceNote";
 import { allocatePrices, parseFen } from "../lib/pricing";
 import { copyText, downloadText } from "../components/stock/download";
 import {
-  addPacks, applyPlanToEdits, buildPurchasePlans, estimateCostForRows, formatMoney, formatPacks, optimizePacks,
-  type PurchasePlan, type PurchasePlanItem
+  applyPlanToEdits, buildPurchasePlans, estimateCostForRows, formatMoney, formatPackLines, formatPacks, formatPlanPacks, mergePackLines, optimizePacks,
+  planPackLines, shipNote, type PurchasePlan, type PurchasePlanItem
 } from "../lib/purchase";
 import "./Shopping.css";
 
@@ -54,11 +56,14 @@ export default function Shopping() {
   const prefsRef = useRef(data.prefs);
   prefsRef.current = data.prefs;
   // 在途订单：从缺口里扣掉“已在路上”的，避免重复买；开关只影响这台设备的显示
-  const { orders, live } = useOrders();
-  const transit = useMemo(() => transitByCode(orders, live), [orders, live]);
-  const transitTotal = sumCounts(transit);
-  const [subtract, setSubtract] = useState(() => { try { return localStorage.getItem("ph.shop.subtractTransit") !== "0"; } catch { return true; } });
-  const pickSubtract = (on: boolean) => { setSubtract(on); try { localStorage.setItem("ph.shop.subtractTransit", on ? "1" : "0"); } catch { /* 本次仍然生效 */ } };
+  const { orders, live, transit, transitTotal, subtract, pickSubtract } = useTransit();
+  // 从总览的“在途订单”卡片进来（?orders=1）：滚到订单区
+  const wantOrders = route.query.get("orders") === "1";
+  useEffect(() => {
+    if (!wantOrders || !data.ready) return;
+    const t = window.setTimeout(() => document.querySelector("[data-orders-section]")?.scrollIntoView({ block: "start", behavior: prefersReducedMotion() ? "auto" : "smooth" }), 150);
+    return () => window.clearTimeout(t);
+  }, [wantOrders, data.ready]);
   useEffect(() => {
     if (!kept) return;
     const t = window.setTimeout(() => setKept(0), 8000);
@@ -70,6 +75,8 @@ export default function Shopping() {
   // 这样采购页、采购清单、补货预告三处的金额一致
   const p1200Param = route.query.get("p1200");
   const p1200 = p1200Param != null ? normalizePrice1200(p1200Param) : price1200Of(data.prefs);
+  // 当前卖家：行成本、整单成本、运费、方案都按它的报价算，和采购方案页一致（默认卖家的数字不变）
+  const seller = useMemo(() => withPrice1200(currentSeller(data.prefs), p1200), [data.prefs, p1200]);
   const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
   const demand = useMemo(() => demandByCode(data.patterns, (p) => isActive(p) && (!onlyVerified || !!p.verifiedAt) && !excluded.has(p.id)), [data.patterns, onlyVerified, excluded]);
@@ -112,19 +119,24 @@ export default function Shopping() {
   const surplus = rows.filter((r) => r.reason === "shortfall").reduce((sum, r) => sum + Math.max(0, qtyOf(r.code, r.buy) - r.shortfall), 0);
   // 应用方案后，套装价不能按“每色单买”重算；只有用户改过数量才回退到逐色报价。
   const planItems = applied?.items.filter((item) => item.totalBeads > 0) ?? [];
-  const planUnchanged = !!applied && planItems.every((item) => (edits[item.code] ?? 0) === item.totalBeads);
+  const planUnchanged = !!applied && (!applied.sellerId || applied.sellerId === seller.id) && planItems.every((item) => (edits[item.code] ?? 0) === item.totalBeads);
   const planCodes = new Set(planItems.map((item) => item.code));
   const planItemByCode = useMemo(() => new Map<string, PurchasePlanItem>((applied?.items ?? []).map((item) => [item.code, item] as const)), [applied]);
-  const extraCost = planUnchanged ? estimateCostForRows(items.filter((item) => !planCodes.has(item.code)), p1200) : null;
+  const extraCost = planUnchanged ? estimateCostForRows(items.filter((item) => !planCodes.has(item.code)), p1200, seller) : null;
+  // cost.cost 是商品金额（不含运费）；运费按卖家的门槛另算，grand 才是要付的总数
   const cost = planUnchanged && applied && extraCost
-    ? { cost: applied.totalCost + extraCost.cost, beads: applied.totalBeads + extraCost.beads, packs: addPacks(applied.packs, extraCost.packs) }
-    : estimateCostForRows(items, p1200);
+    ? { cost: (applied.goodsCost ?? applied.totalCost) + extraCost.cost, beads: applied.totalBeads + extraCost.beads, lines: mergePackLines(planPackLines(applied), extraCost.lines) }
+    : estimateCostForRows(items, p1200, seller);
+  const ship = shipNote(seller, cost.cost);
+  const grand = ship.total;
   // 套装方案下，逐行成本只显示“补充包”部分；套装价已经计入顶部方案成本。
   const showPackCol = mode === "pack" && !planUnchanged;
   const rowCost = (code: string, qty: number) => {
     const item = planUnchanged ? planItemByCode.get(code) : undefined;
-    return item ? { cost: item.singlesCost, packs: item.packs } : optimizePacks(qty, code, p1200);
+    return item ? { cost: item.singlesCost, lines: item.lines ?? [] } : optimizePacks(qty, code, p1200, { seller });
   };
+  // 当前卖家没有可用的包、又不在方案里的色号：成本算不出来，要提醒，不能当 ¥0
+  const unfulfilled = items.filter((it) => !planCodes.has(it.code) || !planUnchanged).filter((it) => !rowCost(it.code, it.qty).lines.length).map((it) => it.code);
   const unverifiedCount = useMemo(() => active.filter((p) => (!onlyVerified || p.verifiedAt != null) && !excluded.has(p.id) && p.verifiedAt == null).length, [active, onlyVerified, excluded]);
   const verifiedCount = useMemo(() => active.filter((p) => p.verifiedAt != null).length, [active]);
   const patMatches = useMemo(() => {
@@ -136,7 +148,7 @@ export default function Shopping() {
   const splitHint = useMemo(() => {
     if (applied || tagsInPlan.length < 2 || Object.keys(stock).length) return null;
     const base = scoped.filter((p) => !manual.has(p.id));
-    const costFor = (d: Record<string, number>) => estimateCostForRows(Object.entries(d).map(([code, n]) => ({ code, qty: applyLoss(n, prefs.lossRate) })), p1200).cost;
+    const costFor = (d: Record<string, number>) => estimateCostForRows(Object.entries(d).map(([code, n]) => ({ code, qty: applyLoss(n, prefs.lossRate) })), p1200, seller).cost;
     // 按“主标签”分组，保证每张图纸只算一次（多标签的图纸不会被重复计入）
     const groups = new Map<string, typeof base>();
     for (const p of base) {
@@ -146,12 +158,12 @@ export default function Shopping() {
     const separate = [...groups.values()].reduce((sum, ps) => sum + costFor(demandByCode(ps)), 0);
     const together = costFor(demand);
     return separate > together + 0.01 ? { separate, together, extra: separate - together } : null;
-  }, [applied, tagsInPlan, scoped, manual, prefs, stock, demand, p1200]);
+  }, [applied, tagsInPlan, scoped, manual, prefs, stock, demand, p1200, seller]);
 
   // ?plan= 从采购方案页带入：把每色购买量写进 edits；用户手动改损耗/包装/标签后清除。
   const planId = route.query.get("plan");
   const planNeed = useMemo(() => needAfterStock(demand, inventoryReady || (subtract && transitTotal > 0) ? stockPlus : {}, prefs.lossRate), [demand, stockPlus, inventoryReady, subtract, transitTotal, prefs.lossRate]);
-  const plans = useMemo(() => (planId ? buildPurchasePlans(planNeed, demand, p1200) : []), [planId, planNeed, demand, p1200]);
+  const plans = useMemo(() => (planId ? buildPurchasePlans(planNeed, demand, p1200, "balanced", seller) : []), [planId, planNeed, demand, p1200, seller]);
   // 每个 planId 只应用一次：之后 plans 因勾选图纸等重算，不能覆盖用户手动改过的数量
   const appliedPlanId = useRef<string | null>(null);
   useEffect(() => {
@@ -196,20 +208,27 @@ export default function Shopping() {
   const pickTag = (t: string) => { setOnlyTag(t); setManual(new Set()); setEdits({}); setApplied(null); setPlanCleared(true); };
   const toggleVerified = (on: boolean) => { setOnlyVerified(on); setManual(new Set()); setEdits({}); setApplied(null); setPlanCleared(true); };
   const copy = async () => {
-    const ok = await copyText(shareText(items));
+    const text = shareText(items);
+    const ok = await copyText(seller.builtin ? text : `卖家：${seller.name}\n${text}`);
     if (!ok) { toast("复制失败，请手动选择文字"); return; }
     // 同时记为一张在途订单：到货后按订单入库，清单也会扣掉已在路上的
     try {
-      const id = await recordPlacedOrder({ items, planId: applied?.id, cost: cost.cost });
+      const id = await recordPlacedOrder({ items, planId: applied?.id, cost: grand, seller: seller.builtin ? undefined : seller.name });
       toast("已复制采购文本，并记为在途订单", id ? { label: "撤销", run: () => { void cancelOne(id, true); } } : undefined);
     } catch { toast("已复制采购文本，但没记成在途订单"); }
   };
   const toggleRow = (code: string) => setOpenRows((cur) => { const n = new Set(cur); if (n.has(code)) n.delete(code); else n.add(code); return n; });
   const csv = () => {
-    const out = rows.map((r) => {
+    const out: Array<Record<string, string | number>> = rows.map((r) => {
       const qty = qtyOf(r.code, r.buy);
       return { code: r.code, name: colorOf(r.code)?.nameZh ?? "", need: r.needWithLoss, stock: r.stock, shortfall: r.shortfall, buy: qty, cost: rowCost(r.code, qty).cost.toFixed(2) };
     });
+    // 默认卖家没有运费时，CSV 和以前完全一样；换了卖家或有运费时，末尾补运费和合计两行
+    if (!seller.builtin || ship.shipping > 0) {
+      const blank = { name: "", need: "", stock: "", shortfall: "", buy: "" };
+      if (ship.shipping > 0) out.push({ code: "运费", ...blank, cost: ship.shipping.toFixed(2) });
+      out.push({ code: "合计", ...blank, name: seller.builtin ? "" : `按「${seller.name}」报价`, cost: grand.toFixed(2) });
+    }
     downloadText("采购清单.csv", countsToCsv(out, [["code", "色号"], ["name", "颜色"], ["need", "需要(含损耗)"], ["stock", "库存"], ["shortfall", "缺口"], ["buy", "建议购买"], ["cost", "预计成本(元)"]]), "text/csv;charset=utf-8");
   };
   const saveDefaults = async () => {
@@ -233,7 +252,7 @@ export default function Shopping() {
 
       {applied ? (
         <div className="notice shop-plan-note" role="status">
-          <span><b>已应用方案：{applied.name}</b> · 预计 {formatMoney(applied.totalCost)} · {formatPacks(applied.packs)}</span>
+          <span><b>已应用方案：{applied.name}</b> · 预计 {formatMoney(applied.totalCost)} · {formatPlanPacks(applied)}</span>
           <span className="spacer" />
           <button type="button" className="btn btn-sm btn-ghost" onClick={resetEdits}>清除方案</button>
         </div>
@@ -247,8 +266,14 @@ export default function Shopping() {
             <span>净需求 <b className="num">{fmt(net)}</b> 颗 · {colorCount} 色</span>
             <span>含损耗 <b className="num">{fmt(withLoss)}</b> 颗</span>
             <span>整包多出 <b className="num">{fmt(surplus)}</b> 颗{shortfallTotal ? `（${Math.round((surplus / shortfallTotal) * 100)}%）` : ""}</span>
-            <span>{planUnchanged ? "方案成本" : "预计成本"} <b className="num">{formatMoney(cost.cost)}</b></span>
+            <span>{planUnchanged ? "方案成本" : "预计成本"}{ship.shipping > 0 ? "（含运费）" : ""} <b className="num">{formatMoney(grand)}</b></span>
           </div>
+          {!seller.builtin || ship.text ? (
+            <p className="meta shop-seller" data-shop-seller data-shop-ship={ship.shipping > 0 ? ship.shipping : undefined}>
+              {!seller.builtin ? <>按「{seller.name}」的报价，商品 {formatMoney(cost.cost)}。</> : null}{ship.text ? <>{ship.text}。</> : null}
+              {!seller.builtin ? <> <a href="#/purchase">换卖家</a></> : null}
+            </p>
+          ) : null}
         </div>
         <span className="spacer" />
         <div className="row shop-actions">
@@ -259,15 +284,7 @@ export default function Shopping() {
         </div>
       </section>
 
-      {transitTotal > 0 ? (
-        <div className="notice ord-transit" role="status" data-transit-note data-transit-subtracted={subtract}>
-          <span>{transitCovered > 0
-            ? <><b data-transit-covered>已在路上 {fmt(transitCovered)} 颗</b>{subtract ? "，已从下面的清单里扣掉，不会重复买。" : "，但下面的清单没有扣掉它们。"}</>
-            : <>在途订单共 {fmt(transitTotal)} 颗，和现在的缺口对不上，清单没有变化。</>}</span>
-          <span className="spacer" />
-          <label><input type="checkbox" data-transit-toggle checked={subtract} onChange={(e) => pickSubtract(e.target.checked)} />扣掉在途订单</label>
-        </div>
-      ) : null}
+      <TransitNote transitTotal={transitTotal} covered={transitCovered} subtract={subtract} onToggle={pickSubtract} />
 
       <OrdersSection />
 
@@ -328,7 +345,8 @@ export default function Shopping() {
           <label className="row" style={{ minHeight: 28 }}><input className="shop-check" type="checkbox" checked={includeLow} onChange={(e) => setIncludeLow(e.target.checked)} />包含补货提醒（库存低于最低库存的色号）</label>
           <label className="row" style={{ minHeight: 28 }}><input className="shop-check" type="checkbox" checked={onlyVerified} onChange={(e) => toggleVerified(e.target.checked)} disabled={!verifiedCount} />只算已核对（{verifiedCount} 张）</label>
           <div className="row"><button className="btn btn-sm" onClick={saveDefaults}>存为默认</button></div>
-          {cost.packs.p500 > 0 && cost.packs.p500 < 10 ? <p className="meta">500 颗包只有 {cost.packs.p500} 包；需满 10 包才能备注色号。</p> : null}
+          {cost.lines.filter((l) => l.minPacks && l.n > 0 && l.n < l.minPacks).map((l) => <p className="meta" key={l.id}>{l.beads} 颗包只有 {l.n} 包；需满 {l.minPacks} 包才能备注色号。</p>)}
+          {unfulfilled.length ? <p className="meta shop-unfulfilled" data-shop-unfulfilled>「{seller.name}」没有可用的包，下面这些色号买不了：{unfulfilled.slice(0, 8).join("、")}{unfulfilled.length > 8 ? " 等" : ""}。可以到采购方案页换卖家。</p> : null}
         </section>
       </div>
 
@@ -348,7 +366,8 @@ export default function Shopping() {
                   const qty = qtyOf(r.code, r.buy);
                   const item = planUnchanged ? planItemByCode.get(r.code) : undefined;
                   const est = rowCost(r.code, qty);
-                  const costTitle = item ? (item.setCovered ? `套装覆盖 1200 颗；补充包 ${formatPacks(item.packs)}` : `补充包 ${formatPacks(item.packs)}`) : formatPacks(est.packs);
+                  const itemPacks = item ? (item.lines?.length ? formatPackLines(item.lines) : formatPacks(item.packs)) : "";
+                  const costTitle = item ? (item.setCovered ? `套装覆盖 1200 颗；补充包 ${itemPacks}` : `补充包 ${itemPacks}`) : formatPackLines(est.lines);
                   const open = openRows.has(r.code);
                   return (
                     <tr key={r.code} className="shop-row" data-open={open}>
@@ -358,7 +377,7 @@ export default function Shopping() {
                       <td className="r shop-c-short" data-zero={!r.shortfall} style={{ color: r.shortfall ? "var(--iron-ink)" : undefined }}>{r.shortfall ? fmt(r.shortfall) : "—"}</td>
                       <td className="r shop-c-buy"><input className="input num shop-buy" type="number" inputMode="numeric" min={0} aria-label={`${r.code} 建议购买`} value={qty} onChange={(e) => setEdits((cur) => ({ ...cur, [r.code]: Math.max(0, Math.round(Number(e.target.value)) || 0) }))} /></td>
                       {showPackCol ? <td className="r shop-c-pack" data-label="包装规格"><input className="input num shop-pack" type="number" inputMode="numeric" min={1} aria-label={`${r.code} 包装规格`} value={packOf(r.code)} onChange={(e) => { const n = Math.max(1, Math.round(Number(e.target.value)) || 1); setPackSizes((cur) => ({ ...cur, [r.code]: n })); setEdits({}); }} /></td> : null}
-                      <td className="r shop-c-cost" title={costTitle}>{formatMoney(est.cost)}</td>
+                      <td className="r shop-c-cost" title={costTitle}>{!item && qty > 0 && !est.lines.length ? <span className="chip chip-amber" data-shop-unfulfilled-row={r.code}>买不了</span> : formatMoney(est.cost)}</td>
                       <td className="shop-c-why" data-label="原因">{r.reason === "shortfall" ? <span className="chip chip-iron">{inventoryReady ? "缺货" : "未入库"}</span> : <span className="chip chip-amber">补货</span>}</td>
                     </tr>
                   );
