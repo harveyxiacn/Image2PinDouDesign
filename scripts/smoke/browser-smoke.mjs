@@ -329,6 +329,40 @@ try {
   });
 
 
+  // 可选：SMOKE_MODEL=1 时验证「复杂背景 → AI 抠图模型」这条路径（首次会从模型 CDN 下载权重，需要联网，较慢）。
+  if (process.env.SMOKE_MODEL === "1") {
+    await step("paste a busy-background image, model matting path", async () => {
+      const before = await evaluate("document.querySelectorAll('.design-card').length");
+      await evaluate(`(async () => {
+        const c = document.createElement('canvas'); c.width = 420; c.height = 420; const g = c.getContext('2d');
+        const img = g.createImageData(420, 420); let s = 12345;
+        for (let y = 0; y < 420; y++) for (let x = 0; x < 420; x++) { s = (s * 1103515245 + 12345) & 0x7fffffff; const i = (y * 420 + x) * 4; const b = ((x >> 4) + (y >> 4)) % 3; img.data[i] = 40 + b * 80 + (s % 60); img.data[i + 1] = 200 - b * 70 - ((s >> 8) % 60); img.data[i + 2] = 60 + ((x * 7 + y * 3) % 160); img.data[i + 3] = 255; }
+        g.putImageData(img, 0, 0);
+        g.fillStyle = '#e8483a'; g.beginPath(); g.arc(210, 220, 120, 0, Math.PI * 2); g.fill();
+        g.fillStyle = '#fff'; g.beginPath(); g.arc(170, 190, 26, 0, Math.PI * 2); g.arc(250, 190, 26, 0, Math.PI * 2); g.fill();
+        g.fillStyle = '#111'; g.beginPath(); g.arc(170, 190, 10, 0, Math.PI * 2); g.arc(250, 190, 10, 0, Math.PI * 2); g.fill();
+        const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+        const dt = new DataTransfer(); dt.items.add(new File([blob], 'image.png', { type: 'image/png' }));
+        document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true }));
+        return true;
+      })()`);
+      await waitFor(`document.querySelectorAll('.design-card').length === ${before} + 1 && !document.querySelector('.converting-banner')`, 90000);
+      await sleep(1000);
+      const opened = await evaluate(`(() => { const b = [...document.querySelectorAll('button')].find((el) => el.textContent.includes('裁剪 / 去背景') && el.offsetParent !== null); if (!b) return false; b.click(); return true; })()`);
+      if (!opened) throw new Error("no crop button after paste");
+      await waitFor("(document.querySelector('[data-matting-line]')?.textContent ?? '').trim().length > 0", 30000);
+      console.log("model: matting line", await evaluate("document.querySelector('[data-matting-line]')?.textContent"));
+      await shot("09e-matting-busy");
+      const started = Date.now();
+      await click("添加为新图纸");
+      await waitFor("!document.querySelector('.crop-overlay') && !document.querySelector('.converting-banner')", 300000);
+      await sleep(800);
+      console.log("model: removal took ms", Date.now() - started, "toasts", await evaluate("JSON.stringify([...document.querySelectorAll('.toast')].map((t) => t.textContent.trim()))"));
+      await shot("09f-after-model-matting");
+      return (await evaluate("document.querySelectorAll('.design-card').length")) === before + 2;
+    });
+  }
+
   await viewport(1024, 768);
   await sleep(800);
   await step("tablet no overflow", async () => (await overflow()) <= 0);
