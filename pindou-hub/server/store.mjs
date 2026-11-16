@@ -35,6 +35,10 @@ export function openStore(dataDir) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS marks (
+      seq INTEGER PRIMARY KEY,
+      token TEXT NOT NULL
+    );
   `);
 
   // 数据库标识（epoch）：随数据库文件走。客户端记住它；Hub 数据库被恢复/替换后标识变化，客户端据此重置游标并重新上传。
@@ -51,6 +55,34 @@ export function openStore(dataDir) {
     const fresh = crypto.randomBytes(12).toString("base64url");
     setMeta.run("epoch", fresh);
     return fresh;
+  }
+
+  // 对账标记：Hub 每次告诉客户端“你已拿到序号 ≤ seq 的全部变更”时，同时发一个随机口令并记在数据库里。
+  // 客户端下次同步带回它记得的最后一个标记；数据库被恢复成更早的副本（哪怕之后又长过了客户端游标、config.json 也一并恢复）时，
+  // 副本里没有这个口令，Hub 就能告诉客户端“你的进度我不认识”，客户端重新对账。
+  const MARKS_KEPT = 5000;
+  const selectMark = db.prepare("SELECT token FROM marks WHERE seq = ?");
+  const insertMark = db.prepare("INSERT OR IGNORE INTO marks (seq, token) VALUES (?, ?)");
+  const pruneMarks = db.prepare("DELETE FROM marks WHERE seq <= (SELECT seq FROM marks ORDER BY seq DESC LIMIT 1 OFFSET ?)");
+  function markFor(seq) {
+    const n = Math.trunc(Number(seq));
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const row = selectMark.get(n);
+    if (row) return { seq: n, token: String(row.token) };
+    const token = crypto.randomBytes(9).toString("base64url");
+    insertMark.run(n, token);
+    pruneMarks.run(MARKS_KEPT);
+    return { seq: n, token };
+  }
+  /** 客户端带来的标记是否是本数据库发出的。 */
+  function markKnown(mark) {
+    if (!mark || typeof mark !== "object") return true; // 没带标记（老客户端 / 第一次）：无从判断，不当作异常
+    const n = Math.trunc(Number(mark.seq));
+    if (!Number.isFinite(n) || n <= 0 || typeof mark.token !== "string") return true;
+    const row = selectMark.get(n);
+    if (row) return String(row.token) === mark.token;
+    // 没有这一行：被清理掉的老标记，或数据库不是发出它的那个。比已有最小标记还老的，只能当作“被清理了”也要求重新对账（安全方向）。
+    return false;
   }
 
   const selectOne = db.prepare("SELECT updated_at, device FROM records WHERE collection = ? AND id = ?");
@@ -142,6 +174,8 @@ export function openStore(dataDir) {
     exportAll,
     epoch,
     rotateEpoch,
+    markFor,
+    markKnown,
     highWater: () => Number(maxSeq.get().seq),
     touchDevice: (id, name) => touchDevice.run(String(id).slice(0, 80), String(name ?? "").slice(0, 80), Date.now()),
     close: () => db.close()

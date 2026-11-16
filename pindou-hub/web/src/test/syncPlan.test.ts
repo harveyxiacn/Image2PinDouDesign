@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SKEW_MIN_MS, approxBytes, bumpStamp, decideCursor, estimateSkew, hashMatches, planChunks } from "../lib/syncPlan";
+import { SKEW_MIN_MS, approxBytes, bumpStamp, decideCursor, estimateSkew, hashMatches, isSyncMark, planChunks } from "../lib/syncPlan";
 
 describe("decideCursor", () => {
   it("keeps the cursor for an old hub that reports nothing", () => {
@@ -17,6 +17,16 @@ describe("decideCursor", () => {
   it("resets when the cursor is ahead of anything the hub has", () => {
     expect(decideCursor({ localCursor: 99, localEpoch: "a", hubEpoch: "a", hubMaxSeq: 20 })).toEqual({ action: "reset", reason: "ahead" });
     expect(decideCursor({ localCursor: 99, localEpoch: "", hubEpoch: "a", hubMaxSeq: 0 }).reason).toBe("ahead");
+  });
+  it("resets when the hub does not recognise our mark (restored backup that has since grown past the cursor)", () => {
+    expect(decideCursor({ localCursor: 14, localEpoch: "a", hubEpoch: "a", hubMaxSeq: 20, hubMarkOk: false })).toEqual({ action: "reset", reason: "mark" });
+    expect(decideCursor({ localCursor: 14, localEpoch: "a", hubEpoch: "a", hubMaxSeq: 20, hubMarkOk: true }).action).toBe("keep");
+    expect(decideCursor({ localCursor: 14, localEpoch: "a", hubEpoch: "a", hubMaxSeq: 20, hubMarkOk: undefined }).action).toBe("keep");
+    expect(decideCursor({ localCursor: 0, localEpoch: "a", hubEpoch: "a", hubMaxSeq: 20, hubMarkOk: false }).action).toBe("keep");
+  });
+  it("validates marks", () => {
+    expect(isSyncMark({ seq: 3, token: "abc" })).toBe(true);
+    for (const bad of [null, undefined, 3, {}, { seq: 0, token: "a" }, { seq: 1, token: "" }, { seq: "1", token: "a" }, { seq: 1, token: "x".repeat(65) }]) expect(isSyncMark(bad)).toBe(false);
   });
   it("never resets a fresh client", () => {
     expect(decideCursor({ localCursor: 0, localEpoch: "", hubEpoch: "a", hubMaxSeq: 0 }).action).toBe("keep");
@@ -52,6 +62,18 @@ describe("clock skew", () => {
     const first = bumpStamp(now, 10, 60_000, now);
     // a writer that already did max(now, existing + 1) on top of a shifted value is left alone
     expect(bumpStamp(first + 1, first, 60_000, now)).toBe(first + 1);
+  });
+  it("a slow clock that only managed max(now, existing + 1) still lands on hub time, so a later edit beats an unseen earlier one", () => {
+    const hubNowReal = 1_000_000, localNow = 400_000, skew = 600_000; // this device's clock is 10 minutes behind
+    const existing = 900_000; // last version it saw, in hub time
+    // the editor computed Math.max(Date.now(), existing + 1) = existing + 1
+    expect(bumpStamp(existing + 1, existing, skew, localNow)).toBe(hubNowReal);
+    // the intended +1 / +2 ordering of undo-style writes is kept
+    expect(bumpStamp(existing + 2, existing, skew, localNow)).toBe(hubNowReal + 1);
+    // a version ahead of hub time (another fast clock) is still just beaten by 1
+    expect(bumpStamp(hubNowReal + 501, hubNowReal + 500, skew, localNow)).toBe(hubNowReal + 501);
+    // no skew: unchanged behaviour
+    expect(bumpStamp(existing + 1, existing, 0, localNow)).toBe(existing + 1);
   });
   it("does not shift values that are not near the local clock (e.g. old backup records)", () => {
     expect(bumpStamp(12345, undefined, 60_000, now)).toBe(12345);

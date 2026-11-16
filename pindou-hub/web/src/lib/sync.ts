@@ -2,7 +2,7 @@
 import { useSyncExternalStore } from "react";
 import { ackOutbox, getSnapshot, getSyncMeta, listBlobIds, mergeRemote, putBlob, readOutbox, requeueAll, saveDevice, saveSyncMeta, setLocalChangeHandler, getBlob } from "./db";
 import { ensureThumb, ensureThumbs, sha256Hex } from "./images";
-import { decideCursor, estimateSkew, hashMatches, planChunks } from "./syncPlan";
+import { decideCursor, estimateSkew, hashMatches, isSyncMark, planChunks, type SyncMark } from "./syncPlan";
 import type { CollectionName } from "./model";
 
 export type SyncState = {
@@ -49,6 +49,9 @@ async function api<T>(path: string, init: RequestInit = {}, timeoutMs = 15000): 
     signal: AbortSignal.timeout(timeoutMs)
   });
   if (response.status === 401) {
+    // Hub 换了令牌（数据库和 config.json 一起被删/重建）：旧令牌永远不会再通过。清掉它，设置页才会重新给出配对表单；
+    // 地址、游标、本机数据都保留，重新配对后按 epoch 自动对账。同一台电脑上的页面重新打开会自动拿到新令牌。
+    await saveDevice({ token: "" });
     setState({ phase: "unpaired", message: "Hub 拒绝访问，请重新配对" });
     throw new Error("需要重新配对");
   }
@@ -80,7 +83,8 @@ export async function tryLocalAutoPair(): Promise<boolean> {
     if (!body.token) return false;
     const device = getSnapshot().device;
     if (device.hubUrl !== location.origin || device.token !== body.token) {
-      await saveDevice({ hubUrl: location.origin, token: body.token, cursor: device.hubUrl === location.origin ? device.cursor : 0 });
+      const same = device.hubUrl === location.origin;
+      await saveDevice({ hubUrl: location.origin, token: body.token, cursor: same ? device.cursor : 0, syncMark: same ? device.syncMark : undefined });
     }
     setState({ hubName: body.name ?? "", phase: "idle" });
     return true;
@@ -102,14 +106,15 @@ export async function pairWithHub(urlInput: string, code: string): Promise<strin
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error ?? "配对失败");
-  await saveDevice({ hubUrl, token: body.token, cursor: device.hubUrl === hubUrl ? device.cursor : 0 });
+  const same = device.hubUrl === hubUrl;
+  await saveDevice({ hubUrl, token: body.token, cursor: same ? device.cursor : 0, syncMark: same ? device.syncMark : undefined });
   setState({ phase: "idle", hubName: body.name ?? info.name, message: "已配对" });
   void syncNow();
   return body.name ?? info.name;
 }
 
 export async function unpair(): Promise<void> {
-  await saveDevice({ hubUrl: "", token: "", cursor: 0 });
+  await saveDevice({ hubUrl: "", token: "", cursor: 0, syncMark: undefined });
   setState({ phase: "unpaired", message: "", hubName: "" });
 }
 
@@ -123,6 +128,9 @@ type SyncResponse = {
   serverTime?: number;
   epoch?: string;
   maxSeq?: number;
+  /** 对账标记：markOk=false 表示 Hub 不认识本机带去的标记（数据库被恢复成了旧副本）；mark 是到本次返回的游标为止的新标记。 */
+  markOk?: boolean;
+  mark?: SyncMark;
 };
 
 let running: Promise<void> | null = null;
@@ -183,6 +191,7 @@ async function doSync(): Promise<void> {
     let outbox = await readOutbox();
     const localBlobs = await listBlobIds();
     let cursor = device.cursor;
+    let mark: SyncMark | undefined = isSyncMark(device.syncMark) ? device.syncMark : undefined;
     let received = 0;
     let missing: string[] = [];
     let upBytes = 0, downBytes = 0, upBlobs = 0, downBlobs = 0;
@@ -200,7 +209,7 @@ async function doSync(): Promise<void> {
       try {
         body = await api("/api/sync", {
           method: "POST",
-          body: JSON.stringify({ deviceId: device.deviceId, deviceName: device.deviceName, since: cursor, changes: chunk, blobsHave: blobsReported ? [] : localBlobs })
+          body: JSON.stringify({ deviceId: device.deviceId, deviceName: device.deviceName, since: cursor, mark: cursor > 0 ? mark : undefined, changes: chunk, blobsHave: blobsReported ? [] : localBlobs })
         }, 60000);
       } catch (error) {
         if (sentCount > 0 && state.phase !== "unpaired") {
@@ -213,12 +222,13 @@ async function doSync(): Promise<void> {
       // Hub 数据库被恢复成旧备份或被换掉：游标已经没有意义。重置游标并把本机全部记录重新放进发件箱，
       // 之后按“后写者胜”双向合并，两边都不会丢数据。
       const meta = getSyncMeta();
-      const decision = decideCursor({ localCursor: cursor, localEpoch: meta.epoch, hubEpoch: body.epoch, hubMaxSeq: body.maxSeq });
+      const decision = decideCursor({ localCursor: cursor, localEpoch: meta.epoch, hubEpoch: body.epoch, hubMaxSeq: body.maxSeq, hubMarkOk: body.markOk });
       if (typeof body.epoch === "string" && body.epoch && body.epoch !== meta.epoch) await saveSyncMeta({ epoch: body.epoch });
       if (decision.action === "reset" && resets === 0) {
         resets += 1;
         cursor = 0;
-        await saveDevice({ cursor: 0 });
+        mark = undefined;
+        await saveDevice({ cursor: 0, syncMark: undefined });
         await requeueAll();
         outbox = await readOutbox();
         total = outbox.length;
@@ -235,7 +245,8 @@ async function doSync(): Promise<void> {
       }
       received += await mergeRemote(body.changes);
       cursor = body.cursor;
-      await saveDevice({ cursor });
+      if (isSyncMark(body.mark) && body.mark.seq === cursor) mark = body.mark;
+      await saveDevice({ cursor, syncMark: mark });
       if (queue.length) setState({ message: `同步中… 已上传 ${sentCount}/${total} 条` });
       if (!queue.length && !body.more) break;
     }

@@ -118,3 +118,17 @@ test("sync response exposes database identity, high-water mark and server time; 
   const again = await sync({ deviceId: "tablet", since: 0, changes: [{ collection: "txns", id: "c1", updatedAt: 300, data: { code: "A1", delta: 1, kind: "purchase", at: 300 } }] });
   assert.equal(again.accepted, 0);
 });
+
+test("sync marks: hub issues a mark, accepts it back, and rejects one it never issued", async () => {
+  const config = JSON.parse(readFileSync(path.join(dataDir, "config.json"), "utf8"));
+  const sync = (body) => fetch(`${base}/api/sync`, { ...json(body), headers: { "content-type": "application/json", "x-pindou-token": config.token } }).then((r) => r.json());
+  const first = await sync({ deviceId: "laptop", since: 0, changes: [{ collection: "txns", id: "mk1", updatedAt: 400, data: { code: "A1", delta: 1, kind: "purchase", at: 400 } }] });
+  assert.equal(first.markOk, true, "nothing sent, nothing to reject");
+  assert.equal(first.mark.seq, first.cursor);
+  const second = await sync({ deviceId: "laptop", since: first.cursor, mark: first.mark, changes: [] });
+  assert.equal(second.markOk, true);
+  assert.deepEqual(second.mark, first.mark, "stable while nothing changed");
+  const forged = await sync({ deviceId: "laptop", since: first.cursor, mark: { seq: first.mark.seq, token: "not-ours" }, changes: [] });
+  assert.equal(forged.markOk, false);
+  assert.ok(forged.maxSeq >= first.cursor, "hub still answers normally so the client can reconcile");
+});

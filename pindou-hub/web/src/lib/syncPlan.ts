@@ -8,20 +8,31 @@ export const SKEW_NEAR_NOW_MS = 30_000;
 /** 往返超过这个时间的样本不可信，不用来估计偏差。 */
 export const SKEW_MAX_RTT_MS = 5000;
 
-export type CursorDecision = { action: "keep" | "reset"; reason: "" | "epoch" | "ahead" };
+export type CursorDecision = { action: "keep" | "reset"; reason: "" | "epoch" | "ahead" | "mark" };
+
+/** Hub 发给客户端的对账标记：到序号 seq 为止的变更你都拿到了（口令只有发出它的数据库认得）。 */
+export type SyncMark = { seq: number; token: string };
+
+export function isSyncMark(value: unknown): value is SyncMark {
+  const v = value as { seq?: unknown; token?: unknown } | null;
+  return Boolean(v) && typeof v === "object" && typeof v!.seq === "number" && Number.isFinite(v!.seq) && v!.seq > 0 && typeof v!.token === "string" && v!.token.length > 0 && v!.token.length <= 64;
+}
 
 /**
  * 本机游标是否已经和 Hub 对不上（Hub 数据库被恢复 / 被换掉）。
  * - Hub 换了数据库标识（epoch）：重置；
  * - 本机游标比 Hub 当前最大序号还大：重置；
+ * - Hub 说它不认识本机带去的对账标记（markOk === false）：重置。这能发现“恢复成旧备份后 Hub 又长过了本机游标”，
+ *   连 config.json 一起恢复也一样——标记存在数据库里，旧备份里没有；
  * - 老 Hub 不返回这两个字段：保持原样（不改变旧行为）。
  * 本机还没记过 epoch（刚升级）时只记下它，不重置。
  */
-export function decideCursor(input: { localCursor: number; localEpoch: string; hubEpoch?: unknown; hubMaxSeq?: unknown }): CursorDecision {
+export function decideCursor(input: { localCursor: number; localEpoch: string; hubEpoch?: unknown; hubMaxSeq?: unknown; hubMarkOk?: unknown }): CursorDecision {
   const hubEpoch = typeof input.hubEpoch === "string" ? input.hubEpoch : "";
   const hubMax = typeof input.hubMaxSeq === "number" && Number.isFinite(input.hubMaxSeq) ? input.hubMaxSeq : null;
   if (hubEpoch && input.localEpoch && hubEpoch !== input.localEpoch) return { action: "reset", reason: "epoch" };
   if (hubMax !== null && input.localCursor > hubMax) return { action: "reset", reason: "ahead" };
+  if (input.hubMarkOk === false && input.localCursor > 0) return { action: "reset", reason: "mark" };
   return { action: "keep", reason: "" };
 }
 
@@ -37,12 +48,21 @@ export function estimateSkew(sentAt: number, receivedAt: number, serverTime: unk
  * 给一条要写入的记录定 updatedAt：
  * 1. 写入方给的是“本机现在”附近的值，且本机钟与 Hub 相差明显：换算成 Hub 时间，这样钟慢的设备也能赢、钟快的设备不会永远赢；
  * 2. 无论如何不小于 已有版本 + 1（保证严格递增，不会被旧版本盖掉）。
- * 写入方已经按 max(now, 旧值+1) 算过的值（≤ 旧值+2）不再二次校正，避免偏差越滚越大。
+ * 写入方已经按 max(now, 旧值+1) 算过的值（≤ 旧值+2）不再平移，避免偏差越滚越大；
+ *    但钟慢的设备算出的 max(本机现在, 旧值+1) 往往就是“旧值+1”（本机“现在”还比旧版本早）：此时若 Hub 时间已经明显晚于旧值，
+ *    就改用 Hub 时间，否则这次修改只比旧版本新 1 毫秒，会输给别的设备在它之前、但没被它看到的修改。
  */
 export function bumpStamp(wanted: number, existing: number | undefined, skew: number, localNow: number): number {
   let value = Math.trunc(wanted);
   const alreadyAhead = existing !== undefined && value <= existing + 2;
-  if (!alreadyAhead && Math.abs(skew) >= SKEW_MIN_MS && Math.abs(value - localNow) <= SKEW_NEAR_NOW_MS) value += Math.round(skew);
+  const skewed = Math.abs(skew) >= SKEW_MIN_MS;
+  if (alreadyAhead) {
+    if (skewed) {
+      const hubNow = localNow + Math.round(skew);
+      const catchUp = hubNow + Math.max(0, value - (existing as number) - 1);
+      if (catchUp > value) value = Math.trunc(catchUp);
+    }
+  } else if (skewed && Math.abs(value - localNow) <= SKEW_NEAR_NOW_MS) value += Math.round(skew);
   if (existing !== undefined && value <= existing) value = existing + 1;
   return Math.max(1, value);
 }

@@ -77,3 +77,38 @@ test("pushing the same batch in chunks, in any order and repeated, converges", (
     assert.equal(store.applyChanges(all, "pc"), 0, "full replay accepts nothing new");
   });
 });
+
+test("sync marks: issued per cursor, stable, and unknown to a restored older copy", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "pindou-hub-marks-"));
+  try {
+    const a = openStore(dir);
+    assert.equal(a.markFor(0), null);
+    assert.equal(a.markKnown(undefined), true, "no mark sent: nothing to judge");
+    assert.equal(a.markKnown({ seq: "x", token: 1 }), true, "malformed: treated as absent");
+    a.applyChanges([{ collection: "txns", id: "t1", updatedAt: 10, data: {} }, { collection: "txns", id: "t2", updatedAt: 11, data: {} }], "pc");
+    const m1 = a.markFor(a.highWater());
+    assert.deepEqual(a.markFor(a.highWater()), m1, "same seq, same token");
+    assert.equal(a.markKnown(m1), true);
+    assert.equal(a.markKnown({ seq: m1.seq, token: "forged" }), false);
+    assert.equal(a.markKnown({ seq: m1.seq + 50, token: m1.token }), false);
+    a.close();
+    // 另一个数据库（= 恢复了旧副本 / 换了库）不认识 a 发的标记，即使它的序号已经长过去了
+    const other = mkdtempSync(path.join(os.tmpdir(), "pindou-hub-marks2-"));
+    try {
+      const b = openStore(other);
+      b.applyChanges(Array.from({ length: 5 }, (_, i) => ({ collection: "txns", id: `x${i}`, updatedAt: 20 + i, data: {} })), "pc");
+      assert.ok(b.highWater() >= m1.seq);
+      assert.equal(b.markKnown(m1), false);
+      b.close();
+    } finally { rmSync(other, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("sync marks are pruned to a bounded number", () => {
+  withStore((store) => {
+    store.applyChanges(Array.from({ length: 5100 }, (_, i) => ({ collection: "txns", id: `m${i}`, updatedAt: 1 + i, data: {} })), "pc");
+    for (let seq = 1; seq <= 5100; seq++) store.markFor(seq);
+    assert.equal(store.markKnown({ seq: 5100, token: store.markFor(5100).token }), true, "newest kept");
+    assert.equal(store.markKnown({ seq: 1, token: "whatever" }), false, "oldest pruned");
+  });
+});

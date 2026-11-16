@@ -306,12 +306,14 @@ async function handle(req, res) {
     const device = String(body.deviceId ?? req.headers["x-pindou-device"] ?? "unknown").slice(0, 80);
     store.touchDevice(device, body.deviceName);
     const incoming = Array.isArray(body.changes) ? body.changes : [];
+    // 客户端带来的对账标记不是本数据库发的 = 数据库被恢复成了更早的副本：如实告诉客户端，它会重置游标并重新上传。
+    const markOk = store.markKnown(body.mark);
     const accepted = store.applyChanges(incoming, device);
     const pulled = store.changesSince(body.since ?? 0, 2000);
     const have = new Set(Array.isArray(body.blobsHave) ? body.blobsHave.filter((id) => BLOB_RE.test(id)) : []);
     const missing = [...have].filter((id) => !existsSync(path.join(BLOB_DIR, id)));
-    // epoch / maxSeq：让客户端发现“Hub 数据库被恢复或替换”（游标比 Hub 的最大序号还大）。老客户端忽略这两个字段。
-    sendJson(res, 200, { accepted, ...pulled, blobsMissing: missing, serverTime: Date.now(), epoch: store.epoch(), maxSeq: store.highWater() });
+    // epoch / maxSeq / markOk / mark：让客户端发现“Hub 数据库被恢复或替换”（标识变了、游标比最大序号还大、或 Hub 不认识客户端记得的标记）。老客户端忽略这些字段。
+    sendJson(res, 200, { accepted, ...pulled, blobsMissing: missing, serverTime: Date.now(), epoch: store.epoch(), maxSeq: store.highWater(), markOk, mark: store.markFor(pulled.cursor) });
     return;
   }
   const blobMatch = /^\/api\/blobs\/([a-f0-9]{64})$/.exec(p);
