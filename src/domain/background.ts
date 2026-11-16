@@ -12,6 +12,8 @@ export type DropBorderWhiteOptions = {
   tolerance?: number;
   // false 时完全走旧的"固定阈值判白"逻辑；默认（undefined/true）走自适应背景估计。
   adaptive?: boolean;
+  // 背景清掉后，再向内剥离几圈"与背景混色"的边缘格（抗锯齿残留的灰白边）。默认 1 圈，0 = 关闭。
+  rimPasses?: number;
 };
 
 // 从四边做 flood-fill，把"与边缘相连的背景色"格子清成空格（null）：
@@ -43,7 +45,7 @@ export function dropBorderWhite(
   }
 
   const tolerance = options.tolerance ?? autoTolerance(estimate);
-  return floodRemoveBackground(grid, estimate.color, tolerance);
+  return floodRemoveBackground(grid, estimate.color, tolerance, options.rimPasses ?? 1);
 }
 
 // 旧逻辑：只清与边缘连通、且 RGB 都 >= threshold 的近白格。
@@ -175,7 +177,7 @@ function autoTolerance(estimate: { p95Distance: number }): number {
 
 // ΔE 容差泛洪：只清与边缘连通、且与背景色色差 <= tolerance 的格子。
 // 近透明（alpha < 16）格视为留白穿过，不阻断也不清除。
-function floodRemoveBackground(grid: SampledGrid, background: Rgb, tolerance: number): SampledGrid {
+function floodRemoveBackground(grid: SampledGrid, background: Rgb, tolerance: number, rimPasses = 0): SampledGrid {
   const { width, height, cells } = grid;
   const out: SampledCell[] = cells.slice();
   const visited = new Uint8Array(width * height);
@@ -221,6 +223,31 @@ function floodRemoveBackground(grid: SampledGrid, background: Rgb, tolerance: nu
       pushNeighbors(idx, width, height, stack);
     }
     // 其余为有色主体，停止扩散
+  }
+
+  if (removed > 0 && rimPasses > 0) {
+    // 边缘残留：紧贴已清除格、颜色介于背景与主体之间（ΔE 不超过 1.6 倍容差，上限 18）的格也清掉。
+    // 范围刻意很小，只吃抗锯齿混色，不碰与背景差别明显的主体色。
+    const rimTolerance = Math.min(18, tolerance * 1.6);
+    for (let pass = 0; pass < rimPasses; pass += 1) {
+      const rim: number[] = [];
+      for (let idx = 0; idx < out.length; idx += 1) {
+        const cell = out[idx];
+        if (!cell) continue;
+        const x = idx % width;
+        const touches =
+          (x > 0 && out[idx - 1] === null) ||
+          (x < width - 1 && out[idx + 1] === null) ||
+          (idx >= width && out[idx - width] === null) ||
+          (idx < out.length - width && out[idx + width] === null);
+        if (touches && ciede2000(rgbToLab(cell), backgroundLab) <= rimTolerance) {
+          rim.push(idx);
+        }
+      }
+      if (rim.length === 0) break;
+      for (const idx of rim) out[idx] = null;
+      removed += rim.length;
+    }
   }
 
   return removed > 0 ? { width, height, cells: out } : grid;

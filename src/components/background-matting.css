@@ -1,0 +1,112 @@
+.matting-panel {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line, #e2ded6);
+  border-radius: var(--radius-md, 14px);
+  background: var(--surface-sunken, #f6f3ee);
+}
+
+.matting-line {
+  margin: 0;
+  color: var(--ink-soft, #334155);
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.matting-hint {
+  margin: 0;
+  color: var(--muted, #64748b);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.matting-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.matting-seg {
+  display: inline-flex;
+  max-width: 100%;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line-strong, #d6d0c4);
+  border-radius: 14px;
+  background: var(--surface, #fff);
+}
+
+.matting-seg button {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink-soft, #334155);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.matting-seg button[aria-pressed="true"] {
+  background: var(--brand-dark, #293241);
+  color: #fff;
+}
+
+.matting-seg button:disabled,
+.matting-panel .button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.matting-seg button:focus-visible {
+  outline: 3px solid rgba(61, 90, 128, 0.4);
+  outline-offset: 2px;
+}
+
+.matting-stage {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 12px;
+  background-color: #fff;
+  background-image:
+    linear-gradient(45deg, #dcd7cc 25%, transparent 25%, transparent 75%, #dcd7cc 75%),
+    linear-gradient(45deg, #dcd7cc 25%, transparent 25%, transparent 75%, #dcd7cc 75%);
+  background-position: 0 0, 8px 8px;
+  background-size: 16px 16px;
+}
+
+.matting-canvas {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 46vh;
+  touch-action: manipulation;
+}
+
+.matting-tool-remove,
+.matting-tool-keep {
+  cursor: crosshair;
+}
+
+.matting-local {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  color: var(--ink-soft, #334155);
+  font-weight: 700;
+}
+
+.matting-local input {
+  width: 20px;
+  height: 20px;
+}

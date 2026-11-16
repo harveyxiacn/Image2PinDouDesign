@@ -226,25 +226,11 @@ export function BoardPicker({
         <div className="board-mode-body inline-fields" key="custom">
           <label className="field">
             <span>宽度（格）</span>
-            <input
-              type="number"
-              inputMode="numeric"
-              min={1}
-              max={208}
-              value={settings.customWidth}
-              onChange={(event) => onChange({ ...settings, customWidth: Number(event.target.value) })}
-            />
+            <DimensionInput value={settings.customWidth} onCommit={(next) => onChange({ ...settings, customWidth: next })} />
           </label>
           <label className="field">
             <span>高度（格）</span>
-            <input
-              type="number"
-              inputMode="numeric"
-              min={1}
-              max={208}
-              value={settings.customHeight}
-              onChange={(event) => onChange({ ...settings, customHeight: Number(event.target.value) })}
-            />
+            <DimensionInput value={settings.customHeight} onCommit={(next) => onChange({ ...settings, customHeight: next })} />
           </label>
         </div>
       )}
@@ -294,6 +280,31 @@ function PinsInput({ value, onCommit }: { value: number; onCommit: (pins: number
         onBlur={() => setDraft(String(value))}
       />
     </label>
+  );
+}
+
+// 自定义尺寸输入：先保留草稿文本，仅在是 1–208 的整数时提交；清空/输入中不触发重新生成，失焦时恢复为当前值。
+function DimensionInput({ value, onCommit }: { value: number; onCommit: (size: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  const [lastValue, setLastValue] = useState(value);
+  if (value !== lastValue) {
+    setLastValue(value);
+    setDraft(String(value));
+  }
+  return (
+    <input
+      type="number"
+      inputMode="numeric"
+      min={1}
+      max={208}
+      value={draft}
+      onChange={(event) => {
+        setDraft(event.target.value);
+        const next = Number(event.target.value);
+        if (event.target.value.trim() !== "" && Number.isInteger(next) && next >= 1 && next <= 208) onCommit(next);
+      }}
+      onBlur={() => setDraft(String(value))}
+    />
   );
 }
 

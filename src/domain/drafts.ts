@@ -1,5 +1,6 @@
 import { countMatrixColors } from "./conversion";
-import type { BeadDesign } from "./types";
+import { sanitizeBoardPins } from "./boards";
+import type { BeadDesign, ConversionSettings } from "./types";
 
 export const DRAFTS_STORAGE_KEY = "image2pindou:design-drafts:v1";
 export const MAX_LOCAL_DRAFTS = 6;
@@ -34,8 +35,18 @@ export function deserializeDraft(
     boardHeight: height,
     matrix,
     colorCounts: countMatrixColors(matrix),
-    settings: value.settings
+    settings: sanitizeDraftSettings(value.settings)
   };
+}
+
+// settings 来自 localStorage / 导入文件，不可信：只规整会影响渲染循环的数值字段。
+function sanitizeDraftSettings(raw: unknown): ConversionSettings | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const settings = raw as ConversionSettings;
+  if (!("boardTilePins" in settings)) return settings;
+  const pins = Number(settings.boardTilePins);
+  const safe = sanitizeBoardPins(Number.isFinite(pins) ? pins : undefined);
+  return safe === settings.boardTilePins ? settings : { ...settings, boardTilePins: safe };
 }
 
 // 草稿的可 JSON 序列化表示：只保留反序列化所需的字段，colorCounts 在读取时重算。
@@ -63,11 +74,13 @@ export function loadDesignDrafts(validCodes: ReadonlySet<string>): BeadDesign[] 
   }
 }
 
-export function persistDesignDrafts(drafts: BeadDesign[]): void {
-  if (typeof window === "undefined") return;
+// 返回是否真正写入成功；隐私模式或存储空间不足时不阻断编辑，但调用方应提示草稿未保存。
+export function persistDesignDrafts(drafts: BeadDesign[]): boolean {
+  if (typeof window === "undefined") return false;
   try {
     window.localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(drafts.slice(0, MAX_LOCAL_DRAFTS)));
+    return true;
   } catch {
-    // 隐私模式或存储空间不足时不阻断编辑。
+    return false;
   }
 }

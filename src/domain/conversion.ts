@@ -913,7 +913,11 @@ function quantizeWithFloydSteinberg(
 ): BeadMatrix {
   const width = grid.width;
   const height = grid.height;
-  const buffer: SampledCell[] = grid.cells.map((cell) => prepareCellForMatching(cell, settings));
+  const buffer: SampledCell[] = grid.cells.map((cell) => {
+    const prepared = prepareCellForMatching(cell, settings);
+    // 复制一份：误差扩散会原地改 r/g/b，不能污染共享的采样网格（像素化对比预览要用）。
+    return prepared ? { ...prepared } : null;
+  });
   const matrix: BeadMatrix = [];
 
   const distribute = (x: number, y: number, factor: number, dr: number, dg: number, db: number) => {

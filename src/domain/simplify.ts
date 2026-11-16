@@ -76,7 +76,7 @@ function medianPassOnPalette(grid: SampledGrid, palette: PaletteColor[]): Sample
         out[centerIndex] = center;
         continue;
       }
-      const pickedIndex = medianIndex(neighborIndices);
+      const pickedIndex = modeIndex(neighborIndices, nearestIndex[centerIndex], center, palette);
       const picked = palette[pickedIndex];
       out[centerIndex] = {
         r: picked.rgb.r,
@@ -90,11 +90,27 @@ function medianPassOnPalette(grid: SampledGrid, palette: PaletteColor[]): Sample
   return { width, height, cells: out };
 }
 
-// 序号中值：奇数取正中，偶数取下中位，保证返回值永远是合法的色板下标。
-function medianIndex(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = sorted.length >> 1;
-  return sorted.length % 2 === 1 ? sorted[mid] : sorted[mid - 1];
+// 多数票：色板序号按色号排序、不代表明暗，取中值会选出"夹在中间"的怪色，所以改为取出现最多的色。
+// 平票时若中心格的色在其中则保留中心色，否则取与中心色 RGB 距离最近者；返回值永远是合法的色板下标。
+function modeIndex(values: number[], centerIdx: number, center: SampledCell, palette: PaletteColor[]): number {
+  const votes = new Map<number, number>();
+  for (const value of values) votes.set(value, (votes.get(value) ?? 0) + 1);
+  const best = Math.max(...votes.values());
+  const tied = [...votes.entries()].filter(([, n]) => n === best).map(([index]) => index).sort((a, b) => a - b);
+  if (tied.length === 1) return tied[0];
+  if (tied.includes(centerIdx)) return centerIdx;
+  if (!center) return tied[0];
+  let pick = tied[0];
+  let pickDist = Infinity;
+  for (const index of tied) {
+    const rgb = palette[index].rgb;
+    const dist = (rgb.r - center.r) ** 2 + (rgb.g - center.g) ** 2 + (rgb.b - center.b) ** 2;
+    if (dist < pickDist) {
+      pick = index;
+      pickDist = dist;
+    }
+  }
+  return pick;
 }
 
 function medianPass(grid: SampledGrid): SampledGrid {

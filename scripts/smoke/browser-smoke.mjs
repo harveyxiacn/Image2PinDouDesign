@@ -147,6 +147,32 @@ try {
   await shot("02b-advisor", ".advisor-card");
   await step("104-pin option", () => evaluate("[...document.querySelectorAll('[aria-label=单块拼豆板针数] button')].some((b) => b.textContent.trim() === '104 针')"));
 
+  await step("matting panel: preview, strength, local removal adds a design", async () => {
+    console.log("crop buttons", await evaluate(`JSON.stringify([...document.querySelectorAll('button')].filter((el) => el.textContent.includes('去背景')).map((el) => [el.textContent.trim(), el.offsetParent !== null]))`));
+    const before = await evaluate("document.querySelectorAll('.design-card').length");
+    const opened = await evaluate(`(() => { const b = [...document.querySelectorAll('button')].find((el) => el.textContent.includes('裁剪 / 去背景') && el.offsetParent !== null); if (!b) return false; b.click(); return true; })()`);
+    if (!opened) throw new Error("no crop button");
+    await waitFor("!!document.querySelector('[data-matting-panel]')", 15000);
+    await waitFor("(document.querySelector('[data-matting-line]')?.textContent ?? '').trim().length > 0", 30000);
+    await evaluate(`document.querySelector('[data-matting-strength="strong"]')?.click()`);
+    await sleep(500);
+    const canvasOk = await evaluate("(() => { const c = document.querySelector('[data-matting-preview]'); return !!c && c.width > 0 && c.height > 0; })()");
+    await shot("09c-matting-panel");
+    console.log("matting line", await evaluate("document.querySelector('[data-matting-line]')?.textContent"));
+    await evaluate(`(() => { const el = document.querySelector('[data-matting-local]'); const box = el?.matches('input') ? el : el?.querySelector('input'); if (box && !box.checked) box.click(); })()`);
+    await sleep(200);
+    await click("添加为新图纸");
+    await waitFor("!document.querySelector('.crop-overlay') && !document.querySelector('.converting-banner')", 90000);
+    await sleep(800);
+    const after = await evaluate("document.querySelectorAll('.design-card').length");
+    console.log("designs before/after matting", before, after);
+    return canvasOk && after === before + 1 && !(await evaluate("!!document.querySelector('.error-banner, [role=alert].error')"));
+  });
+  await shot("09d-after-matting");
+  await evaluate("document.querySelector('.design-card-select')?.click()");
+  await waitFor("!document.querySelector('.converting-banner')", 90000);
+  await sleep(1000);
+
   await step("brush drag is one undo step", async () => {
     await click("开始编辑图纸");
     await sleep(300);
@@ -292,6 +318,17 @@ try {
   await sleep(200);
   await shot("09-toast-desktop");
 
+  await step("shortcut help opens and closes", async () => {
+    await evaluate(`document.querySelector('button[aria-label="快捷键说明"]')?.click()`);
+    await sleep(400);
+    const open = await evaluate(`!!document.querySelector('[role=dialog] [data-shortcut-help], [data-shortcut-help]')`);
+    await shot("09b-shortcut-help");
+    await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))");
+    await sleep(400);
+    return open && !(await evaluate("!!document.querySelector('[role=dialog]')"));
+  });
+
+
   await viewport(1024, 768);
   await sleep(800);
   await step("tablet no overflow", async () => (await overflow()) <= 0);
@@ -302,6 +339,18 @@ try {
   console.log("mobile horizontal overflow px", await overflow());
   await step("mobile no overflow", async () => (await overflow()) <= 0);
   await shot("11-mobile-top");
+  await step("mobile: matting panel fits 390px", async () => {
+    const opened = await evaluate(`(() => { const b = [...document.querySelectorAll('button')].find((el) => el.textContent.includes('裁剪 / 去背景') && el.offsetParent !== null); if (!b) return null; b.click(); return true; })()`);
+    if (!opened) { console.log("mobile: crop button not visible, skipped"); return true; }
+    await waitFor("!!document.querySelector('[data-matting-panel]')", 15000);
+    await sleep(600);
+    const wide = await evaluate("(() => { const p = document.querySelector('[data-matting-panel]').getBoundingClientRect(); return p.right > innerWidth + 1 || p.left < -1; })()");
+    await shot("11b-mobile-matting");
+    const of = await overflow();
+    await evaluate("document.querySelector('.crop-overlay .link-button')?.click()");
+    await sleep(400);
+    return !wide && of <= 0;
+  });
   await step("mobile nav opens 用豆", () => click("用豆", ".mobile-nav button"));
   await sleep(600);
   await shot("12-mobile-full", null, true);

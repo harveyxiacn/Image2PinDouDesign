@@ -1,0 +1,69 @@
+/* 图纸手势 / 快捷键说明（rootux 负责，仅追加在此文件） */
+.canvas-viewport.is-panning,
+.canvas-viewport.is-panning canvas {
+  cursor: grabbing;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.canvas-viewport {
+  -webkit-touch-callout: none;
+}
+
+.zoom-controls .zoom-help {
+  font-size: 1rem;
+}
+
+.shortcut-help {
+  display: grid;
+  gap: 18px;
+}
+
+.shortcut-help h3 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+}
+
+.shortcut-help dl {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 0;
+}
+
+.shortcut-help dt {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.shortcut-help dt kbd {
+  display: inline-block;
+  margin: 1px 2px 1px 0;
+  padding: 1px 7px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.8rem;
+  opacity: 0.85;
+}
+
+.shortcut-help dd {
+  margin: 0;
+  opacity: 0.85;
+}
+
+.shortcut-help-foot {
+  margin: 0;
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+@media (max-width: 720px) {
+  .shortcut-help dl {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .shortcut-help dd {
+    margin-bottom: 8px;
+  }
+}

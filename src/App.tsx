@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CropDialog, type CropFractions } from "./components/CropDialog";
+import type { MattingSettings } from "./components/BackgroundMattingPanel";
 import { DesignGallery } from "./components/DesignGallery";
 import { DesignPreview } from "./components/DesignPreview";
 import { Dialog } from "./components/Dialog";
+import { ShortcutHelp } from "./components/ShortcutHelp";
+import { firstImageIndex, pastedImageName, resolveShortcut, shouldHandlePasteImage } from "./domain/viewGestures";
 import { DropOverlay } from "./components/DropOverlay";
 import { INSPECTOR_TABS, Inspector, type InspectorTab } from "./components/Inspector";
 import { PalettePanel } from "./components/PalettePanel";
@@ -17,7 +20,8 @@ import { UploadPanel } from "./components/UploadPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { IconCrop, IconDroplet, IconEdit, IconGrid, IconPlus, IconRotateCcw, IconSettings, IconSliders } from "./components/icons";
-import { removeBackgroundFromSource, type RemovalProgress } from "./domain/backgroundRemoval";
+import { removeBackgroundSmart, type RemovalProgress } from "./domain/backgroundRemoval";
+import { translateEdits } from "./domain/matting";
 import { DEFAULT_SETTINGS, resolveBoardSize, resolveTilePins, toConversionSettings } from "./domain/settings";
 import { getDesignSizeOptions, getSmartSizeDescription, type DesignSizeOption } from "./domain/designSizing";
 import { autoCropToContent, cropPixelSource, rectFromFractions } from "./domain/crop";
@@ -59,6 +63,8 @@ type EditHistory = {
 };
 
 const MAX_EDIT_HISTORY = 30;
+// 聚焦时会自己处理 Ctrl+Z 的文本类 input 类型。
+const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set(["text", "number", "search", "email", "url", "tel", "password"]);
 
 export default function App() {
   const [uploadSettings, setUploadSettings] = useState<UiSettings>(DEFAULT_SETTINGS);
@@ -79,6 +85,7 @@ export default function App() {
   const [sourceFilter, setSourceFilter] = useState<StatsSourceFilter>("all");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("size");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [fitTolerance, setFitTolerance] = useState<FitTolerance>(8);
   const projectInputRef = useRef<HTMLInputElement | null>(null);
   const inventoryInputRef = useRef<HTMLInputElement | null>(null);
@@ -229,12 +236,21 @@ export default function App() {
           const input = pendingImages.find(({ image }) => image.id === id);
           if (input) convertedInputsRef.current.set(id, { source: input.image.source, key: input.key });
           generatedDesignsRef.current.set(id, design);
+          // 手动改过的图纸被重新生成覆盖前，把改过的版本留在撤销栈里：Ctrl+Z 能找回。
+          const handEdited = designsLatestRef.current.find((candidate) => candidate.id === id);
           setEditHistories((current) => {
             if (!current[id]) return current;
             const next = { ...current };
-            delete next[id];
+            if (handEdited && current[id].past.length > 0) {
+              next[id] = { past: [handEdited], future: [] };
+            } else {
+              delete next[id];
+            }
             return next;
           });
+          if (handEdited && editHistoriesLatestRef.current[id]?.past.length) {
+            notify(`「${design.fileName}」已按新设置重新生成，手动修改已被替换；按 Ctrl+Z 可找回`);
+          }
         }
         setDesigns((current) => {
           const byId = new Map(current.map((design) => [design.id, design]));
@@ -286,6 +302,10 @@ export default function App() {
   const currentDesignCodes = useMemo(() => {
     return activeDesign ? new Set(Object.keys(activeDesign.colorCounts)) : new Set<string>();
   }, [activeDesign]);
+  const designsLatestRef = useRef(designs);
+  designsLatestRef.current = designs;
+  const editHistoriesLatestRef = useRef(editHistories);
+  editHistoriesLatestRef.current = editHistories;
   const activeHistory = activeDesign ? editHistories[activeDesign.id] : undefined;
   const activeGeneratedDesign = activeDesign ? generatedDesignsRef.current.get(activeDesign.id) : undefined;
 
@@ -382,11 +402,12 @@ export default function App() {
     }
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target;
+      // 只有会吃掉 Ctrl+Z 的文本类输入才放行；复选框/滑块/按钮等聚焦时仍应能撤销。
       const isEditable = target instanceof HTMLElement && (
         target.isContentEditable ||
-        target.tagName === "INPUT" ||
         target.tagName === "TEXTAREA" ||
-        target.tagName === "SELECT"
+        target.tagName === "SELECT" ||
+        (target instanceof HTMLInputElement && TEXT_INPUT_TYPES.has(target.type))
       );
       if (isEditable || !(event.ctrlKey || event.metaKey)) {
         return;
@@ -414,8 +435,8 @@ export default function App() {
     }
   };
 
-  const saveActiveDraft = () => {
-    if (!activeDesign) return;
+  const saveActiveDraft = (): boolean => {
+    if (!activeDesign) return false;
     const existingDraftId = localDraftIdsRef.current.has(activeDesign.id)
       ? activeDesign.id
       : savedCopyIdsRef.current.get(activeDesign.id);
@@ -428,13 +449,25 @@ export default function App() {
         : `${stripExtension(activeDesign.fileName)}-本机草稿`
     };
     const withoutCurrent = localDraftsRef.current.filter((draft) => draft.id !== draftId);
+    if (withoutCurrent.length >= MAX_LOCAL_DRAFTS) {
+      // 草稿已满：保存新草稿会挤掉最旧的一份，先让用户确认。
+      const oldest = withoutCurrent[MAX_LOCAL_DRAFTS - 1];
+      if (!window.confirm(`本机草稿已满（最多 ${MAX_LOCAL_DRAFTS} 份）。继续保存会删除最旧的草稿「${oldest.fileName}」，确定吗？`)) {
+        return false;
+      }
+    }
     localDraftsRef.current = [snapshot, ...withoutCurrent].slice(0, MAX_LOCAL_DRAFTS);
     localDraftIdsRef.current = new Set(localDraftsRef.current.map((draft) => draft.id));
     savedCopyIdsRef.current.set(activeDesign.id, draftId);
-    persistDesignDrafts(localDraftsRef.current);
+    const persisted = persistDesignDrafts(localDraftsRef.current);
     setDesigns((current) => current.filter((design) =>
       !design.id.startsWith("draft-") || localDraftIdsRef.current.has(design.id)));
+    if (!persisted) {
+      notify("本机存储空间不足或被浏览器禁用，草稿未保存（可用“导出图纸文件”备份）");
+      return false;
+    }
     notify(`已保存为本机草稿（最多保留 ${MAX_LOCAL_DRAFTS} 份）`);
+    return true;
   };
 
   // ---- 图纸文件 / 库存 CSV：本机数据的备份与换设备 ----
@@ -462,11 +495,13 @@ export default function App() {
       }
       localDraftsRef.current = [...accepted, ...localDraftsRef.current];
       localDraftIdsRef.current = new Set(localDraftsRef.current.map((draft) => draft.id));
-      persistDesignDrafts(localDraftsRef.current);
+      const persisted = persistDesignDrafts(localDraftsRef.current);
       setDesigns((current) => [...accepted, ...current]);
       setActiveId(accepted[0].id);
       const notImported = imported.length - accepted.length + skipped;
-      notify(notImported > 0
+      notify(!persisted
+        ? `已导入 ${accepted.length} 张图纸，但本机存储空间不足，刷新后不会保留`
+        : notImported > 0
         ? `已导入 ${accepted.length} 张图纸；另有 ${notImported} 张未导入（草稿已满或数据无效）`
         : `已导入 ${accepted.length} 张图纸`);
     } catch (caught) {
@@ -518,6 +553,65 @@ export default function App() {
     }
   };
 
+  // 全局：Ctrl+V 粘贴剪贴板里的图片；? 打开快捷键说明；C 显示/隐藏格内色号。
+  // 输入框、对话框里都不接管；Ctrl/Alt 组合键只处理粘贴这一种。
+  const globalActionsRef = useRef({ addFiles: handleFiles, toggleCodes: () => {}, hasDesign: false });
+  globalActionsRef.current = {
+    addFiles: handleFiles,
+    toggleCodes: () => {
+      const next = !settings.showLabels;
+      setSettings((current) => ({ ...current, showLabels: next }));
+      notify(next ? "已显示格内色号" : "已隐藏格内色号");
+    },
+    hasDesign: images.length > 0 || designs.length > 0
+  };
+  useEffect(() => {
+    const modalOpen = () => Boolean(document.querySelector('[role="dialog"][aria-modal="true"]'));
+    const asTarget = (target: EventTarget | null) => (target instanceof HTMLElement ? target : null);
+    const handlePaste = (event: ClipboardEvent) => {
+      if (!shouldHandlePasteImage({ target: asTarget(event.target), modalOpen: modalOpen() })) return;
+      const items = Array.from(event.clipboardData?.items ?? []);
+      if (firstImageIndex(items) < 0) return;
+      const now = new Date();
+      const files = items
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => file !== null)
+        .map((file) => new File([file], pastedImageName(file.name, file.type, now), { type: file.type, lastModified: now.getTime() }));
+      if (files.length === 0) return;
+      event.preventDefault();
+      void globalActionsRef.current.addFiles(files);
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      const action = resolveShortcut({
+        key: event.key,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        altKey: event.altKey,
+        shiftKey: event.shiftKey,
+        repeat: event.repeat,
+        handled: event.defaultPrevented,
+        target: asTarget(event.target),
+        modalOpen: modalOpen(),
+        hasDesign: globalActionsRef.current.hasDesign,
+        canEdit: false
+      });
+      if (action?.type === "help") {
+        event.preventDefault();
+        setHelpOpen(true);
+      } else if (action?.type === "toggleCodes") {
+        event.preventDefault();
+        globalActionsRef.current.toggleCodes();
+      }
+    };
+    window.addEventListener("paste", handlePaste);
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("paste", handlePaste);
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, []);
+
   const removeDesign = (id: string) => {
     generatedDesignsRef.current.delete(id);
     convertedInputsRef.current.delete(id);
@@ -544,7 +638,7 @@ export default function App() {
   };
 
   // 从一张图框选/抠图，生成一张独立的新图纸（支持把一张总图拆成多个主体）。
-  const addCroppedDesign = async (rect: CropFractions | null, removeBg: boolean, focus: FocusPoint) => {
+  const addCroppedDesign = async (rect: CropFractions | null, removeBg: boolean, focus: FocusPoint, matting?: MattingSettings) => {
     const sourceImage = images.find((image) => image.id === cropImageId);
     if (!sourceImage) {
       return;
@@ -554,21 +648,33 @@ export default function App() {
     setError(null);
     try {
       let derived: PixelSource;
+      let cropOrigin = { x: 0, y: 0 };
       if (rect) {
-        derived = cropPixelSource(sourceImage.source, rectFromFractions(sourceImage.source, rect.fx, rect.fy, rect.fw, rect.fh));
+        const pixelRect = rectFromFractions(sourceImage.source, rect.fx, rect.fy, rect.fw, rect.fh);
+        cropOrigin = { x: pixelRect.x, y: pixelRect.y };
+        derived = cropPixelSource(sourceImage.source, pixelRect);
       } else if (settings.fit === "cover") {
-        derived = cropPixelSource(sourceImage.source, computeCropRect(
+        const coverRect = computeCropRect(
           sourceImage.source,
           focus,
           "cover",
           boardSize.width / boardSize.height
-        ));
+        );
+        cropOrigin = { x: coverRect.x, y: coverRect.y };
+        derived = cropPixelSource(sourceImage.source, coverRect);
       } else {
         derived = sourceImage.source;
       }
 
       if (removeBg) {
-        derived = await removeBackgroundFromSource(derived, setCropProgress);
+        const removal = await removeBackgroundSmart(derived, {
+          strength: matting?.strength,
+          method: matting?.method,
+          edits: matting ? translateEdits(matting.edits, cropOrigin, derived) : undefined,
+          onProgress: setCropProgress
+        });
+        derived = removal.source;
+        notify(removal.message);
         derived = autoCropToContent(derived);
       }
 
@@ -863,6 +969,7 @@ export default function App() {
               onCellsChange={activeDesign ? editActiveCells : undefined}
               onPatch={activeDesign ? patchActiveDesign : undefined}
               onMirror={activeDesign ? mirrorActiveDesign : undefined}
+              onShowHelp={() => setHelpOpen(true)}
               onUndo={activeDesign ? undoActiveEdit : undefined}
               onRedo={activeDesign ? redoActiveEdit : undefined}
               onReset={activeDesign ? resetActiveDesign : undefined}
@@ -1061,6 +1168,12 @@ export default function App() {
         </Dialog>
       )}
 
+      {helpOpen && (
+        <Dialog title="快捷键与手势" onClose={() => setHelpOpen(false)}>
+          <ShortcutHelp />
+        </Dialog>
+      )}
+
       <ToastRegion toasts={toasts} onDismiss={dismiss} />
       <UpdateBanner />
 
@@ -1079,7 +1192,7 @@ export default function App() {
             busy={cropBusy}
             progress={cropProgress}
             onCancel={() => { if (!cropBusy) setCropImageId(null); }}
-            onSubmit={(rect, removeBg, focus) => { void addCroppedDesign(rect, removeBg, focus); }}
+            onSubmit={(rect, removeBg, focus, matting) => { void addCroppedDesign(rect, removeBg, focus, matting); }}
           />
         );
       })()}

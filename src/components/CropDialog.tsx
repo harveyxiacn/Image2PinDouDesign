@@ -3,6 +3,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerE
 import type { RemovalProgress } from "../domain/backgroundRemoval";
 import { computeCropRect, estimateFocus, type FocusPoint } from "../domain/focus";
 import type { FitMode, PixelSource } from "../domain/types";
+import { BackgroundMattingPanel, DEFAULT_MATTING, type MattingSettings } from "./BackgroundMattingPanel";
 import { IconClose, IconTrash } from "./icons";
 
 export type CropFractions = { fx: number; fy: number; fw: number; fh: number };
@@ -16,7 +17,7 @@ type CropDialogProps = {
   busy: boolean;
   progress: RemovalProgress | null;
   onCancel: () => void;
-  onSubmit: (rect: CropFractions | null, removeBg: boolean, focus: FocusPoint) => void;
+  onSubmit: (rect: CropFractions | null, removeBg: boolean, focus: FocusPoint, matting?: MattingSettings) => void;
 };
 
 type DragRect = { x: number; y: number; w: number; h: number };
@@ -36,6 +37,7 @@ export function CropDialog({
   const frameRef = useRef<HTMLDivElement | null>(null);
   const [rect, setRect] = useState<DragRect | null>(null);
   const [removeBg, setRemoveBg] = useState(true);
+  const [matting, setMatting] = useState<MattingSettings>(DEFAULT_MATTING);
   const [tool, setTool] = useState<CropTool>("focus");
   const autoFocus = useMemo(() => estimateFocus(source), [source]);
   const [focus, setFocus] = useState<FocusPoint>(autoFocus);
@@ -142,7 +144,7 @@ export function CropDialog({
         fh: rect.h / bounds.height
       };
     }
-    onSubmit(fractions, removeBg, focus);
+    onSubmit(fractions, removeBg, focus, matting);
   };
 
   const progressPercent = progress ? Math.round(progress.ratio * 100) : null;
@@ -151,7 +153,7 @@ export function CropDialog({
     : progress.stage === "analyze"
       ? "正在识别背景类型…"
       : progress.stage === "solid-background"
-        ? "纯色背景已清理"
+        ? "背景已在本机清理"
         : progress.stage === "already-transparent"
           ? "图片已有透明背景"
           : `AI 正在抠图… ${progressPercent}%`;
@@ -167,7 +169,7 @@ export function CropDialog({
           </button>
         </div>
 
-        <p className="muted">点击设置主体焦点，填满裁剪时会围绕焦点智能取景；也可切换为手动框选。智能去背景会优先清理纯色底，复杂背景再使用 AI。</p>
+        <p className="muted">点击设置主体焦点，填满裁剪时会围绕焦点智能取景；也可切换为手动框选。智能去背景会先判断背景：纯色/渐变直接在本机清理，只有复杂背景才用 AI。</p>
 
         <div className="crop-tool-switch" role="group" aria-label="裁剪工具">
           <button
@@ -254,10 +256,14 @@ export function CropDialog({
             : `${focusOrigin === "auto" ? "已使用自动焦点" : "已设置手动焦点"} · ${fitMode === "cover" ? "蓝框为最终填满裁剪范围" : "完整显示模式保留整张图片"}`}
         </p>
 
+        {removeBg && (
+          <BackgroundMattingPanel source={source} value={matting} disabled={busy} onChange={setMatting} />
+        )}
+
         <div className="crop-controls">
           <label className="toggle">
             <input type="checkbox" checked={removeBg} onChange={(event) => setRemoveBg(event.target.checked)} disabled={busy} />
-            <span>智能去背景（复杂背景首次会下载 AI 模型）</span>
+            <span>智能去背景（只有复杂背景才会下载 AI 模型）</span>
           </label>
           <div className="button-row">
             <button type="button" className="button secondary" onClick={resetAutoFocus} disabled={busy}>

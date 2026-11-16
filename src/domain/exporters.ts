@@ -24,11 +24,19 @@ export function countsToCsv(counts: Record<string, number>, palette: PaletteColo
   return ["色号,颜色名称,HEX,数量", ...rows].join("\n");
 }
 
-export function downloadTextFile(fileName: string, text: string, mimeType = "text/csv;charset=utf-8"): void {
-  const blob = new Blob([`\uFEFF${text}`], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  triggerDownload(fileName, url);
-  URL.revokeObjectURL(url);
+// bom 默认：CSV 加一个 BOM（Excel 不乱码），JSON 不加；文本自带 BOM 时不重复添加。
+export function downloadTextFile(
+  fileName: string,
+  text: string,
+  mimeType = "text/csv;charset=utf-8",
+  options: { bom?: boolean } = {}
+): void {
+  downloadBlob(fileName, new Blob([withSingleBom(text, options.bom ?? !mimeType.startsWith("application/json"))], { type: mimeType }));
+}
+
+export function withSingleBom(text: string, bom: boolean): string {
+  const body = text.replace(/^\uFEFF+/, "");
+  return bom ? `\uFEFF${body}` : body;
 }
 
 export function downloadDataUrl(fileName: string, dataUrl: string): void {

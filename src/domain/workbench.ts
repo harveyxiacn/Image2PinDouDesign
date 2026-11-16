@@ -198,7 +198,7 @@ export type BoardTile = { index: number; col: number; row: number; x: number; y:
 
 /** 按板（每块 pins × pins）切分图纸，返回每块在整图里的格子范围，供“按板制作”导航。 */
 export function boardTiles(design: Pick<BeadDesign, "boardWidth" | "boardHeight">, pins: number): BoardTile[] {
-  const size = Number.isFinite(pins) && pins > 0 ? Math.floor(pins) : 52;
+  const size = Number.isFinite(pins) && pins >= 1 ? Math.floor(pins) : 52;
   const cols = Math.max(1, Math.ceil(design.boardWidth / size));
   const rows = Math.max(1, Math.ceil(design.boardHeight / size));
   const tiles: BoardTile[] = [];

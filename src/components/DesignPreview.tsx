@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { renderDesignToCanvas } from "../domain/rendering";
 import type { BeadDesign, PaletteColor } from "../domain/types";
 import { BEAD_PITCH_MM, physicalSizeCm } from "../domain/boards";
@@ -21,6 +22,21 @@ import { BeadPreviewCanvas } from "./BeadPreviewCanvas";
 import { PixelCanvas } from "./DesignGallery";
 import { IconCheck, IconDownload, IconEdit, IconMinus, IconPlus } from "./icons";
 import { Segmented } from "./Segmented";
+import {
+  MAX_ZOOM,
+  anchoredScroll,
+  clampZoom,
+  pinchMetrics,
+  pinchZoom,
+  resolveShortcut,
+  singlePointerAction,
+  stepZoom,
+  viewportTouchAction,
+  wheelZoomFactor,
+  type Point,
+  type ZoomValue
+} from "../domain/viewGestures";
+import "./gestures.css";
 
 type DesignPreviewProps = {
   design?: BeadDesign;
@@ -38,23 +54,25 @@ type DesignPreviewProps = {
   onUndo?: () => void;
   onRedo?: () => void;
   onReset?: () => void;
-  onSaveDraft?: () => void;
+  onSaveDraft?: () => boolean | void;
   canUndo?: boolean;
   canRedo?: boolean;
   canReset?: boolean;
   onExportPdf?: () => void;
   // 标题栏右侧的图纸级操作（裁剪 / 复制为另一尺寸），由 App 注入。
   headerActions?: ReactNode;
+  // 打开快捷键说明（由 App 提供对话框）；不传则不显示入口。
+  onShowHelp?: () => void;
 };
 
-type PreviewZoom = "fit" | 1 | 1.5 | 2;
+type PreviewZoom = ZoomValue;
 type StageView = "pattern" | "pixelated" | "original" | "beads";
 type InteractionMode = "view" | "paint" | "fill" | "pick" | "erase" | "select" | "build";
 type Box = { left: number; top: number; width: number; height: number };
 
+const MODE_KEY_HINT: Partial<Record<InteractionMode, string>> = { view: "V", paint: "B", fill: "G", pick: "I", erase: "E", select: "M" };
 const MODE_SHORTCUTS: Record<string, InteractionMode> = { v: "view", b: "paint", g: "fill", i: "pick", e: "erase", m: "select" };
 
-const ZOOM_LEVELS: Array<Exclude<PreviewZoom, "fit">> = [1, 1.5, 2];
 const PROGRESS_PREFIX = "image2pindou:build-progress:v1:";
 
 export function DesignPreview({
@@ -75,6 +93,7 @@ export function DesignPreview({
   canReset = false,
   onExportPdf,
   headerActions,
+  onShowHelp,
   onCellsChange,
   onPatch
 }: DesignPreviewProps) {
@@ -83,6 +102,17 @@ export function DesignPreview({
   const previousZoomRef = useRef<PreviewZoom>("fit");
   const renderCellSizeRef = useRef(22);
   const [zoom, setZoom] = useState<PreviewZoom>("fit");
+  const zoomRef = useRef<PreviewZoom>("fit");
+  zoomRef.current = zoom;
+  // 缩放时以光标 / 双指中心为锚点：自己设好滚动位置，别让“从适应屏幕放大”的居中逻辑覆盖。
+  const skipCenterRef = useRef(false);
+  const [repaintTick, setRepaintTick] = useState(0);
+  const pointersRef = useRef(new Map<number, Point>());
+  const gestureRef = useRef<
+    | { kind: "pan"; id: number; last: Point }
+    | { kind: "pinch"; startDistance: number; startZoom: number; last: Point }
+    | null
+  >(null);
   const [canvasWidth, setCanvasWidth] = useState(0);
   const [mode, setMode] = useState<InteractionMode>("view");
   const [paintCode, setPaintCode] = useState("H7");
@@ -220,7 +250,7 @@ export function DesignPreview({
       region: mode === "build" ? activeTile : null
     });
     setCanvasWidth(canvasRef.current.width);
-  }, [activeTile, completedCells, design, focusCode, mode, palette, showLabels]);
+  }, [activeTile, completedCells, design, focusCode, mode, palette, showLabels, repaintTick]);
 
   // 新生成结果（新图纸或重新转换，pixelated 引用会变化）到达时做一次逐行“铺豆”揭示；
   // 单格编辑沿用同一引用，不会反复播放。动画只用 clip-path，结束与否不影响任何状态。
@@ -242,6 +272,10 @@ export function DesignPreview({
   useEffect(() => {
     const previousZoom = previousZoomRef.current;
     previousZoomRef.current = zoom;
+    if (skipCenterRef.current) {
+      skipCenterRef.current = false;
+      return;
+    }
     if (previousZoom !== "fit" || zoom === "fit") {
       return;
     }
@@ -647,16 +681,152 @@ export function DesignPreview({
     }
   };
 
-  const zoomIn = () => {
-    setZoom((current) => current === "fit"
-      ? ZOOM_LEVELS[0]
-      : ZOOM_LEVELS[Math.min(ZOOM_LEVELS.indexOf(current) + 1, ZOOM_LEVELS.length - 1)]);
+  // ---- 视口手势：鼠标拖动 / 中键平移、触摸单指平移、双指捏合缩放 + 平移 ----
+  const handleViewportPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const viewport = viewportRef.current;
+    if (!viewport || !design) return;
+    const point = { x: event.clientX, y: event.clientY };
+    if (event.pointerType === "touch") {
+      pointersRef.current.set(event.pointerId, point);
+      if (pointersRef.current.size === 2) {
+        // 第二根手指落下：放弃第一根手指刚开始的一笔，改为捏合 / 平移。
+        if (strokeRef.current) {
+          strokeRef.current = null;
+          setRepaintTick((tick) => tick + 1);
+        }
+        const [a, b] = [...pointersRef.current.values()];
+        const metrics = pinchMetrics(a, b);
+        gestureRef.current = { kind: "pinch", startDistance: metrics.distance, startZoom: effectiveZoom(), last: metrics.center };
+        return;
+      }
+    }
+    if (pointersRef.current.size > 1) return;
+    const action = singlePointerAction({
+      button: event.button,
+      pointerType: event.pointerType as "mouse" | "pen" | "touch",
+      editing: mode !== "view",
+      zoomed: zoomRef.current !== "fit"
+    });
+    if (action !== "pan") return;
+    if (event.button === 1) event.preventDefault();
+    gestureRef.current = { kind: "pan", id: event.pointerId, last: point };
+    viewport.classList.add("is-panning");
+    viewport.setPointerCapture?.(event.pointerId);
   };
-  const zoomOut = () => {
-    setZoom((current) => current === "fit" || current === ZOOM_LEVELS[0]
-      ? "fit"
-      : ZOOM_LEVELS[Math.max(0, ZOOM_LEVELS.indexOf(current) - 1)]);
+
+  const handleViewportPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const viewport = viewportRef.current;
+    const gesture = gestureRef.current;
+    if (!viewport || !gesture) return;
+    if (pointersRef.current.has(event.pointerId)) {
+      pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+    if (gesture.kind === "pinch") {
+      if (pointersRef.current.size < 2) return;
+      const [a, b] = [...pointersRef.current.values()];
+      const metrics = pinchMetrics(a, b);
+      zoomTo(pinchZoom(gesture.startZoom, gesture.startDistance, metrics.distance), metrics.center);
+      viewport.scrollLeft -= metrics.center.x - gesture.last.x;
+      viewport.scrollTop -= metrics.center.y - gesture.last.y;
+      gesture.last = metrics.center;
+      return;
+    }
+    if (event.pointerId !== gesture.id) return;
+    viewport.scrollLeft -= event.clientX - gesture.last.x;
+    viewport.scrollTop -= event.clientY - gesture.last.y;
+    gesture.last = { x: event.clientX, y: event.clientY };
   };
+
+  const handleViewportPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    pointersRef.current.delete(event.pointerId);
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    if (gesture.kind === "pinch" ? pointersRef.current.size < 2 : event.pointerId === gesture.id) {
+      gestureRef.current = null;
+      viewportRef.current?.classList.remove("is-panning");
+    }
+  };
+
+  // Ctrl+滚轮（含触控板捏合）以光标为中心缩放；需要非 passive 监听才能阻止页面缩放。
+  const hasDesign = Boolean(design);
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !hasDesign) return;
+    const handleWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey || viewport.hidden) return;
+      event.preventDefault();
+      if (zoomRef.current === "fit" && event.deltaY > 0) return;
+      zoomTo(effectiveZoom() * wheelZoomFactor(event.deltaY, event.deltaMode), { x: event.clientX, y: event.clientY });
+    };
+    viewport.addEventListener("wheel", handleWheel, { passive: false });
+    return () => viewport.removeEventListener("wheel", handleWheel);
+  // zoomTo / effectiveZoom 只读 ref 与 DOM，这里不需要随渲染重建。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasDesign, canvasWidth]);
+
+  // 全局单键快捷键（+ - 0 缩放，V B G I E M 切换工具）。输入框、对话框、Ctrl/Alt 组合都不触发。
+  const shortcutRef = useRef<(event: KeyboardEvent) => void>(() => undefined);
+  shortcutRef.current = (event) => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const action = resolveShortcut({
+      key: event.key,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey,
+      repeat: event.repeat,
+      handled: event.defaultPrevented,
+      target,
+      modalOpen: Boolean(document.querySelector('[role="dialog"][aria-modal="true"]')),
+      hasDesign: true,
+      canEdit: Boolean(onCellChange)
+    });
+    if (!action) return;
+    if (action.type === "zoomIn") stepZoomBy(1);
+    else if (action.type === "zoomOut") stepZoomBy(-1);
+    else if (action.type === "zoomFit") setZoom("fit");
+    else if (action.type === "tool") selectMode(action.mode);
+    else return;
+    event.preventDefault();
+  };
+  useEffect(() => {
+    if (!hasDesign) return;
+    const listener = (event: KeyboardEvent) => shortcutRef.current(event);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, [hasDesign]);
+
+  // 以屏幕坐标 anchor 为锚点缩放到 next 倍（相对画布原始宽度）：锚点下的格子保持不动。
+  const zoomTo = (next: number, anchor?: Point) => {
+    const viewport = viewportRef.current;
+    const stage = stageRef.current;
+    if (!viewport || !stage) return;
+    const rect = viewport.getBoundingClientRect();
+    const ax = (anchor?.x ?? rect.left + rect.width / 2) - rect.left;
+    const ay = (anchor?.y ?? rect.top + rect.height / 2) - rect.top;
+    const oldWidth = stage.offsetWidth;
+    const oldHeight = stage.offsetHeight;
+    const scrollLeft = viewport.scrollLeft;
+    const scrollTop = viewport.scrollTop;
+    if (zoomRef.current === "fit") skipCenterRef.current = true;
+    flushSync(() => setZoom(clampZoom(next)));
+    viewport.scrollLeft = anchoredScroll({ scroll: scrollLeft, anchor: ax, oldSize: oldWidth, newSize: stage.offsetWidth });
+    viewport.scrollTop = anchoredScroll({ scroll: scrollTop, anchor: ay, oldSize: oldHeight, newSize: stage.offsetHeight });
+  };
+  // 当前实际倍率（适应屏幕时按舞台宽度折算）。
+  const effectiveZoom = () => {
+    const current = zoomRef.current;
+    if (current !== "fit") return current;
+    const width = stageRef.current?.offsetWidth ?? 0;
+    return canvasWidth > 0 && width > 0 ? width / canvasWidth : 1;
+  };
+  const stepZoomBy = (direction: 1 | -1) => {
+    const next = stepZoom(zoomRef.current, direction);
+    if (next === "fit" || zoomRef.current === "fit") setZoom(next);
+    else zoomTo(next);
+  };
+  const zoomIn = () => stepZoomBy(1);
+  const zoomOut = () => stepZoomBy(-1);
 
   const selectMode = (nextMode: InteractionMode) => {
     setMode(nextMode);
@@ -674,6 +844,7 @@ export function DesignPreview({
   };
 
   const zoomLabel = zoom === "fit" ? "适应屏幕" : `${Math.round(zoom * 100)}%`;
+  const viewportTouch = viewportTouchAction({ editing: mode !== "view", zoomed: zoom !== "fit" });
   const stageStyle = zoom === "fit" || canvasWidth === 0
     ? undefined
     : { width: `${Math.round(canvasWidth * zoom)}px` };
@@ -715,7 +886,7 @@ export function DesignPreview({
                     <button
                       type="button"
                       className="button small workbench-save"
-                      onClick={() => { onSaveDraft?.(); setDraftSaved(true); }}
+                      onClick={() => { if (onSaveDraft?.() !== false) setDraftSaved(true); }}
                     >
                       {draftSaved ? "已保存到本机 ✓" : "保存本机草稿"}
                     </button>
@@ -741,6 +912,7 @@ export function DesignPreview({
                       type="button"
                       className={mode === value ? "active" : ""}
                       aria-pressed={mode === value}
+                      title={MODE_KEY_HINT[value] ? `${label}（${MODE_KEY_HINT[value]}）` : label}
                       onClick={() => selectMode(value)}
                     >
                       {label}
@@ -751,8 +923,8 @@ export function DesignPreview({
                 {/* 撤销/重做/镜像/恢复只在编辑时出现，查看时让图纸尽量靠上。 */}
                 {mode !== "view" && (
                   <div className="workbench-actions">
-                    <button type="button" className="button small" onClick={onUndo} disabled={!canUndo}>撤销</button>
-                    <button type="button" className="button small" onClick={onRedo} disabled={!canRedo}>重做</button>
+                    <button type="button" className="button small" onClick={onUndo} disabled={!canUndo} title="撤销（Ctrl+Z）">撤销</button>
+                    <button type="button" className="button small" onClick={onRedo} disabled={!canRedo} title="重做（Ctrl+Shift+Z）">重做</button>
                     <button type="button" className="button small" onClick={onMirror}>水平镜像</button>
                     <button type="button" className="button small" onClick={onReset} disabled={!canReset}>恢复生成结果</button>
                   </div>
@@ -908,12 +1080,15 @@ export function DesignPreview({
               <span className="canvas-hint">{stageView !== "pattern"
                 ? "与图纸同尺寸对比；切回“图纸”继续查看或编辑"
                 : mode === "view"
-                  ? "双击或放大查看每格色号；聚焦后方向键逐格移动"
-                  : "点格子或方向键 + Enter 操作；快捷键 B 画笔 · G 油漆桶 · I 取色 · E 擦除 · M 框选 · V 查看"}</span>
+                  ? "双击、+ 键或 Ctrl+滚轮放大；拖动平移；手机双指缩放"
+                  : "点格子或方向键 + Enter 操作；快捷键 B 画笔 · G 油漆桶 · I 取色 · E 擦除 · M 框选 · V 查看；中键拖动平移"}</span>
               <div className="zoom-controls" role="group" aria-label="图纸缩放">
-                <button type="button" onClick={zoomOut} disabled={zoom === "fit"} aria-label="缩小图纸"><IconMinus /></button>
-                <button type="button" className="zoom-value" onClick={() => setZoom("fit")}>{zoomLabel}</button>
-                <button type="button" onClick={zoomIn} disabled={zoom === 2} aria-label="放大图纸"><IconPlus /></button>
+                <button type="button" onClick={zoomOut} disabled={zoom === "fit"} aria-label="缩小图纸" title="缩小（-）"><IconMinus /></button>
+                <button type="button" className="zoom-value" onClick={() => setZoom("fit")} title="适应屏幕（0）">{zoomLabel}</button>
+                <button type="button" onClick={zoomIn} disabled={typeof zoom === "number" && zoom >= MAX_ZOOM} aria-label="放大图纸" title="放大（+）"><IconPlus /></button>
+                {onShowHelp && (
+                  <button type="button" className="zoom-help" onClick={onShowHelp} aria-label="快捷键说明" title="快捷键说明（?）">?</button>
+                )}
               </div>
             </div>
             {stageView !== "pattern" && (
@@ -954,6 +1129,11 @@ export function DesignPreview({
                 }
               }}
               onKeyDown={handleGridKeyDown}
+              style={{ touchAction: viewportTouch }}
+              onPointerDownCapture={handleViewportPointerDown}
+              onPointerMove={handleViewportPointerMove}
+              onPointerUp={handleViewportPointerEnd}
+              onPointerCancel={handleViewportPointerEnd}
               onDoubleClick={() => { if (mode === "view") setZoom((current) => current === "fit" ? 1 : "fit"); }}
             >
               <div ref={stageRef} className={`canvas-stage ${zoom === "fit" ? "is-fit" : "is-zoomed"}`} style={stageStyle}>
