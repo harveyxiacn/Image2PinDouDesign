@@ -306,6 +306,25 @@ try {
     return evaluate("document.querySelectorAll('.palette-stock-row input').length >= 200");
   });
   await shot("06b-stock-list");
+  await step("import stock exported by 拼豆仓: replaces inventory and turns on stock mode", async () => {
+    const csv = resolve(outDir, "hub-stock.csv");
+    writeFileSync(csv, "﻿色号,颜色,HEX,颗数\nA4,,#000000,500\nH7,,#000000,1200\nB3,,#000000,300\nXX9,,#000000,5\n");
+    const has = await evaluate("!!document.querySelector('[data-import-hub-inventory]')");
+    // 线上默认不显示这个入口（构建时 VITE_HUB_LINK=1 才打开）；没打开就只确认它确实不在。
+    if (process.env.VITE_HUB_LINK !== "1") { console.log("hub stock import hidden", !has); return !has; }
+    const docNode = await send("DOM.getDocument", { depth: -1, pierce: true });
+    const input = await send("DOM.querySelector", { nodeId: docNode.root.nodeId, selector: "[data-hub-inventory-input]" });
+    await send("DOM.setFileInputFiles", { nodeId: input.nodeId, files: [csv] });
+    await sleep(800);
+    const stored = await evaluate("JSON.parse(localStorage.getItem('image2pindou:inventory:v2') || '{}')");
+    await shot("06c-hub-stock-imported");
+    console.log("hub stock import", has, JSON.stringify(stored));
+    const ok = has && stored.restrictEnabled === true && Object.keys(stored.owned ?? {}).sort().join() === "A4,B3,H7" && stored.owned.H7 === 1200;
+    // 关掉库存模式，后面的步骤仍按整套色卡检查。
+    await evaluate("(() => { const box = [...document.querySelectorAll('[role=dialog] input[type=checkbox]')].find((el) => el.checked); box?.click(); })()");
+    await sleep(500);
+    return ok;
+  });
   await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))");
   await sleep(400);
   await step("dialog closed by Escape", async () => !(await evaluate("!!document.querySelector('[role=dialog]')")));

@@ -39,6 +39,7 @@ import { PALETTE_KITS, getPaletteKit, loadPaletteKitId, paletteForKit, persistPa
 import { getHighResolutionCellSize, renderDesignToBlob } from "./domain/rendering";
 import type { BeadDesign, PixelSource } from "./domain/types";
 import { applyCellPatch, mirrorDesignHorizontally, replaceDesignCell, replaceDesignCells, type CellPatch } from "./domain/workbench";
+import { replaceInventoryFromHub } from "./domain/hubInventory";
 import { PROJECT_FILE_EXTENSION, buildProjectFile, inventoryToCsv, parseInventoryCsv, parseProjectFile } from "./domain/projectFile";
 import type { ConversionRequest, ConversionResponse } from "./worker/conversion.worker";
 
@@ -51,6 +52,8 @@ type UploadedImage = {
 };
 
 const VALID_COLOR_CODES = new Set(MARD_PALETTE.map((color) => color.code));
+// “从拼豆仓导入库存”入口：线上版本默认不显示；构建时设 VITE_HUB_LINK=1 才打开（自己局域网里配合拼豆仓用）。
+const HUB_LINK_ENABLED = import.meta.env.VITE_HUB_LINK === "1";
 const STATS_SOURCE_LABELS: Record<StatsSourceFilter, string> = {
   all: "全部图纸",
   projects: "正式项目",
@@ -89,6 +92,7 @@ export default function App() {
   const [fitTolerance, setFitTolerance] = useState<FitTolerance>(8);
   const projectInputRef = useRef<HTMLInputElement | null>(null);
   const inventoryInputRef = useRef<HTMLInputElement | null>(null);
+  const hubInventoryInputRef = useRef<HTMLInputElement | null>(null);
   const { toasts, notify, dismiss } = useToasts();
 
   const workerRef = useRef<Worker | null>(null);
@@ -526,6 +530,17 @@ export default function App() {
     notify(`已导入 ${count} 种颜色的库存${unknown.length > 0 ? `，${unknown.length} 个色号无法识别已忽略` : ""}`);
   };
 
+  // 从拼豆仓导出的库存 CSV 导入：替换（不是合并）已登记库存，并开启“只用我手头有的颜色”。
+  const importHubInventoryCsv = async (file: File) => {
+    const result = replaceInventoryFromHub(await file.text(), VALID_COLOR_CODES);
+    if (!result.inventory) {
+      notify(result.message, "error");
+      return;
+    }
+    setInventory(result.inventory);
+    notify(result.message);
+  };
+
   const handleFiles = async (files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
     if (imageFiles.length === 0) {
@@ -871,6 +886,16 @@ export default function App() {
         aria-hidden="true"
         onChange={(event) => { const file = event.target.files?.[0]; if (file) void importInventoryCsv(file); event.target.value = ""; }}
       />
+      <input
+        ref={hubInventoryInputRef}
+        className="sr-only"
+        type="file"
+        accept=".csv,text/csv,.txt"
+        tabIndex={-1}
+        aria-hidden="true"
+        data-hub-inventory-input
+        onChange={(event) => { const file = event.target.files?.[0]; if (file) void importHubInventoryCsv(file); event.target.value = ""; }}
+      />
       <header className="topbar">
         <div className="topbar-inner">
           <div className="brand">
@@ -1157,6 +1182,10 @@ export default function App() {
             <button type="button" className="button small" onClick={() => inventoryInputRef.current?.click()}>导入库存 CSV</button>
             <small>CSV 第一列为色号、最后一列为颗数，可用表格软件编辑。</small>
           </div>
+          {HUB_LINK_ENABLED && <div className="palette-data-tools">
+            <button type="button" className="button small" data-import-hub-inventory onClick={() => hubInventoryInputRef.current?.click()}>从拼豆仓导入库存</button>
+            <small>会替换现有库存，并只用这些颜色生成图纸。文件在 拼豆仓 → 库存 → 导出库存 CSV。</small>
+          </div>}
           <PalettePanel
             embedded
             palette={kitPalette}
