@@ -470,6 +470,19 @@ describe("legend chips", () => {
     expect(r.colors.A13).toEqual({ r: 255, g: 195, b: 101 });
   });
 
+  it("parseChipTexts：只有色号的 B 系列色块文字不会被当成数量（B13 ≠ 813 颗）", () => {
+    const chip = (r: number, g: number, b: number) => ({ x: 0, y: 0, width: 100, height: 30, r, g, b });
+    const pal = new Map(MARD_PALETTE.map((c) => [c.code, c.rgb]));
+    const b13 = MARD_PALETTE.find((c) => c.code === "B13")!.rgb;
+    const r = parseChipTexts([
+      { text: "B13", chip: chip(b13.r, b13.g, b13.b) },
+      { text: "B8 · 120", chip: chip(0, 0, 0) }
+    ], VALID, (code) => pal.get(code) ?? null);
+    expect(r.counts.B13).toBeUndefined();
+    expect(r.perChip[0]).toMatchObject({ code: "B13", count: null });
+    expect(r.counts.B8).toBe(120);
+  });
+
   it("readGrid 图例色校准：渲染色与色卡相差很大时，用图例色块颜色仍能数对", () => {
     // 让渲染色整体偏离色卡 ±40：只靠色卡会把相近的色号混淆，用图例实际色则精确
     const chart = buildChart({ cols: 30, rows: 20, pitch: 12.5, boldEvery: 5, offset: 40, textBlobs: true, seed: 41 });

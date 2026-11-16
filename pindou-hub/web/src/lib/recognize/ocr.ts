@@ -183,7 +183,14 @@ async function ocrWordsRaw(
       try { await worker.setParameters({ tessedit_pageseg_mode: opts.psm ?? "11", user_defined_dpi: "300", tessedit_char_whitelist: opts.whitelist ?? "" }); slot.key = key; } catch { /* 忽略 */ }
     }
     const aborted = new Promise<never>((_, reject) => {
-      onAbort = () => { void terminateOcr(); reject(abortError()); };
+      // 只停掉这次任务所在的 worker：另一个槽位上并行的识别不受影响
+      onAbort = () => {
+        const p = slot.p;
+        slot.p = null;
+        slot.key = "";
+        if (p) void p.then((w) => w.terminate()).catch(() => { /* 已终止 */ });
+        reject(abortError());
+      };
       signal?.addEventListener("abort", onAbort, { once: true });
     });
     const result = await Promise.race([worker.recognize(canvas, {}, { blocks: true, text: true }), aborted]);

@@ -618,6 +618,8 @@ export function parseChipTexts(
     let ci = -1;
     let count: number | null = null;
     for (let i = tokens.length - 1; i >= 0; i -= 1) {
+      // “B13”“B8”本身就是色号：B→8 的混淆修正会把它读成 813 / 88 颗，色号词不能当数量
+      if (/^[A-Za-z]/.test(tokens[i]) && valid.has(tokens[i].normalize("NFKC").toUpperCase())) continue;
       const c = parseCountToken(tokens[i]);
       if (c !== null) { count = c; ci = i; break; }
     }

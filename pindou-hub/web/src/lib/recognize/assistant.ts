@@ -9,7 +9,7 @@ import type { HeaderInfo } from "./legend";
 import { fitEntriesToTotal, readChipLegend } from "./legendchips";
 import { fitLegendToTotal, reconcileCounts } from "./reconcile";
 import type { ReconcileResult } from "./reconcile";
-import { capOverallConfidence, comparableLegendDiffCount, materialLegendDiffCount } from "./trust";
+import { capOverallConfidence, comparableLegendDiffCount, countsNear, materialLegendDiffCount } from "./trust";
 import { enhanceImage, summarizeEnhance, assessQuality } from "../enhance";
 import type { EnhanceResult } from "../enhance";
 import type {
@@ -523,7 +523,7 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
       const l = lc && code in lc ? lc[code] : null;
       const r = rc[code] ?? 0;
       let status: "ok" | "short" | "over" | "no-legend" = "no-legend";
-      if (l !== null) status = Math.abs(l - r) <= Math.max(2, Math.round(0.03 * l)) ? "ok" : r < l ? "short" : "over";
+      if (l !== null) status = countsNear(l, r) ? "ok" : r < l ? "short" : "over";
       const pv = recon?.prov[code];
       checks.push({ code, legend: l, read: r, status, ...(pv ? { source: pv.source, confidence: pv.confidence, uncertain: pv.uncertain } : {}) });
     }
@@ -564,7 +564,8 @@ export async function analyzePattern(src: PixelSource, options: AnalyzeOptions =
     capacityBad,
     headerBad,
     sizeBad,
-    comparableDiffs: comparableLegendDiffCount(diff),
+    // 图例有、网格上 0 颗的色号（常是被当成背景去掉的浅色豆）：用量按图例算，但复原矩阵里没有它，不配 100%
+    comparableDiffs: comparableLegendDiffCount(diff) + diff.filter((d) => d.legend > 0 && d.grid === 0).length,
     materialDiffs: materialLegendDiffCount(diff),
     paletteWarning,
     cellCoverage,

@@ -2,6 +2,7 @@
 // 不是简单的“谁优先”：先看哪个来源和抬头总数吻合；来源矛盾时，在各来源给出的候选值里挑“合计恰好等于总数”的组合；
 // 挑不出来的色号标记为 uncertain，让界面提示用户核对。纯函数，便于单测。
 import type { Counts, LegendItem } from "./types";
+import { countsNear } from "./trust";
 
 export type Prov = {
   code: string;
@@ -35,7 +36,7 @@ export type ReconcileResult = {
 };
 
 const sumOf = (c: Counts) => Object.values(c).reduce((a, b) => a + b, 0);
-const near = (a: number, b: number) => Math.abs(a - b) <= Math.max(2, Math.round(0.03 * Math.max(a, b)));
+const near = countsNear;
 
 /** 在每个“有争议”色号的候选值里找合计最接近 total 的组合（最多评估 maxEval 种）。cost：偏离当前值的代价，平手取小者。 */
 export function fitToTotal(
