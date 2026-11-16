@@ -4,14 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { putRecords, getSnapshot, useData } from "../lib/db";
 import {
   BOARD_SIZES, DEFAULT_BOARD_SIZE, boardCells, boardColors, boardProgress, boardSizeLabel, cellAt, decodeDone, describeRow, encodeDone,
-  firstOpenBoard, migrateFlags, moveColor, newFlags, nextStep, overallProgress, restoreState, rowColumns, rowsWithColor, setCells, splitBoards,
+  firstOpenBoard, isBuildState, mergeBuild, migrateFlags, moveColor, newFlags, nextStep, overallProgress, restoreState, rowColumns, rowsWithColor, setCells, splitBoards,
   type BuildMode, type BuildState
 } from "../lib/build";
 import { matrixOf, type Matrix } from "../lib/matrix";
 import { colorOf } from "../lib/palette";
 import { Icon, Sheet, navigate, prefersReducedMotion } from "../components/ui";
-import BuildCanvas, { type BuildCanvasApi } from "../components/build/BuildCanvas";
-import { buildKey } from "../lib/shortcuts";
+import BuildCanvas, { type BuildCanvasApi, type StrokeEvent } from "../components/build/BuildCanvas";
+import { buildKey, isTypingTarget } from "../lib/shortcuts";
 import BoardMap from "../components/build/BoardMap";
 import "./Build.css";
 
@@ -38,6 +38,11 @@ export default function Build({ id }: { id: string }) {
   const [cele, setCele] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [note, setNote] = useState("");
+  const [dragMode, setDragMode] = useState<"mark" | "pan">("mark");
+  const [confirmReset, setConfirmReset] = useState(false);
+  const resetAtRef = useRef(0);
+  const strokeRef = useRef<{ value: boolean; changed: number[] } | null>(null);
+  const seenBuild = useRef<BuildState | undefined>(undefined);
   const flagsRef = useRef<Uint8Array>(new Uint8Array(0));
   const undoRef = useRef<Undo[]>([]);
   const lastMatrix = useRef<{ matrix: Matrix; width: number; height: number } | null>(null);
@@ -52,6 +57,8 @@ export default function Build({ id }: { id: string }) {
       const flags = decodeDone(saved?.done, matrix, width, height);
       const rs = restoreState(saved, boards, size);
       flagsRef.current = flags;
+      resetAtRef.current = saved?.resetAt ?? 0;
+      seenBuild.current = saved;
       lastMatrix.current = { matrix, width, height };
       setBoardSizeState(size);
       setBoard(saved ? rs.board : firstOpenBoard(matrix, flags, width, boards));
@@ -103,10 +110,11 @@ export default function Build({ id }: { id: string }) {
     if (!l.ready) return;
     const p = getSnapshot().patterns.find((x) => x.id === id);
     if (!p || p.deleted) return;
-    const next: BuildState = { boardSize: l.boardSize, board: l.board, colorIndex: l.colorIndex, mode: l.mode, done: encodeDone(l.matrix, flagsRef.current, l.width, l.height), updatedAt: Date.now() };
+    const next: BuildState = { boardSize: l.boardSize, board: l.board, colorIndex: l.colorIndex, mode: l.mode, done: encodeDone(l.matrix, flagsRef.current, l.width, l.height), updatedAt: Date.now(), ...(resetAtRef.current > 0 ? { resetAt: resetAtRef.current } : {}) };
     const old = p.build;
     if (!old && next.done === `w${l.width}`) return; // 还没拼过任何格子：不要因为打开页面就改图纸
-    if (old && old.boardSize === next.boardSize && old.board === next.board && old.colorIndex === next.colorIndex && old.mode === next.mode && old.done === next.done) return;
+    if (old && old.boardSize === next.boardSize && old.board === next.board && old.colorIndex === next.colorIndex && old.mode === next.mode && old.done === next.done && (old.resetAt ?? 0) === (next.resetAt ?? 0)) return;
+    seenBuild.current = next; // 自己写的不用再当作“别的设备的进度”合并回来（否则刚撤销的格子会被并回）
     void putRecords("patterns", [{ ...p, build: next, updatedAt: Math.max(Date.now(), p.updatedAt + 1) }]);
   }, [id]);
   const flushRef = useRef(flush);
@@ -128,6 +136,27 @@ export default function Build({ id }: { id: string }) {
       flushRef.current();
     };
   }, []);
+
+  // ---- 别的设备的进度同步过来了（db 层已把两边合并写进记录）：把新增的格子并进正在用的这份 ----
+  useEffect(() => {
+    if (!ready || !matrix) return;
+    const pb = pattern?.build;
+    if (!pb || pb === seenBuild.current) return;
+    seenBuild.current = pb;
+    if (!isBuildState(pb)) return;
+    const l = live.current;
+    const mine: BuildState = { boardSize: l.boardSize, board: l.board, colorIndex: l.colorIndex, mode: l.mode, done: encodeDone(matrix, flagsRef.current, width, height), updatedAt: Date.now(), ...(resetAtRef.current > 0 ? { resetAt: resetAtRef.current } : {}) };
+    const merged = mergeBuild(mine, pb);
+    if (!merged) return;
+    if (merged.done === mine.done && (merged.resetAt ?? 0) === resetAtRef.current) return;
+    flagsRef.current = decodeDone(merged.done, matrix, width, height);
+    resetAtRef.current = merged.resetAt ?? 0;
+    undoRef.current = [];
+    strokeRef.current = null;
+    setVersion((v) => v + 1);
+    markDirty();
+    setNote("已合并另一台设备的进度");
+  }); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- 屏幕常亮 ----
   useEffect(() => {
@@ -187,6 +216,37 @@ export default function Build({ id }: { id: string }) {
     const was = flagsRef.current[index] === 1;
     record(setCells(flagsRef.current, [index], !was), !was, false);
   };
+  // 划过多个格子：一笔 = 一次撤销。第一个当前色格子的状态决定这一笔是标记还是取消标记。
+  const onStroke = (e: StrokeEvent) => {
+    if (e.type === "cell") {
+      if (!cur) return;
+      const x = e.index % width;
+      const y = Math.floor(e.index / width);
+      if (cellAt(m, x, y) !== cur.code) return;
+      if (!strokeRef.current) strokeRef.current = { value: flagsRef.current[e.index] !== 1, changed: [] };
+      const s = strokeRef.current;
+      const changed = setCells(flagsRef.current, [e.index], s.value);
+      if (changed.length) { s.changed.push(...changed); setVersion((v) => v + 1); }
+      return;
+    }
+    const s = strokeRef.current;
+    strokeRef.current = null;
+    if (!s || !s.changed.length) return;
+    if (e.type === "cancel") { setCells(flagsRef.current, s.changed, !s.value); setVersion((v) => v + 1); return; }
+    record(s.changed, s.value, false);
+  };
+  const resetAll = () => {
+    flagsRef.current = newFlags(width, height);
+    resetAtRef.current = Math.max(Date.now(), resetAtRef.current + 1);
+    undoRef.current = [];
+    setDismissed(false);
+    setConfirmReset(false);
+    setMapOpen(false);
+    goto(0, 0);
+    setVersion((v) => v + 1);
+    markDirty();
+    setNote("已清空进度，重新开始");
+  };
   const finishRow = () => {
     if (rowY === null) return;
     const idxs = rowXs.map((x) => rowY * width + x);
@@ -222,7 +282,13 @@ export default function Build({ id }: { id: string }) {
   const canvasApi = useRef<BuildCanvasApi | null>(null);
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => undefined);
   keyRef.current = (e) => {
-    if (mapOpen || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+    if (mapOpen || document.querySelector('[role="dialog"][aria-modal="true"]')) return; // 弹层自己处理 Esc（先关最上面的）
+    if (e.key === "Escape") {
+      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey || isTypingTarget(e.target as HTMLElement | null)) return;
+      e.preventDefault();
+      leave(); // 先保存进度再离开，与左上角返回键相同
+      return;
+    }
     const a = buildKey(e, e.target as HTMLElement | null, mode === "row");
     if (!a) return;
     e.preventDefault();
@@ -304,6 +370,7 @@ export default function Build({ id }: { id: string }) {
 
       <div className="bd-tools">
         <button type="button" className="btn btn-sm" aria-pressed={mode === "row"} onClick={toggleMode} data-build-mode-toggle title="按行拼（R）" aria-keyshortcuts="R">按行</button>
+        <button type="button" className="btn btn-sm" onClick={() => setDragMode((v) => (v === "mark" ? "pan" : "mark"))} data-build-drag-toggle data-build-drag={dragMode} aria-label={dragMode === "mark" ? "单指拖动：连续标记。点一下切换成平移" : "单指拖动：平移。点一下切换成连续标记"} title="单指拖动是连续标记还是平移（双指始终缩放和平移）">{dragMode === "mark" ? "拖动标记" : "拖动平移"}</button>
         <span className="meta bd-sub" aria-hidden="true">本板 {boardProg.done}/{boardProg.total}</span>
         <button type="button" className="btn btn-sm" onClick={undo} disabled={!undoRef.current.length} aria-label="撤销上一步" title="撤销上一步（Z）" aria-keyshortcuts="Z Control+Z" data-build-undo>撤销</button>
       </div>
@@ -320,7 +387,7 @@ export default function Build({ id }: { id: string }) {
         </div>
       ) : null}
 
-      <BuildCanvas apiRef={canvasApi} matrix={m} width={width} board={curBoard} code={cur?.code ?? null} flags={flags} version={version} rowY={rowY} label={canvasLabel} onToggle={toggleCell} />
+      <BuildCanvas apiRef={canvasApi} matrix={m} width={width} board={curBoard} code={cur?.code ?? null} flags={flags} version={version} rowY={rowY} label={canvasLabel} onToggle={toggleCell} dragMode={dragMode} onStroke={onStroke} />
 
       {cele ? <div className="bd-cele" role="presentation" data-build-cele>{cele} ✓</div> : null}
 
@@ -350,13 +417,28 @@ export default function Build({ id }: { id: string }) {
       ) : null}
 
       {mapOpen ? (
-        <Sheet title="选择拼板" onClose={() => setMapOpen(false)}>
+        <Sheet title="选择拼板" onClose={() => { setMapOpen(false); setConfirmReset(false); }}>
           <div className="stack">
             <div className="seg" role="group" aria-label="每块板的大小">
               {BOARD_SIZES.map((s) => <button key={s} type="button" aria-pressed={boardSize === s} data-build-size={s} onClick={() => changeSize(s)}>{boardSizeLabel(s)}</button>)}
             </div>
             <BoardMap matrix={m} width={width} height={height} boards={boards} flags={flags} current={boardIdx} onPick={(i) => { goto(i, 0); setMapOpen(false); }} />
             {boardSize > 0 && boards.length === 1 ? <p className="meta">这张图比一块板还小，只有 1 块板。</p> : null}
+            {overall.done > 0 ? (
+              <div className="bd-reset">
+                {confirmReset ? (
+                  <>
+                    <p className="meta">会清掉整张图已拼的 {overall.done} 颗，别的设备同步后也会清空。确定吗？</p>
+                    <div className="bd-finish-actions">
+                      <button type="button" className="btn btn-iron" onClick={resetAll} data-build-reset-confirm>确定清空</button>
+                      <button type="button" className="btn" onClick={() => setConfirmReset(false)}>先不清空</button>
+                    </div>
+                  </>
+                ) : (
+                  <button type="button" className="btn btn-ghost" onClick={() => setConfirmReset(true)} data-build-reset>清空进度，重新开始</button>
+                )}
+              </div>
+            ) : null}
           </div>
         </Sheet>
       ) : null}

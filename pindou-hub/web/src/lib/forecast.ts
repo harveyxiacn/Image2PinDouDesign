@@ -1,12 +1,27 @@
 // 补货预告的纯计算：不碰存储、不依赖 React。
 // 口径：需求 = 计划拼 / 制作中的图纸（份数 × 每份用量 × (1 + 损耗) 向上取整）；
-// 在途 = 已下单还没入库的数量；消耗速度 = 最近 6 个 30 天窗口里 consume 流水的加权平均（越近权重越大）。
+// 在途 = 所有在途订单（已下单 / 部分到货）里还没到的数量；消耗速度 = 最近 6 个 30 天窗口里 consume 流水的加权平均（越近权重越大）。
 import type { Counts, Pattern, SharedPrefs, Txn } from "./model";
-import { compareCodes, isActive, withLoss } from "./inventory";
+import { compareCodes, isActive, refundedIds, withLoss } from "./inventory";
 import {
-  DEFAULT_PRICE_1200, enforce500Min, formatMoney, formatPurchaseText, optimizePacks, packBeads, packCost, pendingOrder,
+  DEFAULT_PRICE_1200, enforce500Min, formatMoney, formatPurchaseText, optimizePacks, packBeads, packCost,
   type PackCounts
 } from "./purchase";
+import { readOrders, transitByCode, type Order } from "./orders";
+
+/** 1200 颗装可选的单价（元/包）：采购页的下拉框、采购清单和补货预告共用同一个设置。 */
+export const PRICE_1200_CHOICES = [1.26, 1.5] as const;
+
+/** 把任意值规整成可选档位之一，不认识的一律回到 1.26。 */
+export function normalizePrice1200(value: unknown): number {
+  const n = typeof value === "string" ? Number(value) : value;
+  return PRICE_1200_CHOICES.find((c) => c === n) ?? DEFAULT_PRICE_1200;
+}
+
+/** 当前生效的 1200 颗装单价：用户在偏好里选过的；没选过就是 1.26。 */
+export function price1200Of(prefs: { price1200?: number } | null | undefined): number {
+  return normalizePrice1200(prefs?.price1200);
+}
 
 export type Horizon = 1 | 2 | 3;
 export type ForecastStatus = "now" | "plan" | "soon" | "ok";
@@ -38,7 +53,9 @@ export type ConsumeRates = {
  * 消耗事件少于 MIN_CONSUME_EVENTS 时不估速度（thin = true，perMonth 为空）。
  */
 export function consumeRates(txns: Txn[], now = Date.now()): ConsumeRates {
-  const rows = txns.filter((t) => !t.deleted && t.kind === "consume" && t.delta < 0 && t.at <= now);
+  // 已被“放回库存”冲掉的消耗（图纸重新打开）不算日常用量
+  const refunded = refundedIds(txns);
+  const rows = txns.filter((t) => !t.deleted && t.kind === "consume" && t.delta < 0 && t.at <= now && !refunded.has(t.id));
   const events = new Set(rows.map((t) => t.batchId ?? t.patternId ?? t.id)).size;
   if (!rows.length) return { perMonth: {}, months: 0, events: 0, thin: true };
   const first = Math.min(...rows.map((t) => t.at));
@@ -85,6 +102,8 @@ export type ForecastRow = {
 export type ForecastResult = {
   inventoryReady: boolean;
   horizon: Horizon;
+  /** 本次估价用的 1200 颗装单价（元/包） */
+  price1200: number;
   thin: boolean;
   /** 一句话说明数据够不够 */
   basis: string;
@@ -131,7 +150,12 @@ export function roundToPacks(wanted: Array<{ code: string; qty: number }>, price
 export type ForecastInput = {
   patterns: Pattern[];
   txns: Txn[];
-  prefs: Pick<SharedPrefs, "lossRate" | "lastOrder" | "inventoryStartedAt">;
+  /** orders / lastOrder 只在没传 orders 参数时用来读出在途订单（旧偏好里的 lastOrder 会自动折成一张订单） */
+  prefs: Pick<SharedPrefs, "lossRate" | "inventoryStartedAt"> & { price1200?: number; orders?: SharedPrefs["orders"]; lastOrder?: SharedPrefs["lastOrder"] };
+  /** 所有订单；不传就从 prefs 里读 */
+  orders?: Order[];
+  /** 仍然有效的入库批次（撤销过的批次不算到货）；不传表示都有效 */
+  liveBatches?: ReadonlySet<string>;
   horizon?: Horizon;
   now?: number;
   price1200?: number;
@@ -140,7 +164,7 @@ export type ForecastInput = {
 export function forecastNeeds(input: ForecastInput): ForecastResult {
   const now = input.now ?? Date.now();
   const horizon: Horizon = input.horizon ?? 2;
-  const price1200 = input.price1200 ?? DEFAULT_PRICE_1200;
+  const price1200 = input.price1200 != null ? normalizePrice1200(input.price1200) : price1200Of(input.prefs);
   const loss = input.prefs.lossRate;
   const live = input.txns.filter((t) => !t.deleted);
   const inventoryReady = !!input.prefs.inventoryStartedAt || live.length > 0;
@@ -149,7 +173,7 @@ export function forecastNeeds(input: ForecastInput): ForecastResult {
   const basis = rates.thin
     ? "消耗记录还少，暂时只按计划图纸预告"
     : `按最近 ${rates.months} 个月共 ${rates.events} 次消耗记录估算日常用量`;
-  const base: ForecastResult = { inventoryReady, horizon, thin: rates.thin, basis, rates, rows: [], okCount: 0, totals: { colors: 0, beads: 0, cost: 0, packs: emptyPacks } };
+  const base: ForecastResult = { inventoryReady, horizon, price1200, thin: rates.thin, basis, rates, rows: [], okCount: 0, totals: { colors: 0, beads: 0, cost: 0, packs: emptyPacks } };
   if (!inventoryReady) return base;
 
   const stock: Counts = {};
@@ -164,8 +188,7 @@ export function forecastNeeds(input: ForecastInput): ForecastResult {
     const copies = Math.max(1, p.copies || 1);
     for (const [code, n] of Object.entries(p.counts)) if (n > 0) raw[code] = (raw[code] ?? 0) + n * copies;
   }
-  const incoming: Counts = {};
-  for (const it of pendingOrder(input.prefs.lastOrder)?.items ?? []) if (it.qty > 0) incoming[it.code] = (incoming[it.code] ?? 0) + it.qty;
+  const incoming: Counts = transitByCode(input.orders ?? readOrders(input.prefs), input.liveBatches);
 
   // 只看“用过 / 存过 / 计划要用”的色号；从没碰过的色号不会被当成快用完。
   const codes = new Set<string>([...seen, ...Object.keys(raw)]);
@@ -227,7 +250,7 @@ export function forecastPurchaseText(rows: ForecastRow[], price1200 = DEFAULT_PR
 }
 
 /** 复制用的完整文字：标题 + 清单 + 合计。 */
-export function forecastCopyText(result: ForecastResult, price1200 = DEFAULT_PRICE_1200): string {
+export function forecastCopyText(result: ForecastResult, price1200 = result.price1200): string {
   const body = forecastPurchaseText(result.rows, price1200);
   if (!body) return "";
   return [`补货清单（预计未来 ${horizonLabel(result.horizon)}）`, body, `合计约 ${result.totals.beads} 颗，${formatMoney(result.totals.cost)}`].join("\n");

@@ -120,6 +120,67 @@ export function consumeTxns(pattern: Pattern, device: string, at = Date.now()): 
     }));
 }
 
+/** 已经被退回过的扣库存流水 id（只看没被撤销的退回记录），保证同一条不会退两次。 */
+export function refundedIds(txns: Txn[]): Set<string> {
+  const ids = new Set<string>();
+  for (const t of txns) if (!t.deleted && t.refundOf) ids.add(t.refundOf);
+  return ids;
+}
+
+export type ReopenPlan = {
+  /** 需要问用户：这张图纸完成时扣过库存，并且还有没退回的扣库存记录 */
+  ask: boolean;
+  /** 如果选“放回库存”，将被冲回的那几条扣库存流水（最近一次完成的那一批） */
+  originals: Txn[];
+  /** 将放回的颗数 / 色数 */
+  beads: number;
+  colors: number;
+};
+
+/**
+ * 已完成的图纸改回收藏 / 计划拼 / 制作中时的处理方案。
+ * 退回的数量取自当初真正写下的扣库存流水（不是现在的用量 × 份数），所以完成后改过用量或份数也不会错。
+ * 只退“最近一次完成”的那一批；已经退过的不再退。
+ */
+export function planReopen(pattern: Pattern, txns: Txn[]): ReopenPlan {
+  const none: ReopenPlan = { ask: false, originals: [], beads: 0, colors: 0 };
+  if (pattern.status !== "done" || !pattern.consumed) return none;
+  const done = refundedIds(txns);
+  const mine = txns.filter((t) => !t.deleted && t.kind === "consume" && t.patternId === pattern.id && t.delta < 0 && !done.has(t.id));
+  if (!mine.length) return none;
+  const groups = new Map<string, Txn[]>();
+  for (const t of mine) {
+    const key = t.batchId ?? t.id;
+    const list = groups.get(key);
+    if (list) list.push(t); else groups.set(key, [t]);
+  }
+  let latest: Txn[] = [];
+  let latestAt = -Infinity;
+  for (const list of groups.values()) {
+    const at = Math.max(...list.map((t) => t.at));
+    if (at > latestAt) { latestAt = at; latest = list; }
+  }
+  return { ask: true, originals: latest, beads: latest.reduce((a, t) => a - t.delta, 0), colors: new Set(latest.map((t) => t.code)).size };
+}
+
+/**
+ * 把扣掉的豆子放回库存：每条扣库存流水对应一条新的“调整”流水（+同样的数量）。
+ * 旧流水不动；id 由原流水决定，两台设备同时点也只会得到同一条记录，不会退两次。
+ */
+export function refundTxns(originals: Txn[], pattern: Pattern, toStatus: string, device: string, at = Date.now()): Txn[] {
+  if (!originals.length) return [];
+  const batchId = `rb_${originals[0].batchId ?? originals[0].id}`;
+  return originals.map((o) => ({
+    id: `r_${o.id}`, code: o.code, delta: -o.delta, kind: "adjust" as const, patternId: pattern.id, batchId, refundOf: o.id,
+    note: `退回「${pattern.name}」的扣除：改回${toStatus}，豆子放回库存`, device, at, updatedAt: at
+  }));
+}
+
+/** 完成的图纸重新打开后的新记录：状态改掉，并清掉“已扣库存”标记（否则它不会出现在采购清单里）。 */
+export function reopenedPattern(pattern: Pattern, status: Pattern["status"], now = Date.now()): Pattern {
+  return { ...pattern, status, consumed: pattern.consumed ? false : pattern.consumed, updatedAt: Math.max(now, pattern.updatedAt + 1) };
+}
+
 /** 盘点：把实际数到的数量写成一条差额流水。 */
 export function stocktakeTxn(code: string, actual: number, current: number, device: string, at = Date.now()): Txn | null {
   const delta = Math.round(actual) - Math.round(current);

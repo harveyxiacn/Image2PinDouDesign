@@ -15,8 +15,11 @@ const Inventory = lazy(() => import("./pages/Inventory"));
 const Shopping = lazy(() => import("./pages/Shopping"));
 const Purchase = lazy(() => import("./pages/Purchase"));
 const Insights = lazy(() => import("./pages/Insights"));
+const Works = lazy(() => import("./pages/Works"));
 const Build = lazy(() => import("./pages/Build"));
+const PrintPattern = lazy(() => import("./pages/PrintPattern"));
 const History = lazy(() => import("./pages/History"));
+const Verify = lazy(() => import("./pages/Verify"));
 const Settings = lazy(() => import("./pages/Settings"));
 
 type NavItem = { href: string; label: string; icon: string; match: (p: string) => boolean };
@@ -27,6 +30,7 @@ const NAV: NavItem[] = [
   { href: "#/shopping", label: "采购清单", icon: "cart", match: (p) => p.startsWith("/shopping") },
   { href: "#/purchase", label: "采购方案", icon: "sparkle", match: (p) => p.startsWith("/purchase") },
   { href: "#/insights", label: "数据洞察", icon: "chart", match: (p) => p.startsWith("/insights") },
+  { href: "#/works", label: "作品集", icon: "check", match: (p) => p.startsWith("/works") },
   { href: "#/history", label: "记录", icon: "history", match: (p) => p.startsWith("/history") },
   { href: "#/settings", label: "同步与设置", icon: "sync", match: (p) => p.startsWith("/settings") }
 ];
@@ -36,6 +40,7 @@ const MORE: { href: string; desc: string }[] = [
   { href: "#/shopping", desc: "按计划拼的图纸，算出要买哪些色、多少颗" },
   { href: "#/purchase", desc: "对比不同买法，看哪种更省" },
   { href: "#/insights", desc: "用量、花费与库存趋势" },
+  { href: "#/works", desc: "做完的作品、照片和完成日期" },
   { href: "#/history", desc: "入库、消耗、盘点的流水" },
   { href: "#/settings", desc: "连接电脑 Hub、备份与偏好" }
 ];
@@ -65,8 +70,11 @@ function Page() {
     case "shopping": return <Shopping />;
     case "purchase": return <Purchase />;
     case "insights": return <Insights />;
+    case "works": return <Works />;
     case "history": return <History />;
     case "build": return <Build id={id ?? ""} />;
+    case "verify": return <Verify />;
+    case "print": return <PrintPattern id={id ?? ""} />;
     case "settings": return <Settings />;
     default: return <Dashboard />;
   }
@@ -74,7 +82,7 @@ function Page() {
 
 const TITLES: Record<string, string> = {
   "": "总览", add: "添加图纸", gallery: "图库", pattern: "图纸详情", inventory: "豆盒库存",
-  shopping: "采购清单", purchase: "采购方案", insights: "数据洞察", history: "记录", build: "拼装模式", settings: "同步与设置"
+  shopping: "采购清单", purchase: "采购方案", insights: "数据洞察", works: "作品集", history: "记录", build: "拼装模式", print: "打印分板图纸", verify: "快速核对", settings: "同步与设置"
 };
 
 /** 路由切换：更新标签页标题，并把焦点移到新页面的 h1（键盘/读屏用户知道已到新页面）。首次载入不抢焦点。 */

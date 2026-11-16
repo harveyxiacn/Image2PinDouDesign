@@ -1,6 +1,8 @@
 // 拼豆仓的数据模型。所有记录都带 updatedAt / deleted，便于局域网多设备“后写者胜”合并。
 
 import type { BuildState } from "./build";
+import type { Order } from "./orders";
+import type { Seller } from "./sellers";
 
 export type Counts = Record<string, number>;
 
@@ -32,6 +34,8 @@ export type Pattern = {
   verifiedAt?: number;
   /** 保存时记录自动检查给出的疑点，便于之后回看。 */
   reviewReasons?: string[];
+  /** 快速核对里标“有问题”时留的简短原因（同时给图纸加“待复查”标签）；标为没问题时清除。 */
+  reviewNote?: string;
   status: PatternStatus;
   /** 计划拼几份（采购清单按份数放大） */
   copies: number;
@@ -41,9 +45,27 @@ export type Pattern = {
   consumed?: boolean;
   /** 拼装模式的进度（随图纸同步），见 lib/build.ts */
   build?: BuildState;
+  /** 完工记录：每完成一次一条（复制、重新打开后再完成都各记一条）；旧设备会忽略这个字段，见 lib/worklog.ts */
+  works?: WorkEntry[];
   createdAt: number;
   updatedAt: number;
   deleted?: boolean;
+};
+
+/** 一次完工。at = 完成时间（毫秒）；photoId 是 images 集合里的成品照片（和图纸原图同一套存储与同步）。 */
+export type WorkEntry = {
+  id: string;
+  at: number;
+  /** 完成时的份数，用来算颗数；旧记录没有则按图纸当前份数 */
+  copies?: number;
+  photoId?: string;
+  note?: string;
+  /** 1–5 星 */
+  rating?: number;
+  /** “给谁了”之类的自由标签 */
+  tag?: string;
+  /** 拼了多久（毫秒），拼装模式记录了才有 */
+  durationMs?: number;
 };
 
 export type TxnKind = "purchase" | "consume" | "adjust" | "stocktake";
@@ -57,6 +79,8 @@ export type Txn = {
   patternId?: string;
   /** 同一次入库/消耗的批次号，用于在记录里成组显示与整批撤销 */
   batchId?: string;
+  /** 退回类流水（kind=adjust）指向被它冲回的那条扣库存流水 id；旧版本会忽略这个字段 */
+  refundOf?: string;
   /** 单价（元/颗），仅采购可填 */
   unitPrice?: number;
   note?: string;
@@ -87,6 +111,8 @@ export type SharedPrefs = {
   lowStock: number;
   packSize: number;
   lossRate: number;
+  /** 1200 颗装的单价（元/包），采购、采购清单和补货预告共用；只有 1.26 / 1.5 两档，空表示 1.26 */
+  price1200?: number;
   kitId: string;
   /** 用户自定义的每个色号最低库存，覆盖 lowStock */
   minStock: Counts;
@@ -96,6 +122,14 @@ export type SharedPrefs = {
   inventoryStartedAt?: number;
   /** 最近一次“复制采购清单/文本”时保存的下单快照；入库时可按它核对，随偏好同步 */
   lastOrder?: LastOrder;
+  /** 在途订单列表（多张、可部分到货），见 lib/orders.ts；旧版 lastOrder 读取时折进这里。每张订单自带 updatedAt，合并按订单取新。 */
+  orders?: Order[];
+  /** 自定义卖家资料（内置默认卖家不存这里）；整条偏好后写者胜，见 lib/sellers.ts */
+  sellers?: Seller[];
+  /** 当前选中的卖家 id；空 = 内置默认卖家 */
+  sellerId?: string;
+  /** 隐藏内置默认卖家（至少还有一个自定义卖家时才生效） */
+  sellerDefaultHidden?: boolean;
   updatedAt: number;
   deleted?: boolean;
 };

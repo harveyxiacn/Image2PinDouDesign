@@ -6,9 +6,10 @@ import { stockByCode } from "../lib/inventory";
 import { STATUS_LABEL, totalOf, type ImageMeta, type Pattern, type PatternStatus } from "../lib/model";
 import { Icon, Sheet, fmt, fmtTime, navigate, useBlobUrl, useRoute } from "../components/ui";
 import { collectionsByTag, rangeIds } from "../lib/stockview";
-import { bulkAddTag, bulkDelete, bulkSetStatus, bulkSetVerified } from "../components/stock/patternActions";
+import { bulkAddTag, bulkDelete, bulkSetStatus, bulkSetVerified, reopenSummary, type RefundChoice } from "../components/stock/patternActions";
 import { useFlip } from "../components/stock/useFlip";
 import PatternCard from "../components/pattern/PatternCard";
+import { startVerify } from "../lib/verifySession";
 import "../components/pattern/pattern.css";
 import "./Gallery.css";
 
@@ -18,6 +19,9 @@ type VerifyFilter = "all" | "unverified" | "verified";
 function verifyFilterOf(value: string | null): VerifyFilter {
   return value === "unverified" || value === "verified" ? value : "all";
 }
+
+/** 多选集合里的 id（保持显示顺序） */
+function chosenIds(selected: Set<string>, order: string[]): string[] { return order.filter((id) => selected.has(id)); }
 
 function ImageTile({ img, patternId }: { img: ImageMeta; patternId?: string }) {
   const url = useBlobUrl(img.id, "thumb");
@@ -93,6 +97,8 @@ export default function Gallery() {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [tagSheet, setTagSheet] = useState(false);
+  // 把已完成的图纸改回别的状态前，先问扣掉的豆子要不要放回库存
+  const [reopenAsk, setReopenAsk] = useState<{ status: PatternStatus; patterns: number; beads: number; colors: number } | null>(null);
   const [say, setSay] = useState("");
   const anchor = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -133,6 +139,14 @@ export default function Gallery() {
       .map((c) => ({ ...c, patterns: [...c.patterns].sort((a, b) => (byId.get(a.id) ?? 0) - (byId.get(b.id) ?? 0)) }));
   }, [view, patterns, stock, tag]);
   const order = useMemo(() => patterns.map((p) => p.id), [patterns]);
+  // 快速核对的范围：有选择就用所选，否则用当前筛选结果里没核对的；都没有就是全部未核对
+  const verifyScope = useMemo(() => {
+    const base = chosenIds(selected, order);
+    const pool = base.length ? base : order;
+    const ids = pool.filter((id) => data.patterns.some((p) => p.id === id && !p.deleted && p.verifiedAt == null));
+    return ids.length && ids.length < unverifiedCount ? ids : null;
+  }, [selected, order, data.patterns, unverifiedCount]);
+  const verifyN = verifyScope ? verifyScope.length : unverifiedCount;
   const images = useMemo(() => data.images.filter((i) => i.role === "source"), [data.images]);
   const patternByImage = useMemo(() => new Map(data.patterns.filter((p) => p.imageId).map((p) => [p.imageId!, p.id])), [data.patterns]);
 
@@ -144,11 +158,11 @@ export default function Gallery() {
 
   const exitSelect = () => { setSelectMode(false); setSelected(new Set()); anchor.current = null; };
   useEffect(() => {
-    if (!selecting || tagSheet) return;
+    if (!selecting || tagSheet || reopenAsk) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { exitSelect(); setSay("已退出多选"); } };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selecting, tagSheet]);
+  }, [selecting, tagSheet, reopenAsk]);
 
   const toggle = (id: string, shift: boolean) => {
     const next = new Set(selected);
@@ -163,6 +177,16 @@ export default function Gallery() {
   const selectAll = (ids: string[]) => { setSelected(new Set(ids)); setSay(`已选 ${ids.length} 张`); };
 
   const run = async (job: () => Promise<string>) => { const m = await job(); setSay(m); exitSelect(); };
+  const changeStatus = (to: PatternStatus) => {
+    const s = reopenSummary(chosen, to);
+    if (s.patterns > 0) { setReopenAsk({ status: to, ...s }); return; }
+    void run(() => bulkSetStatus(chosen, to));
+  };
+  const answerReopen = (choice: RefundChoice) => {
+    const ask = reopenAsk;
+    setReopenAsk(null);
+    if (ask) void run(() => bulkSetStatus(chosen, ask.status, "", choice));
+  };
 
   const itemProps = (p: Pattern, flipKey: string): ItemProps => ({ p, stock, inventoryReady, flipKey, selecting, checked: selected.has(p.id), onToggle: toggle, onLongPress: longPress });
 
@@ -175,6 +199,11 @@ export default function Gallery() {
             <button aria-pressed={tab === "patterns"} onClick={() => navigate("/gallery")}>图纸</button>
             <button aria-pressed={tab === "images"} onClick={() => navigate("/gallery?tab=images")}>图片</button>
           </div>
+          {unverifiedCount > 0 && tab === "patterns" ? (
+            <button className="btn btn-primary" data-verify-start onClick={() => { startVerify(verifyScope); navigate("/verify"); }} title="一张一张对照原图，快速标记没问题 / 有问题">
+              <Icon name="check" />快速核对 {verifyN} 张
+            </button>
+          ) : null}
           <a className="btn btn-iron" href="#/add"><Icon name="plus" />添加</a>
         </div>
       </div>
@@ -259,12 +288,24 @@ export default function Gallery() {
           <button className="btn btn-sm btn-ghost" onClick={() => { exitSelect(); setSay("已退出多选"); }} aria-label="退出多选"><Icon name="x" /></button>
           <div className="ga-bulk-acts">
           <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetVerified(chosen))}>标记已核对</button>
-          <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetStatus(chosen, "planned"))}>设为计划拼</button>
-          <button className="btn btn-sm" disabled={!chosen.length} onClick={() => void run(() => bulkSetStatus(chosen, "idea"))}>设为收藏</button>
+          <button className="btn btn-sm" disabled={!chosen.length} onClick={() => changeStatus("planned")}>设为计划拼</button>
+          <button className="btn btn-sm" disabled={!chosen.length} onClick={() => changeStatus("idea")}>设为收藏</button>
           <button className="btn btn-sm" disabled={!chosen.length} onClick={() => setTagSheet(true)}>加标签</button>
           <button className="btn btn-sm ga-del" disabled={!chosen.length} onClick={() => void run(() => bulkDelete(chosen))}><Icon name="trash" />删除</button>
           </div>
         </div>
+      ) : null}
+      {reopenAsk ? (
+        <Sheet title="已完成的图纸要重新打开" onClose={() => setReopenAsk(null)} footer={<>
+          <button className="btn" data-reopen-keep onClick={() => answerReopen("keep")}>保持已扣除</button>
+          <button className="btn btn-primary" data-reopen-refund onClick={() => answerReopen("refund")}>把豆子放回库存</button>
+        </>}>
+          <div data-reopen-ask>
+            <p>所选图纸里有 <b className="num">{reopenAsk.patterns}</b> 张已经标记完成，完成时从库存扣掉了 <b className="num">{fmt(reopenAsk.beads)}</b> 颗（{reopenAsk.colors} 色）。要改成“{STATUS_LABEL[reopenAsk.status]}”，这些豆子怎么处理？</p>
+            <p className="meta"><b>放回库存</b>：当初是点错了、其实没拼，豆子会作为一条新的“调整”记录加回来。<br /><b>保持已扣除</b>：这张已经拼好了，你想再拼一份，库存不变。</p>
+            <p className="meta">两种选择都会让图纸重新出现在采购清单里；之后可以在提示里撤销。</p>
+          </div>
+        </Sheet>
       ) : null}
       {tagSheet ? <TagSheet tags={tags} count={chosen.length} onClose={() => setTagSheet(false)} onApply={(t) => { setTagSheet(false); void run(() => bulkAddTag(chosen, t)); }} /> : null}
     </div>

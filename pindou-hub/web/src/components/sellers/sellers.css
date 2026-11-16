@@ -1,0 +1,31 @@
+/* 卖家资料 */
+.seller-sheet .btn, .seller-form .btn, .seller-form .input, .seller-form .select { min-height: 44px; }
+.seller-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.seller-row { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.seller-row[data-current="true"] { border-color: var(--iron); background: var(--iron-wash); }
+.seller-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.seller-head b { overflow-wrap: anywhere; }
+.seller-sum, .seller-note { margin: 0; overflow-wrap: anywhere; }
+.seller-actions { gap: 8px; }
+.seller-hidden { justify-content: space-between; }
+.seller-block { border: 1px solid var(--rule-soft); border-radius: var(--r-ctl); padding: 10px 12px 12px; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.seller-block legend { padding: 0 6px; font-weight: 600; }
+.seller-line { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; align-items: end; }
+.seller-line .field { min-width: 0; }
+.seller-check { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; }
+.seller-check input { width: 18px; height: 18px; accent-color: var(--iron); }
+.seller-x { justify-self: start; }
+@media (min-width: 560px) { .seller-line { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+
+/* 采购页：卖家选择与对比 */
+.seller-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-top: 12px; }
+.seller-bar .select { min-height: 44px; max-width: 100%; }
+.seller-bar .btn { min-height: 44px; }
+.seller-compare { margin: 16px 0; }
+.seller-compare ol { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.seller-compare li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--rule-soft); }
+.seller-compare li:first-child { border-top: 0; }
+.seller-compare li[data-current="true"] b:first-child { color: var(--iron); }
+.seller-compare .meta { overflow-wrap: anywhere; }
+.seller-compare-sum { text-align: right; font-variant-numeric: tabular-nums; }
+.purchase-ship { margin: 0; }

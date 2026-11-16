@@ -3,17 +3,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bead, Icon, fmt, toast, useRoute } from "../components/ui";
 import { copyText } from "../components/stock/download";
-import { useData } from "../lib/db";
+import { putRecords, useData } from "../lib/db";
+import { PRICE_1200_CHOICES, normalizePrice1200, price1200Of } from "../lib/forecast";
 import { demandByCode, isActive, needAfterStock, stockByCode, withLoss as applyLoss } from "../lib/inventory";
 import { totalOf } from "../lib/model";
-import { setLastOrder } from "../lib/lastOrder";
+import { SellerSheet, sellerSummary, saveSellerPatch } from "../components/sellers/SellerSheet";
+import { currentSeller, listSellers, selectSeller } from "../lib/sellers";
+import { recordPlacedOrder } from "../components/orders/store";
 import {
-  MIN_PACKS_500, PURCHASE_OFFERS, PURCHASE_PREFER_LABEL, applyPlanToEdits, buildPurchasePlans, formatMoney, formatPacks, formatPurchaseText, groupSupplements,
-  leftoverBreakdown, makeOrderSnapshot, parsePrefer, recommendationReason, type PurchaseOffer, type PurchasePlan, type PurchasePrefer
+  PURCHASE_OFFERS, PURCHASE_PREFER_LABEL, applyPlanToEdits, buildPurchasePlans, compareSellers, formatMoney, formatPacks, formatPurchaseText, groupSupplements,
+  kitOffer, leftoverBreakdown, parsePrefer, recommendationReason, type PurchaseOffer, type PurchasePlan, type PurchasePrefer
 } from "../lib/purchase";
 import "./Purchase.css";
 
-const PACK_LABEL = { p4000: "4000 颗装", p1200: "1200 颗装", p500: "500 颗装" } as const;
 const PREFER_KEY = "ph.purchase.prefer";
 const PREFER_ORDER: PurchasePrefer[] = ["balanced", "cheapest", "leastWaste"];
 function readPrefer(): PurchasePrefer {
@@ -31,6 +33,16 @@ function Badges({ plan }: { plan: PurchasePlan }) {
   );
 }
 
+function ShipLine({ plan }: { plan: PurchasePlan }) {
+  if (!plan.shipping && !plan.freeShippingGap) return null;
+  return (
+    <p className="meta purchase-ship" data-purchase-ship>
+      {plan.shipping ? `含运费 ${formatMoney(plan.shipping)}` : ""}
+      {plan.shipping && plan.freeShippingGap ? `（再买 ${formatMoney(plan.freeShippingGap)} 商品可包邮）` : ""}
+    </p>
+  );
+}
+
 function SupplementDetail({ plan, price1200, href, onCopy }: { plan: PurchasePlan; price1200: number; href: string; onCopy: (plan: PurchasePlan) => void }) {
   const groups = groupSupplements(plan, price1200);
   const copy = () => onCopy(plan);
@@ -38,13 +50,13 @@ function SupplementDetail({ plan, price1200, href, onCopy }: { plan: PurchasePla
     <details className="panel purchase-detail" data-rec={plan.recommended}>
       <summary>
         <span className="purchase-detail-name"><b>{plan.name}</b><Badges plan={plan} /></span>
-        <span className="meta num">{formatMoney(plan.totalCost)} · 浪费 {pct(plan.wastePct)}</span>
+        <span className="meta num">{formatMoney(plan.totalCost)}{plan.shipping ? "（含运费）" : ""} · 浪费 {pct(plan.wastePct)}</span>
       </summary>
       <div className="purchase-detail-body">
         {plan.setOffer ? <p className="meta">套装：{plan.setOffer.name}，{formatMoney(plan.setPrice)}；套装里用不上的颜色 {fmt(plan.unusedSetBeads)} 颗。</p> : null}
         {groups.length ? groups.map((group) => (
           <div className="purchase-group" key={group.size}>
-            <div className="purchase-group-head"><b>{PACK_LABEL[group.size]}</b><span className="meta num">共 {group.packs} 包 · 小计 {formatMoney(group.cost)}</span></div>
+            <div className="purchase-group-head"><b>{group.beadsPerPack} 颗装</b><span className="meta num">共 {group.packs} 包 · 小计 {formatMoney(group.cost)}</span></div>
             <div className="table-wrap">
               <table className="table purchase-sup">
                 <thead><tr><th>色号</th><th className="r">包数</th><th className="r">买到</th><th className="r">需要</th><th className="r">剩余</th><th className="r">小计</th></tr></thead>
@@ -64,7 +76,8 @@ function SupplementDetail({ plan, price1200, href, onCopy }: { plan: PurchasePla
             </div>
           </div>
         )) : <p className="meta">这个方案不需要单色补充包。</p>}
-        {plan.packs.p500 ? <p className="meta purchase-hint">500 颗装满 {MIN_PACKS_500} 包才能备注色号；本方案共 {plan.packs.p500} 包{plan.packs.p500 >= MIN_PACKS_500 ? "，可以指定色号" : ""}。</p> : null}
+        {groups.filter((g) => g.minPacks).map((g) => <p className="meta purchase-hint" key={g.size}>{g.beadsPerPack} 颗装满 {g.minPacks} 包才能备注色号；本方案共 {g.packs} 包{g.packs >= (g.minPacks ?? 0) ? "，可以指定色号" : ""}。</p>)}
+        <ShipLine plan={plan} />
         <div className="row purchase-detail-actions">
           <button type="button" className="btn btn-sm" onClick={copy}>复制采购清单</button>
           <a className="btn btn-sm" href={href}>应用此方案</a>
@@ -77,6 +90,7 @@ function SupplementDetail({ plan, price1200, href, onCopy }: { plan: PurchasePla
 const yuanPerK = (offer: PurchaseOffer) => ((offer.perBead * 1000)).toFixed(2);
 
 function scopeText(offer: PurchaseOffer): string {
+  if (offer.kind === "set" && !offer.confirmed) return "套装每色 1200 颗";
   if (offer.kind === "set") return "套装色号对 MARD";
   if (offer.scope === "A-M") return "仅 A–M 色系";
   if (offer.minPacks) return `满 ${offer.minPacks} 包可备注色号`;
@@ -87,7 +101,18 @@ export default function Purchase() {
   const data = useData();
   const route = useRoute();
   const [onlyVerified, setOnlyVerified] = useState(route.query.get("verified") === "1");
-  const [price1200, setPrice1200] = useState(1.26);
+  // 1200 颗装单价是一个全家同步的偏好（prefs.price1200）：采购、采购清单、补货预告都读它
+  const price1200 = price1200Of(data.prefs);
+  const [sellerOpen, setSellerOpen] = useState(false);
+  // 当前卖家：内置默认卖家沿用 price1200；自定义卖家用自己的价格
+  const seller = useMemo(() => currentSeller(data.prefs), [data.prefs]);
+  const sellers = useMemo(() => listSellers(data.prefs), [data.prefs]);
+  const setPrice1200 = (v: number) => {
+    const next = normalizePrice1200(v);
+    if (next === price1200) return;
+    void putRecords("prefs", [{ ...data.prefs, price1200: next, updatedAt: Math.max(Date.now(), data.prefs.updatedAt + 1) }])
+      .catch(() => toast("单价没保存成功，请重试"));
+  };
   const [prefer, setPrefer] = useState<PurchasePrefer>(readPrefer);
   const pickPrefer = (v: PurchasePrefer) => {
     setPrefer(v);
@@ -108,7 +133,8 @@ export default function Purchase() {
   const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
   const planNeed = useMemo(() => needAfterStock(demand, inventoryReady ? stock : {}, lossRate), [demand, stock, inventoryReady, lossRate]);
-  const plans = useMemo(() => buildPurchasePlans(planNeed, demand, price1200, prefer), [planNeed, demand, price1200, prefer]);
+  const plans = useMemo(() => buildPurchasePlans(planNeed, demand, price1200, prefer, seller), [planNeed, demand, price1200, prefer, seller]);
+  const quotes = useMemo(() => (sellers.length > 1 ? compareSellers(planNeed, demand, sellers, price1200, prefer) : []), [planNeed, demand, sellers, price1200, prefer]);
 
   const net = totalOf(demand);
   const withLoss = totalOf(need);
@@ -122,17 +148,24 @@ export default function Purchase() {
   const leftover = recommended ? leftoverBreakdown(recommended) : null;
   // 复制采购清单的同时保存下单快照：入库时可以按“当时下的单”核对
   const copyPlan = async (plan: PurchasePlan) => {
-    const ok = await copyText(formatPurchaseText(plan, price1200));
+    const ok = await copyText(formatPurchaseText(plan, price1200, seller.name));
     toast(ok ? "已复制采购清单" : "复制失败，请手动选择文字");
     if (!ok) return;
     const items = Object.entries(applyPlanToEdits(plan)).map(([code, qty]) => ({ code, qty }));
-    try { await setLastOrder(data.prefs, makeOrderSnapshot(items, { planId: plan.id, cost: plan.totalCost })); } catch { toast("下单快照没保存成功，入库时请按当前清单"); }
+    try { await recordPlacedOrder({ items, planId: plan.id, cost: plan.totalCost, seller: seller.builtin ? undefined : seller.name }); } catch { toast("订单没登记成功，到货时请在采购清单里手动记一张"); }
   };
   const featured = [recommended, best, leastWaste].filter((p, i, arr) => p && arr.findIndex((x) => x?.id === p.id) === i);
-  const set221 = plans.find((p) => p.id === "plan-set221-185") ?? best;
+  const set221 = plans.find((p) => p.id === "plan-set221-185") ?? (seller.builtin ? best : plans.find((p) => p.setOffer));
   const notRecommended = plans.filter((p) => p.id !== best?.id && (p.id === "plan-set265-257" || p.id === "plan-app-current" || p.id === "plan-set295-352"));
-  const offers = useMemo(() => [...PURCHASE_OFFERS].sort((a, b) => a.perBead - b.perBead), []);
-  const shoppingHref = (id: string) => `#/shopping?plan=${encodeURIComponent(id)}${onlyVerified ? "&verified=1" : ""}${price1200 !== 1.26 ? `&p1200=${price1200}` : ""}`;
+  const offers = useMemo<PurchaseOffer[]>(() => {
+    if (seller.builtin) return [...PURCHASE_OFFERS].sort((a, b) => a.perBead - b.perBead);
+    const packs: PurchaseOffer[] = seller.packs.map((p) => ({
+      id: p.id, kind: "single", name: `单色补充包 ${p.beads} 颗`, price: p.price, currency: "CNY", beads: p.beads, scope: p.scope === "A-M" ? "A-M" : "any",
+      minPacks: p.minPacks, perBead: p.price / p.beads, confirmed: false, note: `${formatMoney(p.price)} / 包${p.minPacks ? `；整单满 ${p.minPacks} 包可备注色号` : ""}。`
+    }));
+    return [...packs, ...seller.kits.map(kitOffer)].sort((a, b) => a.perBead - b.perBead);
+  }, [seller]);
+  const shoppingHref = (id: string) => `#/shopping?plan=${encodeURIComponent(id)}${onlyVerified ? "&verified=1" : ""}${seller.builtin && price1200 !== 1.26 ? `&p1200=${price1200}` : ""}`;
 
   if (!active.length) {
     return (
@@ -146,7 +179,7 @@ export default function Purchase() {
   return (
     <div>
       <div className="page-head">
-        <div><h1>采购方案</h1><p>按 {scoped.length} 张计划图纸、{fmt(net)} 颗净需求，比较 6 种买法。</p></div>
+        <div><h1>采购方案</h1><p>按 {scoped.length} 张计划图纸、{fmt(net)} 颗净需求，按「{seller.name}」的报价比较 {plans.length} 种买法。</p></div>
         <div className="row">
           <a className="btn" href={onlyVerified ? "#/shopping?verified=1" : "#/shopping"}>返回采购清单</a>
         </div>
@@ -159,13 +192,23 @@ export default function Purchase() {
           <div><span className="label">最省钱方案</span><b className="num">{scoped.length && best ? formatMoney(best.totalCost) : "—"}</b><span className="meta">{scoped.length && best ? best.name : "没有计入的图纸"}</span></div>
           <div><span className="label">未核对</span><b className="num">{unverified}</b><span className="meta">张 · 共 {active.length} 张</span></div>
         </div>
-        <div className="row purchase-controls">
-          <label className="field"><span>1200 颗单价</span>
-            <select className="select" value={price1200} onChange={(e) => setPrice1200(Number(e.target.value))}>
-              <option value={1.26}>¥1.26 / 包</option>
-              <option value={1.5}>¥1.50 / 包</option>
+        <div className="seller-bar" data-purchase-seller>
+          <label className="field"><span>卖家</span>
+            <select className="select" value={seller.id} onChange={(e) => void saveSellerPatch((p) => selectSeller(p, e.target.value))} data-purchase-seller-select>
+              {sellers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </label>
+          <button type="button" className="btn" onClick={() => setSellerOpen(true)} data-purchase-seller-manage>管理卖家</button>
+        </div>
+        <p className="meta" data-purchase-seller-sum>{sellerSummary(seller)}</p>
+        <div className="row purchase-controls">
+          {seller.builtin ? (
+            <label className="field"><span>1200 颗单价</span>
+              <select className="select" value={price1200} onChange={(e) => setPrice1200(Number(e.target.value))}>
+                {PRICE_1200_CHOICES.map((c) => <option key={c} value={c}>¥{c.toFixed(2)} / 包</option>)}
+              </select>
+            </label>
+          ) : null}
           <div className="field"><span id="purchase-prefer-label">推荐依据</span>
             <div className="seg" role="group" aria-labelledby="purchase-prefer-label">
               {PREFER_ORDER.map((v) => <button type="button" key={v} aria-pressed={prefer === v} onClick={() => pickPrefer(v)}>{PURCHASE_PREFER_LABEL[v]}</button>)}
@@ -195,11 +238,12 @@ export default function Purchase() {
               </div>
               <h2>{recommended.setOffer ? recommended.setOffer.name : "全部用单色补充包"}{recommended.setOffer && recommended.singlesCost > 0 ? " + 补充包" : ""}</h2>
               <div className="purchase-reco-nums">
-                <div><span className="label">总价</span><b className="num purchase-price">{formatMoney(recommended.totalCost)}</b></div>
+                <div><span className="label">总价{recommended.shipping ? "（含运费）" : ""}</span><b className="num purchase-price">{formatMoney(recommended.totalCost)}</b>{recommended.shipping ? <span className="meta">商品 {formatMoney(recommended.goodsCost ?? 0)} + 运费 {formatMoney(recommended.shipping)}</span> : null}</div>
                 <div><span className="label">浪费</span><b className="num">{pct(recommended.wastePct)}</b><span className="meta">{fmt(recommended.wasteBeads)} 颗用不上</span></div>
                 <div><span className="label">一共买到</span><b className="num">{fmt(recommended.totalBeads)}</b><span className="meta">颗 · 补充包 {formatPacks(recommended.packs)}</span></div>
               </div>
               <p className="purchase-why"><b>为什么推荐：</b>{reason}</p>
+              <ShipLine plan={recommended} />
               {leftover ? (
                 <ul className="purchase-left" aria-label="剩余豆子的来源">
                   {leftover.unusedBeads > 0 ? <li>套装里用不上的颜色 <b className="num">{fmt(leftover.unusedColors)}</b> 色 / <b className="num">{fmt(leftover.unusedBeads)}</b> 颗</li> : null}
@@ -227,8 +271,33 @@ export default function Purchase() {
             </div>
           ) : null}
 
+          {quotes.length > 1 ? (
+            <section className="panel panel-pad seller-compare" aria-label="卖家对比" data-seller-compare>
+              <div className="panel-head"><h3>各卖家的最低总价</h3><span className="meta">同一份采购清单，每个卖家最省钱的方案，含运费。</span></div>
+              <ol>
+                {quotes.map((q, i) => {
+                  const diff = q.total - (plans.find((p) => p.cheapest)?.totalCost ?? q.total);
+                  return (
+                    <li key={q.seller.id} data-seller-quote={q.seller.id} data-current={q.seller.id === seller.id}>
+                      <span><b>{q.seller.name}</b>{i === 0 && !q.unfulfilled.length ? <span className="chip chip-leaf purchase-badge">最便宜</span> : null}{q.seller.id === seller.id ? <span className="chip purchase-badge">当前</span> : null}</span>
+                      <span className="seller-compare-sum"><b className="num">{formatMoney(q.total)}</b></span>
+                      <span className="meta">
+                        {q.unfulfilled.length ? `买不齐：${q.unfulfilled.slice(0, 6).join("、")}${q.unfulfilled.length > 6 ? " 等" : ""}（没有可用的包）` : q.best.name}
+                        {q.best.shipping ? ` · 含运费 ${formatMoney(q.best.shipping)}` : ""}
+                      </span>
+                      <span className="meta seller-compare-sum">
+                        {q.seller.id === seller.id ? "" : q.unfulfilled.length ? "" : diff === 0 ? "与当前相同" : diff < 0 ? `比当前省 ${formatMoney(-diff)}` : `比当前贵 ${formatMoney(diff)}`}
+                        {q.seller.id !== seller.id ? <> <button type="button" className="btn btn-ghost" onClick={() => void saveSellerPatch((p) => selectSeller(p, q.seller.id))} aria-label={`改用${q.seller.name}`}>改用</button></> : null}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
+          ) : null}
+
           <section className="panel purchase-section">
-            <div className="panel-head"><h3>6 个方案对比</h3><span className="meta">按总价从低到高；浪费 = 需要的色号买多的 + 套装里用不上的颜色。</span></div>
+            <div className="panel-head"><h3>{plans.length} 个方案对比</h3><span className="meta">按总价从低到高；浪费 = 需要的色号买多的 + 套装里用不上的颜色。</span></div>
             <div className="table-wrap">
               <table className="table purchase-plans">
                 <thead><tr><th>方案</th><th className="r">套装</th><th className="r">补充包</th><th className="r">合计</th><th className="r">总颗数</th><th className="r">浪费</th><th>覆盖</th><th>包装数量</th><th /></tr></thead>
@@ -252,17 +321,17 @@ export default function Purchase() {
           </section>
 
           <section className="purchase-section" aria-label="补充包明细">
-            <div className="panel-head"><h3>补充包明细：每个色号买什么规格</h3><span className="meta">展开看色号 × 规格 × 包数；500 颗装满 {MIN_PACKS_500} 包才能指定色号，不足会自动改买别的规格或补到 {MIN_PACKS_500} 包。</span></div>
+            <div className="panel-head"><h3>补充包明细：每个色号买什么规格</h3><span className="meta">展开看色号 × 规格 × 包数；带“最少包数”的规格（如 500 颗装满 10 包才能指定色号），不足时会自动改买别的规格或补满。</span></div>
             {plans.map((plan) => <SupplementDetail key={plan.id} plan={plan} price1200={price1200} href={shoppingHref(plan.id)} onCopy={copyPlan} />)}
           </section>
 
           {set221?.missing.length ? (
             <section className="panel panel-pad purchase-section">
-              <div className="panel-head"><h3>221 套装缺口（{set221.missing.length} 色）</h3><span className="meta">这一组是覆盖价值最低的最优解；实际以下单时套装色表为准。</span></div>
+              <div className="panel-head"><h3>{set221.setColors ?? 221} 套装缺口（{set221.missing.length} 色）</h3><span className="meta">这一组是覆盖价值最低的最优解；实际以下单时套装色表为准。</span></div>
               <div className="purchase-missing">
                 {set221.missing.map((code) => <span className="chip purchase-chip" key={code}><Bead code={code} size={16} /><span className="code">{code}</span></span>)}
               </div>
-              <p className="meta">补充包合计 {formatMoney(set221.singlesCost)}，其中这 {set221.missing.length} 个缺口约 {formatMoney(set221.items.filter((i) => !i.setCovered).reduce((s, i) => s + i.singlesCost, 0))}；套装的 221 色按每色 1200 颗计入。</p>
+              <p className="meta">补充包合计 {formatMoney(set221.singlesCost)}，其中这 {set221.missing.length} 个缺口约 {formatMoney(set221.items.filter((i) => !i.setCovered).reduce((s, i) => s + i.singlesCost, 0))}；套装的 {set221.setColors ?? 221} 色按每色 1200 颗计入。</p>
             </section>
           ) : null}
 
@@ -278,7 +347,8 @@ export default function Purchase() {
           ) : null}
 
           <section className="panel purchase-section">
-            <div className="panel-head"><h3>报价表</h3><span className="meta">2026-11-06 用户确认的报价，按每千颗单价排序。</span></div>
+            <div className="panel-head"><h3>报价表</h3><span className="meta">{seller.builtin ? "2026-11-06 用户确认的报价，按每千颗单价排序。" : `「${seller.name}」的报价，按每千颗单价排序。`}</span></div>
+            {!seller.builtin && (seller.note || seller.shipping > 0) ? <p className="meta">{seller.note ? `${seller.note}　` : ""}{seller.shipping > 0 ? `运费 ${formatMoney(seller.shipping)}${seller.freeShipping ? `，满 ${formatMoney(seller.freeShipping)} 包邮` : ""}。` : "包邮。"}</p> : null}
             <div className="table-wrap">
               <table className="table">
                 <thead><tr><th>报价</th><th className="r">价格</th><th className="r">元/千颗</th><th>限制/备注</th></tr></thead>
@@ -297,6 +367,7 @@ export default function Purchase() {
           </section>
         </>
       )}
+      {sellerOpen ? <SellerSheet onClose={() => setSellerOpen(false)} /> : null}
     </div>
   );
 }

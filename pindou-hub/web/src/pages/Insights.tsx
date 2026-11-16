@@ -28,7 +28,7 @@ export default function Insights() {
   const families = useMemo(() => familyBreakdown(patterns, stock, loss), [patterns, stock, loss]);
   const demandNeed = useMemo(() => Object.fromEntries(ranking.map((r) => [r.code, r.demand])), [ranking]);
   const health = useMemo(() => stockHealth(stock, demandNeed, prefs), [stock, demandNeed, prefs]);
-  const activity = useMemo(() => monthlyActivity(txns, { months: range }), [txns, range]);
+  const activity = useMemo(() => monthlyActivity(txns, { months: range, patterns }), [txns, range, patterns]);
   const quality = useMemo(() => recognitionQuality(patterns), [patterns]);
 
   const readyCount = ready.filter((r) => r.complete).length;
@@ -83,7 +83,7 @@ export default function Insights() {
         <InsightPanel id="ins-trend" title="进出趋势"
           takeaway={!activity.hasTxns ? "还没有出入库记录。" : `最近 ${range} 个月入库 ${fmt(activity.months.reduce((s, m) => s + m.purchased, 0))} 颗，消耗 ${fmt(activity.months.reduce((s, m) => s + m.consumed, 0))} 颗${activity.hasPrice ? `，花费 ¥${activity.totalSpent.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}` : ""}。`}
           aside={<div className="ins-seg" role="group" aria-label="时间范围">{([6, 12] as const).map((n) => <button key={n} type="button" className="btn btn-sm" aria-pressed={range === n} onClick={() => setRange(n)}>{n} 个月</button>)}</div>}>
-          {activity.hasTxns ? <TrendChart months={activity.months} hasPrice={activity.hasPrice} /> : <InsightEmpty title="还没有出入库记录" text="入库、完成图纸后，这里会按月显示进出。" href="#/history" action="看记录" />}
+          {activity.hasTxns ? <><TrendChart months={activity.months} hasPrice={activity.hasPrice} /><p className="meta" data-trend-caption style={{ marginTop: 8 }}>{activity.estimatedCompleted ? `“完成图纸”按你标记完成时记下的日期统计；其中 ${activity.estimatedCompleted} 张是旧记录，没有完成日期，暂按扣库存的日期估算。在图纸详情里补一条完工记录就会变准。` : "“完成图纸”按你标记完成时记下的完成日期统计。"} <a href="#/works">看作品集</a></p></> : <InsightEmpty title="还没有出入库记录" text="入库、完成图纸后，这里会按月显示进出。" href="#/history" action="看记录" />}
         </InsightPanel>
 
         <InsightPanel id="ins-quality" title="识别质量"

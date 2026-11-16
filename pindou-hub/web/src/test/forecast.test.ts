@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { LastOrder, Pattern, Txn } from "../lib/model";
 import { MONTH_MS, consumeRates, forecastCopyText, forecastNeeds, roundToPacks } from "../lib/forecast";
 import { packBeads } from "../lib/purchase";
+import { applyReceipt, cancelOrder, makeOrder } from "../lib/orders";
 
 const NOW = Date.UTC(2026, 10, 15, 12);
 const DAY = 86_400_000;
@@ -100,6 +101,32 @@ describe("forecastNeeds", () => {
     expect(partly.rows[0]).toMatchObject({ incoming: 200, shortfall: 200, wanted: 200 });
     const received = forecastNeeds({ ...base, prefs: prefs({ lastOrder: { ...order, receivedAt: NOW } }) });
     expect(received.rows[0]).toMatchObject({ incoming: 0, shortfall: 400 });
+  });
+
+  it("adds up several open orders, skips cancelled / fully received ones, and counts only what is still outstanding", () => {
+    const o = (id: string, items: Array<{ code: string; qty: number }>) => makeOrder({ items, now: NOW - DAY, id })!;
+    const a = o("a", [{ code: "A1", qty: 100 }]);
+    const b = applyReceipt(o("b", [{ code: "A1", qty: 300 }, { code: "B2", qty: 50 }]), { batchId: "bb", lines: [{ code: "A1", qty: 200 }] }, NOW);
+    const c = cancelOrder(o("c", [{ code: "A1", qty: 900 }]), NOW);
+    const d = applyReceipt(o("d", [{ code: "A1", qty: 70 }]), { batchId: "dd", lines: [{ code: "A1", qty: 70 }] }, NOW);
+    const f = forecastNeeds({ patterns: [pat("a", { A1: 600, B2: 80 })], txns: [buy("A1", 0), buy("B2", 10)], prefs: prefs(), orders: [a, b, c, d], now: NOW });
+    const a1 = f.rows.find((r) => r.code === "A1")!;
+    expect(a1).toMatchObject({ incoming: 200, shortfall: 400 }); // 100 + (300 - 200 已到)
+    expect(f.rows.find((r) => r.code === "B2")).toMatchObject({ incoming: 50, shortfall: 20 });
+  });
+
+  it("a stock-in that was undone no longer counts as arrived", () => {
+    const o = applyReceipt(makeOrder({ items: [{ code: "A1", qty: 300 }], now: NOW - DAY, id: "x" })!, { batchId: "gone", lines: [{ code: "A1", qty: 300 }] }, NOW);
+    const input = { patterns: [pat("a", { A1: 300 })], txns: [buy("A1", 0)], prefs: prefs(), orders: [o], now: NOW };
+    expect(forecastNeeds(input).rows.find((r) => r.code === "A1")?.incoming ?? 0).toBe(0);
+    expect(forecastNeeds({ ...input, liveBatches: new Set<string>() }).rows).toEqual([]); // 在途 300 抵掉需求
+  });
+
+  it("reads prefs.orders and a legacy lastOrder together when no orders are passed", () => {
+    const o = makeOrder({ items: [{ code: "A1", qty: 100 }], now: NOW - DAY, id: "n1" })!;
+    const last: LastOrder = { at: NOW - 2 * DAY, items: [{ code: "A1", qty: 150 }] };
+    const f = forecastNeeds({ patterns: [pat("a", { A1: 500 })], txns: [buy("A1", 0)], prefs: prefs({ orders: [o], lastOrder: last }), now: NOW });
+    expect(f.rows[0]).toMatchObject({ incoming: 250, shortfall: 250 });
   });
 
   it("status boundaries: now / plan / soon / ok", () => {

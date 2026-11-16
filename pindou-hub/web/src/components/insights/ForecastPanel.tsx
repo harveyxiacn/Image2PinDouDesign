@@ -61,7 +61,7 @@ export function ForecastPanel() {
             )}
             <div className="fc-foot">
               <div className="fc-total">
-                {buyRows.length ? <><b>合计 {buyRows.length} 个色号 · {fmt(totals.beads)} 颗</b><span className="meta">约 {formatMoney(totals.cost)}（按 1200 颗装 1.26 元起算）</span></> : <span className="meta">没有需要买的</span>}
+                {buyRows.length ? <><b>合计 {buyRows.length} 个色号 · {fmt(totals.beads)} 颗</b><span className="meta">约 {formatMoney(totals.cost)}（按 1200 颗装 {formatMoney(result.price1200)} 算，可在采购页修改）</span></> : <span className="meta">没有需要买的</span>}
               </div>
               <button type="button" className="btn btn-primary" data-forecast-copy disabled={!buyRows.length} onClick={copy}>复制补货清单</button>
             </div>

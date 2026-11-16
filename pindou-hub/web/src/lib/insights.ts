@@ -2,8 +2,9 @@
 // 约定：只统计未删除的记录；需求一律“份数 × 每份用量 × (1 + 损耗)”向上取整（与采购方案口径一致）。
 import { ciede2000 } from "@engine/color";
 import type { Counts, Pattern, SharedPrefs, Txn } from "./model";
-import { compareCodes, isActive, withLoss } from "./inventory";
+import { compareCodes, isActive, refundedIds, withLoss } from "./inventory";
 import { colorOf } from "./palette";
+import { monthlyDone } from "./worklog";
 
 function have(stock: Counts, code: string): number {
   return Math.max(0, stock[code] ?? 0);
@@ -192,7 +193,11 @@ export function stockHealth(stock: Counts, demand: Counts, prefs: Pick<SharedPre
 
 // ---------- 进出趋势 ----------
 export type MonthRow = { key: string; year: number; month: number; purchased: number; consumed: number; spent: number; completed: number };
-export type Activity = { months: MonthRow[]; hasTxns: boolean; hasPrice: boolean; totalSpent: number };
+export type Activity = {
+  months: MonthRow[]; hasTxns: boolean; hasPrice: boolean; totalSpent: number;
+  /** 区间内按扣库存日期估算（没有完工记录）的完成件数；0 表示全部来自真实完成日期 */
+  estimatedCompleted: number;
+};
 
 export function monthKey(ms: number): string {
   const d = new Date(ms);
@@ -202,9 +207,10 @@ export function monthKey(ms: number): string {
 /**
  * 最近 months 个自然月（本地时区，含当月，没有流水的月份补 0）。
  * 入库 = purchase 且 delta>0；消耗 = consume 且 delta<0；花费 = 入库颗数 × unitPrice（无单价的不计）；
- * 完成图纸数 = 当月有 consume 流水的不同 patternId（模型没有“完成时间”字段，以扣库存时间为准）。
+ * 完成图纸数：传了 patterns 时，有完工记录的图纸按记录的完成日期，没有记录的旧图纸按扣库存时间估算（见 lib/worklog.ts monthlyDone）；
+ * 没传 patterns 时只能按当月有 consume 流水的不同 patternId 估算。
  */
-export function monthlyActivity(txns: Txn[], opts: { months?: number; now?: number } = {}): Activity {
+export function monthlyActivity(txns: Txn[], opts: { months?: number; now?: number; patterns?: Pattern[] } = {}): Activity {
   const n = Math.max(1, opts.months ?? 12);
   const now = new Date(opts.now ?? Date.now());
   const rows: MonthRow[] = [];
@@ -218,6 +224,8 @@ export function monthlyActivity(txns: Txn[], opts: { months?: number; now?: numb
   const done = new Map<string, Set<string>>();
   let hasTxns = false;
   let hasPrice = false;
+  // 被退回的扣库存（图纸标完成后又改回，豆子放回库存）不算消耗，也不算完成
+  const refunded = refundedIds(txns);
   for (const t of txns) {
     if (t.deleted) continue;
     hasTxns = true;
@@ -228,7 +236,7 @@ export function monthlyActivity(txns: Txn[], opts: { months?: number; now?: numb
         r.purchased += t.delta;
         if (t.unitPrice != null && t.unitPrice > 0) r.spent += t.delta * t.unitPrice;
       }
-    } else if (t.kind === "consume" && t.delta < 0 && r) {
+    } else if (t.kind === "consume" && t.delta < 0 && r && !refunded.has(t.id)) {
       r.consumed += -t.delta;
       if (t.patternId) {
         const s = done.get(r.key) ?? new Set<string>();
@@ -237,8 +245,18 @@ export function monthlyActivity(txns: Txn[], opts: { months?: number; now?: numb
       }
     }
   }
-  for (const r of rows) r.completed = done.get(r.key)?.size ?? 0;
-  return { months: rows, hasTxns, hasPrice, totalSpent: rows.reduce((s, r) => s + r.spent, 0) };
+  let estimatedCompleted = 0;
+  if (opts.patterns) {
+    const byMonth = monthlyDone(opts.patterns, txns);
+    for (const r of rows) {
+      const m = byMonth[r.key];
+      r.completed = (m?.real ?? 0) + (m?.estimated ?? 0);
+      estimatedCompleted += m?.estimated ?? 0;
+    }
+  } else {
+    for (const r of rows) { r.completed = done.get(r.key)?.size ?? 0; estimatedCompleted += r.completed; }
+  }
+  return { months: rows, hasTxns, hasPrice, totalSpent: rows.reduce((s, r) => s + r.spent, 0), estimatedCompleted };
 }
 
 // ---------- 识别质量 ----------

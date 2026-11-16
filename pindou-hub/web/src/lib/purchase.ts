@@ -2,6 +2,7 @@
 // 这里只有纯函数，页面和测试共用；数据来源是用户确认的固定报价，不依赖服务端。
 import type { Counts, LastOrder } from "./model";
 import { compareCodes } from "./inventory";
+import { activeSeller, builtinSeller, freeShippingGap, shippingFor, withPrice1200, type Seller, type SellerKit, type SellerPack } from "./sellers";
 
 export type PackId = "p4000" | "p1200" | "p500";
 export type PackCounts = Record<PackId, number>;
@@ -65,19 +66,28 @@ export function isAM(code: string): boolean {
   return /^[A-M]/.test(code);
 }
 
+/** 一种规格买了几包（带价格，方便不同卖家各算各的）。 */
+export type PackLine = { id: string; beads: number; price: number; n: number; minPacks?: number };
+
 export type OptimizedPacks = {
   cost: number;
   beads: number;
   packs: PackCounts;
   /** 各规格包数，键是 p4000/p1200/p500 */
   counts: Partial<Record<PackId, number>>;
+  /** 任意规格的包数（从大到小）；买不了（没有可用的包）时为空 */
+  lines: PackLine[];
 };
 
 export type OptimizeOptions = {
-  /** 是否允许 500 颗装；默认允许。500 颗装满 10 包才能备注色号，见 enforce500Min。 */
+  /** 是否允许 500 颗装；默认允许。500 颗装满 10 包才能备注色号，见 enforce500Min。（泛化后 = 是否允许带“最少包数”的包） */
   allow500?: boolean;
   /** 在最低成本之上愿意多花的钱来换更少剩余；默认 max(¥0.30, 最低成本 × 3%)。传 0 = 纯最省钱。 */
   tolerance?: number;
+  /** 排除这些包 id（计划层重算“不用某规格”时用） */
+  exclude?: string[];
+  /** 用哪个卖家的包规格；默认是内置默认卖家（带 price1200） */
+  seller?: Seller;
 };
 
 /** 单色补充包的固定单价（元/包）。1200 颗装价格可调（1.26 / 1.5）。 */
@@ -96,63 +106,140 @@ export function packBeads(packs: PackCounts): number {
 /** 500 颗装“可指定色号”所需的整单最少包数（用户确认：满 10 包可备注色号）。 */
 export const MIN_PACKS_500 = 10;
 
-/**
- * 某个色号买至少 x 颗（允许超买）。
- * 先找最低成本；再在“成本不超过最低成本 + 容差”的组合里选剩余最少的（剩余相同 → 包数更少）。
- * 枚举 4000/1200 的包数，500 颗装只补最少的那一部分，所以结果是精确的而不是启发式。
- */
-export function optimizePacks(x: number, code: string, price1200 = DEFAULT_PRICE_1200, options: OptimizeOptions = {}): OptimizedPacks {
-  const need = Math.max(0, Math.round(Number.isFinite(x) ? x : 0));
-  const empty: OptimizedPacks = { cost: 0, beads: 0, packs: { p4000: 0, p1200: 0, p500: 0 }, counts: {} };
-  if (need <= 0) return empty;
-
-  const allow500 = options.allow500 !== false;
-  const max4000 = isAM(code) ? Math.ceil(need / 4000) : 0;
-  const max1200 = Math.ceil(need / 1200);
-  const cands: Array<{ packs: PackCounts; cost: number; beads: number; count: number }> = [];
-  for (let a = 0; a <= max4000; a++) {
-    for (let b = 0; b <= max1200; b++) {
-      const rest = need - a * 4000 - b * 1200;
-      const c = rest > 0 ? (allow500 ? Math.ceil(rest / 500) : -1) : 0;
-      if (c < 0) continue;
-      const packs: PackCounts = { p4000: a, p1200: b, p500: c };
-      cands.push({ packs, cost: packCost(packs, price1200), beads: packBeads(packs), count: a + b + c });
-    }
+export function linesCost(lines: PackLine[]): number {
+  return lines.reduce((sum, l) => sum + l.n * l.price, 0);
+}
+export function linesBeads(lines: PackLine[]): number {
+  return lines.reduce((sum, l) => sum + l.n * l.beads, 0);
+}
+export function linesCount(lines: PackLine[]): number {
+  return lines.reduce((sum, l) => sum + l.n, 0);
+}
+/** 把任意规格的包数折成老的 4000/1200/500 三格（其他规格不计入；只用于兼容旧界面）。 */
+export function countsOfLines(lines: PackLine[]): PackCounts {
+  const out: PackCounts = { p4000: 0, p1200: 0, p500: 0 };
+  for (const l of lines) {
+    if (l.beads === 4000) out.p4000 += l.n;
+    else if (l.beads === 1200) out.p1200 += l.n;
+    else if (l.beads === 500) out.p500 += l.n;
   }
+  return out;
+}
+function linesOfCounts(packs: PackCounts, offers: SellerPack[]): PackLine[] {
+  const out: PackLine[] = [];
+  for (const o of sortOffers(offers)) {
+    const n = o.beads === 4000 ? packs.p4000 : o.beads === 1200 ? packs.p1200 : o.beads === 500 ? packs.p500 : 0;
+    if (n > 0) out.push(lineOf(o, n));
+  }
+  return out;
+}
+function lineOf(o: SellerPack, n: number): PackLine {
+  return { id: o.id, beads: o.beads, price: o.price, n, ...(o.minPacks ? { minPacks: o.minPacks } : {}) };
+}
+function sortOffers(offers: SellerPack[]): SellerPack[] {
+  return [...offers].sort((a, b) => (b.beads - a.beads) || (a.price - b.price));
+}
+function legacyOffers(price1200: number): SellerPack[] {
+  return builtinSeller(price1200).packs;
+}
+
+const COMBO_LIMIT = 200_000;
+
+/**
+ * 泛化的单色补充包优化：offers 是任意规格/价格（可带“最少包数”、A–M 限制）。
+ * 先找最低成本；再在“成本不超过最低成本 + 容差”的组合里选剩余最少的（剩余相同 → 包数更少）。
+ * 枚举除最小包以外各规格的包数，最小包只补最少的那一部分，所以结果是精确的而不是启发式
+ * （极端大的需求会收窄小规格的枚举范围以免卡住）。
+ */
+export function optimizeWithOffers(x: number, code: string, offers: SellerPack[], options: OptimizeOptions = {}): OptimizedPacks {
+  const need = Math.max(0, Math.round(Number.isFinite(x) ? x : 0));
+  const empty: OptimizedPacks = { cost: 0, beads: 0, packs: { p4000: 0, p1200: 0, p500: 0 }, counts: {}, lines: [] };
+  if (need <= 0) return empty;
+  const allowMin = options.allow500 !== false;
+  const skip = new Set(options.exclude ?? []);
+  const list = sortOffers(offers.filter((o) => (o.scope !== "A-M" || isAM(code)) && (allowMin || !o.minPacks) && !skip.has(o.id)));
+  if (!list.length) return empty;
+
+  // 估算枚举量，过大就收窄非最大规格的范围
+  const bounds = list.map((o) => Math.ceil(need / o.beads));
+  let combos = 1;
+  for (let i = 0; i < list.length - 1; i++) combos *= bounds[i] + 1;
+  const capSmall = combos > COMBO_LIMIT ? 12 : Infinity;
+
+  const cands: Array<{ ns: number[]; cost: number; beads: number; count: number }> = [];
+  const walk = (i: number, rest: number, ns: number[]) => {
+    const o = list[i];
+    if (i === list.length - 1) {
+      const all = [...ns, rest > 0 ? Math.ceil(rest / o.beads) : 0];
+      let cost = 0; let beads = 0; let count = 0;
+      all.forEach((n, k) => { cost += n * list[k].price; beads += n * list[k].beads; count += n; });
+      cands.push({ ns: all, cost, beads, count });
+      return;
+    }
+    const max = i === 0 ? bounds[i] : Math.min(bounds[i], capSmall);
+    for (let n = 0; n <= max; n++) {
+      const left = rest - n * o.beads;
+      walk(i + 1, left, [...ns, n]);
+      if (left <= 0) break;
+    }
+  };
+  walk(0, need, []);
+
   const minCost = Math.min(...cands.map((c) => c.cost));
   const tolerance = options.tolerance ?? Math.max(0.3, minCost * 0.03);
   const pool = cands.filter((c) => c.cost <= minCost + tolerance + 1e-9);
   pool.sort((p, q) => (p.beads - q.beads) || (p.count - q.count) || (p.cost - q.cost));
   const best = pool[0];
+  const lines = best.ns.map((n, k) => (n > 0 ? lineOf(list[k], n) : null)).filter((l): l is PackLine => l !== null);
+  const packs = countsOfLines(lines);
   const counts: Partial<Record<PackId, number>> = {};
-  if (best.packs.p4000) counts.p4000 = best.packs.p4000;
-  if (best.packs.p1200) counts.p1200 = best.packs.p1200;
-  if (best.packs.p500) counts.p500 = best.packs.p500;
-  return { cost: best.cost, beads: best.beads, packs: best.packs, counts };
+  if (packs.p4000) counts.p4000 = packs.p4000;
+  if (packs.p1200) counts.p1200 = packs.p1200;
+  if (packs.p500) counts.p500 = packs.p500;
+  return { cost: best.cost, beads: best.beads, packs, counts, lines };
+}
+
+/**
+ * 某个色号买至少 x 颗（允许超买）。默认按内置默认卖家的包规格（4000 仅 A–M / 1200 / 500），
+ * 也可以用 options.seller 指定别的卖家。
+ */
+export function optimizePacks(x: number, code: string, price1200 = DEFAULT_PRICE_1200, options: OptimizeOptions = {}): OptimizedPacks {
+  return optimizeWithOffers(x, code, options.seller ? options.seller.packs : legacyOffers(price1200), options);
 }
 
 type Slot = { code: string; need: number; packs: PackCounts };
+type LineSlot = { code: string; need: number; lines: PackLine[] };
 
 /**
- * 500 颗装规则（计划层）：整单 500 颗装总数必须 ≥ 10 包才能指定色号。
- * 总数在 1–9 包时二选一，取总价更低者（持平时取剩余更少的“不用 500 装”）：
- *   A) 用到 500 装的色号去掉 500 装重新最优化；
- *   B) 保留，并把 500 装补到 10 包（多出来的包加到已用 500 装的色号上，没有则加到第一个有需求的色号，剩余会变多）。
+ * “最少包数”规则（计划层，泛化版）：某规格（如 500 颗装）整单总包数必须 ≥ minPacks 才能指定色号。
+ * 总数在 1…minPacks-1 时二选一，取总价更低者（持平时取剩余更少的“不用这个规格”）：
+ *   A) 用到该规格的色号去掉它重新最优化；
+ *   B) 保留，并把它补到 minPacks 包（多出来的包加到已用它的第一个色号上，剩余会变多）。
  * 返回与 slots 同序的新包数。
  */
-export function enforce500Min(slots: Slot[], price1200 = DEFAULT_PRICE_1200): PackCounts[] {
-  const out = slots.map((s) => ({ ...s.packs }));
-  const total = out.reduce((sum, p) => sum + p.p500, 0);
-  if (total === 0 || total >= MIN_PACKS_500) return out;
-
-  const without = out.map((p, i) => (p.p500 > 0 ? optimizePacks(slots[i].need, slots[i].code, price1200, { allow500: false }).packs : p));
-  const costA = without.reduce((sum, p) => sum + packCost(p, price1200), 0);
-  const costB = out.reduce((sum, p) => sum + packCost(p, price1200), 0) + (MIN_PACKS_500 - total) * packPrice("p500");
-  if (costA <= costB + 1e-9) return without;
-
-  const target = out.findIndex((p) => p.p500 > 0);
-  out[target] = { ...out[target], p500: out[target].p500 + (MIN_PACKS_500 - total) };
+export function enforceMinPacks(slots: LineSlot[], offers: SellerPack[]): PackLine[][] {
+  let out = slots.map((s) => s.lines.map((l) => ({ ...l })));
+  const restricted = sortOffers(offers.filter((o) => (o.minPacks ?? 0) > 1));
+  const countOf = (ls: PackLine[], id: string) => ls.find((l) => l.id === id)?.n ?? 0;
+  for (const o of restricted) {
+    const min = o.minPacks!;
+    const total = out.reduce((sum, ls) => sum + countOf(ls, o.id), 0);
+    if (total === 0 || total >= min) continue;
+    const without = out.map((ls, i) => (countOf(ls, o.id) > 0 ? optimizeWithOffers(slots[i].need, slots[i].code, offers, { exclude: [o.id] }).lines : ls));
+    const costA = without.reduce((sum, ls) => sum + linesCost(ls), 0);
+    const costB = out.reduce((sum, ls) => sum + linesCost(ls), 0) + (min - total) * o.price;
+    if (costA <= costB + 1e-9) { out = without; continue; }
+    const target = out.findIndex((ls) => countOf(ls, o.id) > 0);
+    out[target] = out[target].map((l) => (l.id === o.id ? { ...l, n: l.n + (min - total) } : l));
+  }
   return out;
+}
+
+/** 500 颗装规则（老接口，默认卖家）：整单 500 颗装总数必须 ≥ 10 包才能指定色号。 */
+export function enforce500Min(slots: Slot[], price1200 = DEFAULT_PRICE_1200): PackCounts[] {
+  const offers = legacyOffers(price1200);
+  const fixed = enforceMinPacks(slots.map((s) => ({ code: s.code, need: s.need, lines: linesOfCounts(s.packs, offers) })), offers);
+  return fixed.map((ls) => countsOfLines(ls));
 }
 
 export function addPacks(target: PackCounts, packs: PackCounts): PackCounts {
@@ -191,6 +278,8 @@ export type PurchasePlanItem = {
   surplus: number;
   /** 当前 1000 颗/包清单的取整数量（仅“按当前清单执行”方案有） */
   appQty?: number;
+  /** 任意规格的包数（泛化后的真实来源；packs 只是兼容旧界面的 4000/1200/500 三格） */
+  lines?: PackLine[];
 };
 
 export type PurchasePlan = {
@@ -227,6 +316,16 @@ export type PurchasePlan = {
   /** 最少浪费 */
   leastWaste: boolean;
   note: string;
+  /** 商品金额（套装 + 补充包，不含运费）；totalCost = goodsCost + shipping */
+  goodsCost?: number;
+  /** 运费（已按包邮门槛处理） */
+  shipping?: number;
+  /** 还差多少元包邮；已包邮、没有门槛或运费为 0 时为 0 */
+  freeShippingGap?: number;
+  sellerId?: string;
+  sellerName?: string;
+  /** 这个卖家买不了的色号（没有可用的包且没被套装覆盖） */
+  unfulfilled?: string[];
 };
 
 function codesOf(need: Counts): string[] {
@@ -236,7 +335,7 @@ function codesOf(need: Counts): string[] {
 function finishPlan(base: {
   id: string; name: string; setOffer?: PurchaseOffer; setPrice: number; setBeadsTotal: number;
   usableSetBeads: number; setColors?: number; coverage: number; missing: string[]; items: PurchasePlanItem[];
-  note: string;
+  note: string; seller?: Seller;
 }): PurchasePlan {
   let singlesCost = 0;
   let totalBeads = base.setBeadsTotal;
@@ -254,10 +353,18 @@ function finishPlan(base: {
   }
   const unusedSetBeads = Math.max(0, base.setBeadsTotal - base.usableSetBeads);
   const wasteBeads = itemSurplus + unusedSetBeads;
+  const { seller, ...rest } = base;
+  const goodsCost = base.setPrice + singlesCost;
+  const shipping = seller ? shippingFor(seller, goodsCost) : 0;
+  const unfulfilled = base.items.filter((item) => !item.setCovered && item.remaining > 0 && !(item.lines?.length)).map((item) => item.code);
   return {
-    ...base,
+    ...rest,
     singlesCost,
-    totalCost: base.setPrice + singlesCost,
+    goodsCost,
+    shipping,
+    totalCost: goodsCost + shipping,
+    ...(seller ? { sellerId: seller.id, sellerName: seller.name, freeShippingGap: freeShippingGap(seller, goodsCost) } : {}),
+    ...(unfulfilled.length ? { unfulfilled } : {}),
     totalBeads,
     surplus: totalBeads - totalNeed,
     packs,
@@ -272,9 +379,9 @@ function finishPlan(base: {
 }
 
 /** 用给定的包数组装一个色号条目（成本、颗数、剩余都由包数推出）。 */
-function itemFromPacks(code: string, need: number, demand: Counts, price1200: number, setBeads: number, covered: boolean, packs: PackCounts, appQty?: number): PurchasePlanItem {
+function itemFromLines(code: string, need: number, demand: Counts, setBeads: number, covered: boolean, lines: PackLine[], appQty?: number): PurchasePlanItem {
   const remaining = appQty ?? Math.max(0, need - setBeads);
-  const singlesBeads = packBeads(packs);
+  const singlesBeads = linesBeads(lines);
   return {
     code,
     net: demand[code] ?? 0,
@@ -282,30 +389,44 @@ function itemFromPacks(code: string, need: number, demand: Counts, price1200: nu
     setCovered: covered,
     setBeads,
     remaining,
-    packs,
+    packs: countsOfLines(lines),
     singlesBeads,
-    singlesCost: packCost(packs, price1200),
+    singlesCost: linesCost(lines),
     totalBeads: setBeads + singlesBeads,
     surplus: setBeads + singlesBeads - need,
-    appQty
+    appQty,
+    lines
   };
 }
 
 type ItemSpec = { code: string; need: number; setBeads: number; covered: boolean; appQty?: number };
 
-/** 逐色最优化后，再按计划层的 500 颗装规则整体修正。 */
-function buildItems(specs: ItemSpec[], demand: Counts, price1200: number): PurchasePlanItem[] {
+/** 逐色最优化后，再按计划层的“最少包数”规则（如 500 颗装满 10 包）整体修正。 */
+function buildItems(specs: ItemSpec[], demand: Counts, seller: Seller): PurchasePlanItem[] {
   const slots = specs.map((spec) => {
     const remaining = spec.appQty ?? Math.max(0, spec.need - spec.setBeads);
-    return { code: spec.code, need: remaining, packs: optimizePacks(remaining, spec.code, price1200).packs };
+    return { code: spec.code, need: remaining, lines: optimizeWithOffers(remaining, spec.code, seller.packs).lines };
   });
-  const fixed = enforce500Min(slots, price1200);
-  return specs.map((spec, i) => itemFromPacks(spec.code, spec.need, demand, price1200, spec.setBeads, spec.covered, fixed[i], spec.appQty));
+  const fixed = enforceMinPacks(slots, seller.packs);
+  return specs.map((spec, i) => itemFromLines(spec.code, spec.need, demand, spec.setBeads, spec.covered, fixed[i], spec.appQty));
+}
+
+/** 套装报价 -> 套装 offer（每色 1200 颗）。 */
+export function kitOffer(kit: SellerKit): PurchaseOffer {
+  const offer = setOffer(kit.id, `${kit.colors} 色套装（${kit.price} 元）`, kit.price, kit.colors);
+  // 只有内置默认卖家的套装是用户确认过色号可对 MARD 的；自定义卖家的不下这个结论
+  return kit.id.startsWith("set-") ? offer : { ...offer, confirmed: false, note: `${kit.colors} 色，每色 1200 颗。` };
+}
+
+/** 老接口默认用内置默认卖家（带 price1200）；传 seller 就用该卖家。 */
+function legacySeller(seller: Seller | undefined, price1200: number): Seller {
+  return seller ? withPrice1200(seller, price1200) : builtinSeller(price1200);
 }
 
 /** 全部按单色补充包买；最稳，颜色完全可控。 */
-export function planAllSingles(need: Counts, demand: Counts = need, price1200 = DEFAULT_PRICE_1200): PurchasePlan {
-  const items = buildItems(codesOf(need).map((code) => ({ code, need: Math.round(need[code]), setBeads: 0, covered: false })), demand, price1200);
+export function planAllSingles(need: Counts, demand: Counts = need, price1200 = DEFAULT_PRICE_1200, seller?: Seller): PurchasePlan {
+  const sel = legacySeller(seller, price1200);
+  const items = buildItems(codesOf(need).map((code) => ({ code, need: Math.round(need[code]), setBeads: 0, covered: false })), demand, sel);
   return finishPlan({
     id: "plan-all-singles",
     name: "全部单色号补充",
@@ -315,12 +436,13 @@ export function planAllSingles(need: Counts, demand: Counts = need, price1200 = 
     coverage: items.length,
     missing: [],
     items,
+    seller: sel,
     note: "最稳、囤货最少；颜色完全按 MARD 色号买。"
   });
 }
 
 /** 套装按“覆盖该色能省多少钱”排序，覆盖价值最高的 N 色。 */
-function coverageForSet(need: Counts, offer: PurchaseOffer, price1200: number): { covered: Set<string>; missing: string[] } {
+function coverageForSet(need: Counts, offer: PurchaseOffer, seller: Seller): { covered: Set<string>; missing: string[] } {
   const codes = codesOf(need);
   const target = Math.min(offer.colors ?? codes.length, codes.length);
   if (target >= codes.length) return { covered: new Set(codes), missing: [] };
@@ -328,40 +450,48 @@ function coverageForSet(need: Counts, offer: PurchaseOffer, price1200: number): 
   const values = new Map<string, number>();
   for (const code of codes) {
     const amount = Math.max(0, Math.round(need[code]));
-    const base = optimizePacks(amount, code, price1200);
-    const covered = optimizePacks(Math.max(0, amount - beadsPerColor), code, price1200);
+    const base = optimizeWithOffers(amount, code, seller.packs);
+    const covered = optimizeWithOffers(Math.max(0, amount - beadsPerColor), code, seller.packs);
     values.set(code, base.cost - covered.cost);
   }
   const sorted = [...codes].sort((a, b) => (values.get(b)! - values.get(a)!) || compareCodes(a, b));
   return { covered: new Set(sorted.slice(0, target)), missing: sorted.slice(target) };
 }
 
+/** 方案 id：默认卖家的四个套装保持老 id（旧链接继续有效），其他套装用 plan-kit-<id>。 */
+export function planIdOfKit(kitId: string): string {
+  const m = /^set-(\d+)-(\d+)$/.exec(kitId);
+  return m ? `plan-set${m[1]}-${m[2]}` : `plan-kit-${kitId}`;
+}
+
 /** 套装（每色 1200 颗）+ 补充包。 */
-export function planWithSet(offer: PurchaseOffer, need: Counts, demand: Counts = need, price1200 = DEFAULT_PRICE_1200): PurchasePlan {
-  const { covered, missing } = coverageForSet(need, offer, price1200);
+export function planWithSet(offer: PurchaseOffer, need: Counts, demand: Counts = need, price1200 = DEFAULT_PRICE_1200, seller?: Seller): PurchasePlan {
+  const sel = legacySeller(seller, price1200);
+  const { covered, missing } = coverageForSet(need, offer, sel);
   const beadsPerColor = offer.beadsPerColor ?? 1200;
   const setBeadsTotal = offer.totalBeads ?? (offer.colors ?? 0) * beadsPerColor;
   const items = buildItems(codesOf(need).map((code) => {
     const isCovered = covered.has(code);
     return { code, need: Math.round(need[code]), setBeads: isCovered ? beadsPerColor : 0, covered: isCovered };
-  }), demand, price1200);
+  }), demand, sel);
   const usableSetBeads = items.reduce((sum, item) => sum + item.setBeads, 0);
   const missingCost = items.filter((item) => !item.setCovered).reduce((sum, item) => sum + item.singlesCost, 0);
   const unusedColors = Math.max(0, (offer.colors ?? 0) - covered.size);
   const unusedBeads = Math.max(0, setBeadsTotal - usableSetBeads);
   return finishPlan({
-    id: offer.id === "set-221-185" ? "plan-set221-185" : offer.id === "set-221-210" ? "plan-set221-210" : offer.id === "set-265-257" ? "plan-set265-257" : "plan-set295-352",
+    id: planIdOfKit(offer.id),
     name: `${offer.name} + 补充包`,
     setOffer: offer,
     setPrice: offer.price,
     setBeadsTotal,
     usableSetBeads,
     setColors: offer.colors,
+    seller: sel,
     coverage: covered.size,
     missing,
     items,
     note: missing.length
-      ? `${offer.id === "set-221-210" ? "同 221 色的高价版；" : ""}套装已确认可对 MARD，每色 1200 颗。缺 ${missing.length} 色，单买约 ${formatMoney(missingCost)}。`
+      ? `${offer.id === "set-221-210" ? "同 221 色的高价版；" : ""}${offer.confirmed ? "套装已确认可对 MARD，每色 1200 颗。" : "套装按每色 1200 颗计。"}缺 ${missing.length} 色，单买约 ${formatMoney(missingCost)}。`
       : unusedColors
         ? `套装覆盖全部缺口色；另有 ${unusedColors} 色用不上（${unusedBeads.toLocaleString("zh-CN")} 颗），整盒计入总颗数。`
         : "套装覆盖全部缺口色，没有用不上的颜色。"
@@ -369,11 +499,12 @@ export function planWithSet(offer: PurchaseOffer, need: Counts, demand: Counts =
 }
 
 /** 当前 app 按 1000 颗/包取整后的清单，再用真实报价履行。 */
-export function planAppCurrent(need: Counts, demand: Counts = need, price1200 = DEFAULT_PRICE_1200): PurchasePlan {
+export function planAppCurrent(need: Counts, demand: Counts = need, price1200 = DEFAULT_PRICE_1200, seller?: Seller): PurchasePlan {
+  const sel = legacySeller(seller, price1200);
   const items = buildItems(codesOf(need).map((code) => {
     const amount = Math.max(0, Math.round(need[code]));
     return { code, need: amount, setBeads: 0, covered: false, appQty: Math.ceil(amount / 1000) * 1000 };
-  }), demand, price1200);
+  }), demand, sel);
   const appQtyTotal = items.reduce((sum, item) => sum + (item.appQty ?? 0), 0);
   return finishPlan({
     id: "plan-app-current",
@@ -384,6 +515,7 @@ export function planAppCurrent(need: Counts, demand: Counts = need, price1200 = 
     coverage: items.length,
     missing: [],
     items,
+    seller: sel,
     note: `当前清单按 1000 颗/包取整为 ${appQtyTotal.toLocaleString("zh-CN")} 颗；用真实报价履行通常比按缺口买更贵。`
   });
 }
@@ -442,17 +574,44 @@ export function recommendationReason(plans: PurchasePlan[], prefer: PurchasePref
   return `${prefer === "leastWaste" ? "剩余最少：" : ""}比最省钱方案${extra > 0.005 ? `贵 ${formatMoney(extra)}` : "价格相当"}，少剩 ${saved.toLocaleString("zh-CN")} 颗用不上的豆子。`;
 }
 
-/** 6 个方案，按总价从低到高，并标出 推荐 / 最省钱 / 最少浪费。 */
-export function buildPurchasePlans(need: Counts, demand: Counts = need, price1200 = DEFAULT_PRICE_1200, prefer: PurchasePrefer = "balanced"): PurchasePlan[] {
+/**
+ * 方案列表，按总价（含运费）从低到高，并标出 推荐 / 最省钱 / 最少浪费。
+ * 默认卖家 = 6 个方案（4 个套装 + 全单色 + 按当前清单）。seller 不传就用当前选中的卖家（读本机偏好），
+ * 所以 Shopping 等老调用点不用改；选中内置默认卖家时 price1200 仍然是 1200 颗装的单价。
+ */
+export function buildPurchasePlans(need: Counts, demand: Counts = need, price1200 = DEFAULT_PRICE_1200, prefer: PurchasePrefer = "balanced", seller?: Seller): PurchasePlan[] {
+  const sel = withPrice1200(seller ?? activeSeller(), price1200);
   const plans = [
-    planWithSet(PURCHASE_OFFERS[0], need, demand, price1200),
-    planWithSet(PURCHASE_OFFERS[1], need, demand, price1200),
-    planAllSingles(need, demand, price1200),
-    planWithSet(PURCHASE_OFFERS[2], need, demand, price1200),
-    planAppCurrent(need, demand, price1200),
-    planWithSet(PURCHASE_OFFERS[3], need, demand, price1200)
+    ...sel.kits.map((kit) => planWithSet(kitOffer(kit), need, demand, price1200, sel)),
+    planAllSingles(need, demand, price1200, sel),
+    planAppCurrent(need, demand, price1200, sel)
   ];
-  return tagPlans(plans.sort((a, b) => a.totalCost - b.totalCost || a.id.localeCompare(b.id)), prefer);
+  const doable = plans.filter((p) => !p.unfulfilled?.length);
+  const pool = doable.length ? doable : plans;
+  return tagPlans(pool.sort((a, b) => a.totalCost - b.totalCost || a.id.localeCompare(b.id)), prefer);
+}
+
+export type SellerQuote = {
+  seller: Seller;
+  /** 该卖家最省钱的方案（含运费） */
+  best: PurchasePlan;
+  /** 该卖家按偏好推荐的方案 */
+  recommended: PurchasePlan;
+  /** 最省钱方案的总价（含运费） */
+  total: number;
+  /** 买不了的色号（没有可用的包）；非空表示这个卖家供不齐 */
+  unfulfilled: string[];
+};
+
+/** 同一份采购清单在各个卖家那里的最低总价，从低到高；供不齐的排在后面。 */
+export function compareSellers(need: Counts, demand: Counts, sellers: Seller[], price1200 = DEFAULT_PRICE_1200, prefer: PurchasePrefer = "balanced"): SellerQuote[] {
+  const quotes = sellers.map((seller) => {
+    const plans = buildPurchasePlans(need, demand, price1200, prefer, seller);
+    const best = plans.find((p) => p.cheapest) ?? plans[0];
+    const recommended = plans.find((p) => p.recommended) ?? best;
+    return { seller, best, recommended, total: best.totalCost, unfulfilled: best.unfulfilled ?? [] };
+  });
+  return quotes.sort((a, b) => (a.unfulfilled.length - b.unfulfilled.length) || (a.total - b.total) || a.seller.name.localeCompare(b.seller.name));
 }
 
 export type SupplementRow = {
@@ -472,12 +631,43 @@ export type SupplementRow = {
   continued: boolean;
 };
 
-export type SupplementGroup = { size: PackId; beadsPerPack: number; packs: number; cost: number; rows: SupplementRow[] };
+export type SupplementGroup = {
+  /** 规格 id：默认卖家是 p4000 / p1200 / p500，其他卖家是各自的包 id */
+  size: string;
+  beadsPerPack: number;
+  packs: number;
+  cost: number;
+  rows: SupplementRow[];
+  /** 带“最少包数”限制的规格 */
+  minPacks?: number;
+};
 
 const SIZE_ORDER: PackId[] = ["p4000", "p1200", "p500"];
 
 /** 把方案的补充包按规格分组（4000 → 1200 → 500），组内按色号排序。 */
+function groupFromLines(plan: Pick<PurchasePlan, "items">): SupplementGroup[] {
+  const sizes = new Map<string, PackLine>();
+  for (const item of plan.items) for (const l of item.lines ?? []) if (l.n > 0 && !sizes.has(l.id)) sizes.set(l.id, l);
+  const groups: SupplementGroup[] = [];
+  for (const head of [...sizes.values()].sort((a, b) => b.beads - a.beads)) {
+    const rows: SupplementRow[] = [];
+    for (const item of [...plan.items].sort((a, b) => compareCodes(a.code, b.code))) {
+      const line = item.lines?.find((l) => l.id === head.id);
+      if (!line || line.n <= 0) continue;
+      const first = item.lines!.find((l) => l.n > 0)!.id === head.id;
+      rows.push({
+        code: item.code, packs: line.n, beads: line.n * line.beads, need: item.remaining, bought: item.singlesBeads,
+        surplus: item.singlesBeads - item.remaining, cost: line.n * line.price, continued: !first
+      });
+    }
+    groups.push({ size: head.id, beadsPerPack: head.beads, packs: rows.reduce((s, r) => s + r.packs, 0), cost: rows.reduce((s, r) => s + r.cost, 0), rows, ...(head.minPacks ? { minPacks: head.minPacks } : {}) });
+  }
+  return groups;
+}
+
 export function groupSupplements(plan: Pick<PurchasePlan, "items">, price1200 = DEFAULT_PRICE_1200): SupplementGroup[] {
+  // 方案条目带 lines（任意规格）就按 lines 分组；只有 packs 的老数据走下面的三规格路径
+  if (plan.items.some((item) => item.lines)) return groupFromLines(plan);
   const groups: SupplementGroup[] = [];
   for (const size of SIZE_ORDER) {
     const rows: SupplementRow[] = [];
@@ -490,20 +680,21 @@ export function groupSupplements(plan: Pick<PurchasePlan, "items">, price1200 = 
         surplus: item.singlesBeads - item.remaining, cost: n * packPrice(size, price1200), continued: !first
       });
     }
-    if (rows.length) groups.push({ size, beadsPerPack: PACK_BEADS[size], packs: rows.reduce((s, r) => s + r.packs, 0), cost: rows.reduce((s, r) => s + r.cost, 0), rows });
+    if (rows.length) groups.push({ size, beadsPerPack: PACK_BEADS[size], packs: rows.reduce((s, r) => s + r.packs, 0), cost: rows.reduce((s, r) => s + r.cost, 0), rows, ...(size === "p500" ? { minPacks: MIN_PACKS_500 } : {}) });
   }
   return groups;
 }
 
 /** 给卖家看的纯文本：按规格分组，例如 “4000颗装：A1×1、H7×2”。 */
-export function formatPurchaseText(plan: Pick<PurchasePlan, "items" | "setOffer">, price1200 = DEFAULT_PRICE_1200): string {
+export function formatPurchaseText(plan: Pick<PurchasePlan, "items" | "setOffer">, price1200 = DEFAULT_PRICE_1200, sellerName?: string): string {
   const lines: string[] = [];
   if (plan.setOffer) lines.push(`套装：${plan.setOffer.name.replace(/（.*?）/g, "")}×1`);
   for (const group of groupSupplements(plan, price1200)) {
-    const head = group.size === "p500" ? `${group.beadsPerPack}颗装（共${group.packs}包）` : `${group.beadsPerPack}颗装`;
+    const head = group.minPacks ? `${group.beadsPerPack}颗装（共${group.packs}包）` : `${group.beadsPerPack}颗装`;
     lines.push(`${head}：${group.rows.map((r) => `${r.code}×${r.packs}`).join("、")}`);
   }
   if (!lines.length) return "无需补充包";
+  if (sellerName?.trim()) lines.unshift(`卖家：${sellerName.trim()}`);
   return lines.join("\n");
 }
 
@@ -514,16 +705,20 @@ export function applyPlanToEdits(plan: PurchasePlan): Record<string, number> {
   return edits;
 }
 
-/** 当前清单（每色数量）按真实报价履行的成本估算（同样遵守 500 颗装满 10 包的规则）。 */
-export function estimateCostForRows(rows: Array<{ code: string; qty: number }>, price1200 = DEFAULT_PRICE_1200): { cost: number; beads: number; packs: PackCounts } {
+/**
+ * 当前清单（每色数量）按真实报价履行的成本估算（同样遵守“最少包数”规则，如 500 颗装满 10 包）。
+ * 不含运费（cost 是商品金额）；seller 不传就用当前选中的卖家，选中默认卖家时 price1200 是 1200 颗装单价。
+ */
+export function estimateCostForRows(rows: Array<{ code: string; qty: number }>, price1200 = DEFAULT_PRICE_1200, seller?: Seller): { cost: number; beads: number; packs: PackCounts; lines: PackLine[] } {
+  const sel = withPrice1200(seller ?? activeSeller(), price1200);
   const valid = rows.filter((row) => row.qty > 0);
-  const slots = valid.map((row) => ({ code: row.code, need: row.qty, packs: optimizePacks(row.qty, row.code, price1200).packs }));
-  const fixed = enforce500Min(slots, price1200);
-  let packs: PackCounts = { p4000: 0, p1200: 0, p500: 0 };
-  for (const p of fixed) packs = addPacks(packs, p);
-  return { cost: packCost(packs, price1200), beads: packBeads(packs), packs };
+  const slots = valid.map((row) => ({ code: row.code, need: row.qty, lines: optimizeWithOffers(row.qty, row.code, sel.packs).lines }));
+  const fixed = enforceMinPacks(slots, sel.packs);
+  const merged = new Map<string, PackLine>();
+  for (const ls of fixed) for (const l of ls) merged.set(l.id, { ...l, n: (merged.get(l.id)?.n ?? 0) + l.n });
+  const lines = [...merged.values()].filter((l) => l.n > 0).sort((a, b) => b.beads - a.beads);
+  return { cost: linesCost(lines), beads: linesBeads(lines), packs: countsOfLines(lines), lines };
 }
-
 
 /** 下单快照在多少天内默认用于入库。 */
 export const ORDER_FRESH_DAYS = 60;

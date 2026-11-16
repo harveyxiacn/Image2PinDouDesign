@@ -1,7 +1,8 @@
 // 局域网同步：本机发件箱推送到 Hub，再按游标拉取 Hub 上的新变更；图片按 SHA-256 补传/补下。
 import { useSyncExternalStore } from "react";
-import { ackOutbox, getSnapshot, listBlobIds, mergeRemote, putBlob, readOutbox, saveDevice, setLocalChangeHandler, getBlob, thumbIdOf } from "./db";
-import { ensureThumb, ensureThumbs } from "./images";
+import { ackOutbox, getSnapshot, getSyncMeta, listBlobIds, mergeRemote, putBlob, readOutbox, requeueAll, saveDevice, saveSyncMeta, setLocalChangeHandler, getBlob } from "./db";
+import { ensureThumb, ensureThumbs, sha256Hex } from "./images";
+import { decideCursor, estimateSkew, hashMatches, planChunks } from "./syncPlan";
 import type { CollectionName } from "./model";
 
 export type SyncState = {
@@ -118,6 +119,10 @@ type SyncResponse = {
   cursor: number;
   more: boolean;
   blobsMissing: string[];
+  /** 新版 Hub 才有：Hub 当前时间、数据库标识、最大序号。老 Hub 没有这三项，客户端照旧工作。 */
+  serverTime?: number;
+  epoch?: string;
+  maxSeq?: number;
 };
 
 let running: Promise<void> | null = null;
@@ -125,6 +130,22 @@ let queued = false;
 /** 本次会话里确认 Hub 没有的缩略图：避免每次同步都重复 404。 */
 const thumbMiss = new Set<string>();
 const remoteTried = new Set<string>();
+
+/** 从 Hub 下载一个 blob 并校验 SHA-256（blob id 就是内容哈希）。哈希对不上就重试一次，仍不对则拒绝（返回 bad）。 */
+async function downloadChecked(id: string, fallbackType: string): Promise<{ blob: Blob | null; status: number; bad: boolean }> {
+  const { hubUrl, token } = getSnapshot().device;
+  let status = 0;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await fetch(`${hubUrl}/api/blobs/${id}`, { headers: { "x-pindou-token": token }, signal: AbortSignal.timeout(120000) });
+    status = response.status;
+    if (!response.ok) return { blob: null, status, bad: false };
+    const buffer = await response.arrayBuffer();
+    if (hashMatches(id, await sha256Hex(buffer))) {
+      return { blob: new Blob([buffer], { type: response.headers.get("content-type") || fallbackType }), status, bad: false };
+    }
+  }
+  return { blob: null, status, bad: true };
+}
 
 /** 原图按需下载：本地没有时才向 Hub 要，成功就缓存进 IndexedDB。 */
 export async function fetchBlobFromHub(id: string): Promise<Blob | null> {
@@ -135,11 +156,10 @@ export async function fetchBlobFromHub(id: string): Promise<Blob | null> {
   const { hubUrl, token } = getSnapshot().device;
   if (!hubUrl || !token) return null;
   try {
-    const response = await fetch(`${hubUrl}/api/blobs/${id}`, { headers: { "x-pindou-token": token }, signal: AbortSignal.timeout(120000) });
-    if (!response.ok) { if (response.status === 404) remoteTried.add(id); return null; }
-    const blob = new Blob([await response.arrayBuffer()], { type: response.headers.get("content-type") || "application/octet-stream" });
-    await putBlob(id, blob);
-    return blob;
+    const got = await downloadChecked(id, "application/octet-stream");
+    if (!got.blob) { if (got.status === 404 || got.bad) remoteTried.add(id); return null; }
+    await putBlob(id, got.blob);
+    return got.blob;
   } catch {
     return null;
   }
@@ -160,25 +180,64 @@ async function doSync(): Promise<void> {
   if (typeof navigator !== "undefined" && navigator.onLine === false) { setState({ phase: "offline", message: "设备离线，恢复网络后自动同步" }); return; }
   setState({ phase: "syncing", message: "同步中…" });
   try {
-    const outbox = await readOutbox();
+    let outbox = await readOutbox();
     const localBlobs = await listBlobIds();
     let cursor = device.cursor;
-    let pushed = false;
     let received = 0;
     let missing: string[] = [];
     let upBytes = 0, downBytes = 0, upBlobs = 0, downBlobs = 0;
-    // 第一轮带上全部发件箱；如果 Hub 一次返回不完（more），继续空推拉取。
-    for (let round = 0; round < 50; round++) {
-      const changes = pushed ? [] : outbox;
-      const body: SyncResponse = await api("/api/sync", {
-        method: "POST",
-        body: JSON.stringify({ deviceId: device.deviceId, deviceName: device.deviceName, since: cursor, changes, blobsHave: pushed ? [] : localBlobs })
-      }, 60000);
-      if (!pushed) { await ackOutbox(outbox); missing = body.blobsMissing; pushed = true; }
+    let total = outbox.length;
+    let sentCount = 0;
+    let queue = planChunks(outbox);
+    let blobsReported = false;
+    let resets = 0;
+    // 发件箱按批发送（每批 ≤ 约 2 MB），每批成功后立刻确认；中途失败时已确认的不会重发，下次从断点继续。
+    // 发完后继续空推拉取，直到 Hub 说没有更多。
+    for (let round = 0; round < 2000; round++) {
+      const chunk = queue.shift() ?? [];
+      const sentAt = Date.now();
+      let body: SyncResponse;
+      try {
+        body = await api("/api/sync", {
+          method: "POST",
+          body: JSON.stringify({ deviceId: device.deviceId, deviceName: device.deviceName, since: cursor, changes: chunk, blobsHave: blobsReported ? [] : localBlobs })
+        }, 60000);
+      } catch (error) {
+        if (sentCount > 0 && state.phase !== "unpaired") {
+          throw new Error(`${error instanceof Error ? error.message : "同步失败"}（已送达 ${sentCount}/${total} 条，下次从断点继续）`);
+        }
+        throw error;
+      }
+      const skew = estimateSkew(sentAt, Date.now(), body.serverTime);
+      if (skew !== null) await saveSyncMeta({ skew });
+      // Hub 数据库被恢复成旧备份或被换掉：游标已经没有意义。重置游标并把本机全部记录重新放进发件箱，
+      // 之后按“后写者胜”双向合并，两边都不会丢数据。
+      const meta = getSyncMeta();
+      const decision = decideCursor({ localCursor: cursor, localEpoch: meta.epoch, hubEpoch: body.epoch, hubMaxSeq: body.maxSeq });
+      if (typeof body.epoch === "string" && body.epoch && body.epoch !== meta.epoch) await saveSyncMeta({ epoch: body.epoch });
+      if (decision.action === "reset" && resets === 0) {
+        resets += 1;
+        cursor = 0;
+        await saveDevice({ cursor: 0 });
+        await requeueAll();
+        outbox = await readOutbox();
+        total = outbox.length;
+        sentCount = 0;
+        queue = planChunks(outbox);
+        blobsReported = false;
+        setState({ message: "Hub 数据库已变化，正在重新对账…" });
+        continue;
+      }
+      if (!blobsReported) { missing = body.blobsMissing ?? []; blobsReported = true; }
+      if (chunk.length) {
+        await ackOutbox(chunk);
+        sentCount += chunk.length;
+      }
       received += await mergeRemote(body.changes);
       cursor = body.cursor;
       await saveDevice({ cursor });
-      if (!body.more) break;
+      if (queue.length) setState({ message: `同步中… 已上传 ${sentCount}/${total} 条` });
+      if (!queue.length && !body.more) break;
     }
     // 只补传 Hub 缺的图片 / 缩略图
     for (const id of missing) {
@@ -199,15 +258,13 @@ async function doSync(): Promise<void> {
           continue;
         }
         if (have.has(img.thumbId) || thumbMiss.has(img.thumbId)) continue;
-        const { hubUrl, token } = getSnapshot().device;
-        const response = await fetch(`${hubUrl}/api/blobs/${img.thumbId}`, { headers: { "x-pindou-token": token }, signal: AbortSignal.timeout(120000) });
-        if (response.ok) {
-          const blob = new Blob([await response.arrayBuffer()], { type: response.headers.get("content-type") || "image/webp" });
-          await putBlob(img.thumbId, blob);
-          downBytes += blob.size;
+        const got = await downloadChecked(img.thumbId, "image/webp");
+        if (got.blob) {
+          await putBlob(img.thumbId, got.blob);
+          downBytes += got.blob.size;
           downBlobs += 1;
-        } else if (response.status === 404) {
-          thumbMiss.add(img.thumbId);
+        } else if (got.status === 404 || got.bad) {
+          thumbMiss.add(img.thumbId); // 404 或哈希不符：本次会话不再重复尝试，也不保存可疑内容
         }
       } catch { /* 下次再试 */ }
     }
@@ -216,7 +273,7 @@ async function doSync(): Promise<void> {
     const size = (n: number) => (n === 0 ? "0 KB" : n >= 1024 * 1024 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
     setState({
       phase: "idle", lastSyncAt: now, lastUpBytes: upBytes, lastDownBytes: downBytes, lastUpBlobs: upBlobs, lastDownBlobs: downBlobs,
-      message: `已同步 · 上传 ${outbox.length} 条 / ${size(upBytes)}，收到 ${received} 条 / ${size(downBytes)}`
+      message: `已同步 · 上传 ${sentCount} 条 / ${size(upBytes)}，收到 ${received} 条 / ${size(downBytes)}`
     });
   } catch (error) {
     if (state.phase !== "unpaired") setState({ phase: "error", message: error instanceof Error ? error.message : "同步失败" });

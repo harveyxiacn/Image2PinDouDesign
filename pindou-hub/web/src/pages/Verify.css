@@ -1,0 +1,55 @@
+.vf { padding-bottom: 8px; }
+.vf-bar { margin: -4px 0 12px; }
+.vf-title { justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: nowrap; }
+.vf-name { font-size: var(--t-h3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vf-title .btn { flex: none; min-height: 36px; }
+.vf-views { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+.vf-view { padding: 10px; min-width: 0; }
+.vf-view-h { font-size: var(--t-body); margin-bottom: 8px; color: var(--ink-2); }
+.vf-empty { min-height: 200px; display: grid; place-items: center; text-align: center; }
+.vf-pane-seg { width: 100%; margin-bottom: 10px; }
+.vf-pane-seg button { flex: 1; min-height: 44px; }
+
+.vf-swipe { position: relative; touch-action: pan-y; border-radius: var(--r-panel); transition: transform 160ms var(--ease); }
+.vf-swipe[data-dir] { transition: none; }
+.vf-swipe[data-dir="ok"] .vf-facts { box-shadow: 0 0 0 2px var(--leaf); background: color-mix(in srgb, var(--leaf-wash) calc(var(--vf-p) * 100%), var(--paper-raised)); }
+.vf-swipe[data-dir="flag"] .vf-facts { box-shadow: 0 0 0 2px var(--iron); background: color-mix(in srgb, var(--iron-wash) calc(var(--vf-p) * 100%), var(--paper-raised)); }
+.vf-swipe-tag { position: absolute; top: 10px; z-index: 1; display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 99px; font-weight: 600; pointer-events: none; opacity: 0; }
+.vf-swipe-tag.ok { left: 10px; background: var(--leaf); color: #fff; }
+.vf-swipe-tag.flag { right: 10px; background: var(--iron); color: #fff; }
+.vf-swipe-tag svg { width: 16px; height: 16px; }
+.vf-facts-row { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; }
+.vf-facts-row .num { font-size: var(--t-h4); }
+.vf-reasons { margin: 0; padding-left: 18px; color: var(--amber); font-size: var(--t-body); }
+.vf-counts { display: flex; flex-wrap: wrap; gap: 6px; }
+.vf-count { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 99px; background: var(--paper-lift); color: var(--ink); cursor: pointer; font: inherit; }
+.vf-count[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+@media (pointer: coarse) { .vf-count { min-height: 44px; } }
+.vf-reason .input { width: 100%; min-height: 44px; }
+.vf-hint-touch { display: none; }
+@media (pointer: coarse) { .vf-hint-touch { display: inline; } .vf-hint-kb { display: none; } }
+
+.vf-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 12px; }
+.vf-btn { min-height: 52px; justify-content: center; font-size: var(--t-h4); }
+.vf-btn.ok { background: var(--leaf); border-color: var(--leaf); color: #fff; }
+.vf-btn.flag { border-color: var(--iron); color: var(--iron-ink); }
+.vf-undo { grid-column: 1 / -1; min-height: 44px; justify-self: start; }
+.vf-key { margin-left: 6px; padding: 0 6px; border-radius: 4px; background: var(--rule-soft); font-size: var(--t-small); color: inherit; opacity: 0.8; }
+@media (pointer: coarse) { .vf-key { display: none; } }
+
+.vf-sum { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.vf-sum-cell { display: grid; gap: 2px; padding: 12px; border-radius: var(--r-ctl); background: var(--paper-sunk); }
+.vf-sum-cell b { font-size: var(--t-h1); }
+.vf-sum-cell.ok b { color: var(--leaf); }
+.vf-sum-cell.flag b { color: var(--iron-ink); }
+.vf-flagged { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
+.vf-flag-link { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 12px; border: 1px solid var(--rule); border-radius: var(--r-ctl); color: inherit; text-decoration: none; background: var(--paper-lift); }
+.vf-flag-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 820px) {
+  .vf-views { grid-template-columns: minmax(0, 1fr); }
+  .vf-view { padding: 6px; }
+  .vf-actions { position: sticky; bottom: calc(68px + var(--safe-bottom)); z-index: 5; padding: 8px; margin: 12px -8px 0; background: var(--paper); border-top: 1px solid var(--rule); }
+  .vf-undo { grid-column: 1 / -1; justify-self: stretch; }
+}
+@media (prefers-reduced-motion: reduce) { .vf-swipe { transition: none; } }

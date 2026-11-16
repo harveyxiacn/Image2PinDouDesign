@@ -6,7 +6,7 @@ import { exportRecords, putRecords, saveDevice, useData } from "../lib/db";
 import { hubInfo, localPairInfo, pairWithHub, syncNow, unpair, useSyncState } from "../lib/sync";
 import { PALETTE_KITS, normalizeKitId } from "../lib/palette";
 import type { CollectionName } from "../lib/model";
-import { parseBackup } from "../lib/stockview";
+import { checkBackup } from "../lib/backupCheck";
 import { copyText, downloadText } from "../components/stock/download";
 import { readTheme, saveTheme, type ThemePref } from "../components/stock/theme";
 import "./Settings.css";
@@ -190,12 +190,12 @@ function DataSection() {
   const importJson = async (f: File) => {
     setBusy(true);
     try {
-      const list = parseBackup(await f.text());
-      if (!list) { toast("这不是拼豆仓的备份文件"); return; }
+      const check = checkBackup(await f.text());
+      if (!check.ok) { toast(check.message); return; }
+      const list = check.records;
       const local = new Map(exportRecords().map((r) => [`${r.collection}/${r.id}`, r.updatedAt]));
       const by = new Map<CollectionName, Array<Record<string, unknown>>>();
       for (const r of list) {
-        if (!["patterns", "txns", "images", "prefs"].includes(r.collection)) continue;
         if ((local.get(`${r.collection}/${r.id}`) ?? -1) >= r.updatedAt) continue;
         const rec = { ...(r.data as object), id: r.id, updatedAt: r.updatedAt, deleted: r.deleted || undefined };
         const arr = by.get(r.collection as CollectionName) ?? [];
@@ -203,7 +203,8 @@ function DataSection() {
       }
       let n = 0;
       for (const [collection, records] of by) { await putRecords(collection, records as never); n += records.length; }
-      toast(n ? `已导入 ${n} 条较新的记录` : "备份里没有比本机更新的记录");
+      const head = n ? `已导入 ${n} 条较新的记录` : "备份里没有比本机更新的记录";
+      toast(check.message ? `${head}。${check.message}` : head);
     } catch { toast("导入失败：文件无法解析"); }
     finally { setBusy(false); if (file.current) file.current.value = ""; }
   };

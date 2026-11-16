@@ -12,6 +12,8 @@ export type BuildState = {
   mode: BuildMode;
   done: string;
   updatedAt: number;
+  /** 最近一次“清空重来”的时间（毫秒）。没有就是没清空过。合并时清空之前的进度一律作废，见 mergeBuild。 */
+  resetAt?: number;
 };
 
 export const BOARD_SIZES = [29, 52, 58, 0] as const;
@@ -275,4 +277,134 @@ export function restoreState(saved: BuildState | undefined, boards: Board[], boa
 export function firstOpenBoard(matrix: Matrix, flags: Uint8Array, width: number, boards: Board[]): number {
   const i = boards.findIndex((b) => { const p = boardProgress(matrix, flags, width, b); return p.total > 0 && p.done < p.total; });
   return i < 0 ? 0 : i;
+}
+
+// ---------- 两台设备合并进度 ----------
+// 记录整条按“后写者胜”同步，所以两台设备各拼一部分时，后上传的会盖掉先上传的。
+// 拼装进度只会往前走：合并时取两边已完成格子的并集；唯一的例外是“清空重来”，它用 resetAt 标记，
+// 比较时 resetAt 更大的一方说了算（更早的进度作废）。老版本设备写回记录时会丢掉 resetAt，
+// 那种记录按“拼装时间是否晚于清空时间”判断是不是清空之后的新进度。
+
+type ParsedDone = { width: number | null; cells: Map<string, Set<number>> };
+
+const MAX_RUN = 4_000_000;
+
+function parseDone(text: string | undefined): ParsedDone {
+  const out: ParsedDone = { width: null, cells: new Map() };
+  if (!text) return out;
+  const parts = text.split(";");
+  let start = 0;
+  if (/^w\d+$/.test(parts[0])) { out.width = Math.max(1, Number(parts[0].slice(1))); start = 1; }
+  for (let p = start; p < parts.length; p += 1) {
+    const eq = parts[p].indexOf("=");
+    if (eq <= 0) continue;
+    const code = parts[p].slice(0, eq);
+    let set = out.cells.get(code);
+    if (!set) { set = new Set(); out.cells.set(code, set); }
+    for (const token of parts[p].slice(eq + 1).split(",")) {
+      if (!token) continue;
+      const [a, b] = token.split("-");
+      const lo = parseInt(a, 36);
+      const hi = b === undefined ? lo : parseInt(b, 36);
+      if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi < lo || lo < 0 || hi - lo > MAX_RUN) continue;
+      for (let i = lo; i <= hi; i += 1) set.add(i);
+    }
+  }
+  return out;
+}
+
+function formatDone(width: number | null, cells: Map<string, Set<number>>): string {
+  const body = [...cells.keys()].filter((c) => cells.get(c)!.size > 0).sort(compareCodes)
+    .map((c) => `${c}=${runsOf36([...cells.get(c)!].sort((x, y) => x - y))}`);
+  return [...(width ? [`w${width}`] : []), ...body].join(";");
+}
+
+/** 把一串 done 文本规范化（排序、合并连续区间），结果与 encodeDone 的格式一致。 */
+export function normalizeDone(text: string | undefined): string {
+  const p = parseDone(text);
+  return formatDone(p.width, p.cells);
+}
+
+/** 两份 done 的并集。图宽不同（图纸被改过）无法按下标合并，返回 null。 */
+export function unionDone(a: string | undefined, b: string | undefined): string | null {
+  const pa = parseDone(a);
+  const pb = parseDone(b);
+  if (pa.width && pb.width && pa.width !== pb.width) return null;
+  const cells = new Map<string, Set<number>>();
+  for (const src of [pa, pb]) {
+    for (const [code, set] of src.cells) {
+      let t = cells.get(code);
+      if (!t) { t = new Set(); cells.set(code, t); }
+      for (const i of set) t.add(i);
+    }
+  }
+  return formatDone(pa.width ?? pb.width, cells);
+}
+
+export function isBuildState(v: unknown): v is BuildState {
+  if (!v || typeof v !== "object") return false;
+  const b = v as Record<string, unknown>;
+  return typeof b.done === "string" && typeof b.updatedAt === "number" && Number.isFinite(b.updatedAt)
+    && typeof b.boardSize === "number" && typeof b.board === "number" && typeof b.colorIndex === "number";
+}
+
+function tieKey(b: BuildState): string {
+  return `${b.boardSize}|${b.board}|${b.colorIndex}|${b.mode}|${b.done}`;
+}
+
+function newerOf(a: BuildState, b: BuildState): BuildState {
+  if (a.updatedAt !== b.updatedAt) return a.updatedAt > b.updatedAt ? a : b;
+  return tieKey(a) >= tieKey(b) ? a : b;
+}
+
+/**
+ * 合并两份拼装进度：已完成格子取并集，清空重来（resetAt）更晚的一方说了算；
+ * 当前板/颜色/模式取更新的一方。满足交换律和幂等：merge(a,b)=merge(b,a)，merge(m,m)=m。
+ */
+export function mergeBuild(a: BuildState | undefined, b: BuildState | undefined): BuildState | undefined {
+  if (!a || !b) return a ?? b;
+  const ra = a.resetAt ?? 0;
+  const rb = b.resetAt ?? 0;
+  const reset = Math.max(ra, rb);
+  const alive = (x: BuildState): boolean => {
+    if (reset === 0) return true;
+    if (x.resetAt === undefined) return x.updatedAt > reset; // 老版本写回的记录：看它是不是清空之后才拼的
+    return x.resetAt === reset;
+  };
+  const sources = [a, b].filter(alive);
+  const pool = sources.length ? sources : [newerOf(a, b)];
+  const newest = pool.reduce(newerOf);
+  let done = newest.done;
+  if (pool.length === 2) {
+    const u = unionDone(pool[0].done, pool[1].done);
+    done = u ?? newest.done;
+  } else {
+    done = normalizeDone(newest.done);
+  }
+  const out: BuildState = {
+    boardSize: newest.boardSize, board: newest.board, colorIndex: newest.colorIndex, mode: newest.mode,
+    done, updatedAt: Math.max(a.updatedAt, b.updatedAt)
+  };
+  if (reset > 0) out.resetAt = reset;
+  return out;
+}
+
+/** 两份进度的内容是否相同（比较前先规范化 done）。 */
+export function sameBuild(a: BuildState | undefined, b: BuildState | undefined): boolean {
+  if (!a || !b) return a === b;
+  return a.boardSize === b.boardSize && a.board === b.board && a.colorIndex === b.colorIndex && a.mode === b.mode
+    && (a.resetAt ?? 0) === (b.resetAt ?? 0) && normalizeDone(a.done) === normalizeDone(b.done);
+}
+
+// ---------- 拖动连续标记 ----------
+
+/** 两个格子之间（含两端）经过的格子，供手指划过时不漏格；(x0,y0)→(x1,y1) 按格直线插值。 */
+export function cellsBetween(x0: number, y0: number, x1: number, y1: number): Array<[number, number]> {
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0));
+  const out: Array<[number, number]> = [];
+  for (let i = 0; i <= n; i += 1) {
+    const t = n === 0 ? 0 : i / n;
+    out.push([Math.round(x0 + (x1 - x0) * t), Math.round(y0 + (y1 - y0) * t)]);
+  }
+  return out;
 }

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   boardCells, boardColors, boardProgress, decodeDone, describeRow, encodeDone, firstOpenBoard, formatRuns, migrateFlags,
-  moveColor, newFlags, nextStep, overallProgress, rowColumns, rowsWithColor, setCells, splitBoards
+  moveColor, newFlags, nextStep, overallProgress, rowColumns, rowsWithColor, setCells, splitBoards,
+  cellsBetween, mergeBuild, normalizeDone, sameBuild, unionDone, type BuildState
 } from "../lib/build";
 import type { Matrix } from "../lib/matrix";
 
@@ -134,5 +135,73 @@ describe("row runs", () => {
     const xs = rowColumns(m, b, "H7", 1);
     expect(xs).toEqual([0, 1, 2, 4, 5]);
     expect(describeRow(1, xs)).toBe("第 2 行：1–3、5–6");
+  });
+});
+
+const bs = (done: string, updatedAt: number, extra: Partial<BuildState> = {}): BuildState => ({ boardSize: 29, board: 0, colorIndex: 0, mode: "color", done, updatedAt, ...extra });
+
+describe("mergeBuild", () => {
+  it("unions cells of two devices per colour", () => {
+    const a = bs("w10;A1=0-3,9", 100);
+    const b = bs("w10;A1=2-5;B2=a", 200, { board: 1 });
+    const m = mergeBuild(a, b)!;
+    expect(m.done).toBe("w10;A1=0-5,9;B2=a");
+    expect(m.board).toBe(1); // 位置取更新的一方
+    expect(m.updatedAt).toBe(200);
+    expect(m.resetAt).toBeUndefined();
+  });
+  it("is commutative, idempotent and keeps progress monotone", () => {
+    const cases: Array<[BuildState, BuildState]> = [
+      [bs("w10;A1=0-3", 5), bs("w10;A1=2-9;C3=1", 5, { mode: "row" })],
+      [bs("w10;A1=0-3", 5, { resetAt: 4 }), bs("w10;A1=2-9", 6)],
+      [bs("w10;A1=0-3", 5, { resetAt: 9 }), bs("w10;A1=2-9", 6, { resetAt: 4 })],
+      [bs("w10;A1=0-3", 5), bs("w12;A1=2-9", 6)],
+      [bs("w10;B1=3,2,1", 7), bs("w10;B1=1-3", 7)]
+    ];
+    for (const [a, b] of cases) {
+      const ab = mergeBuild(a, b)!;
+      expect(ab).toEqual(mergeBuild(b, a));
+      expect(mergeBuild(ab, ab)).toEqual(ab);
+      expect(mergeBuild(ab, a)).toEqual(ab);
+      expect(mergeBuild(ab, b)).toEqual(ab);
+    }
+  });
+  it("an explicit reset wins over older progress, newer progress after it survives", () => {
+    const reset = bs("w10", 300, { resetAt: 300 });
+    const stale = bs("w10;A1=0-5", 250); // 老设备在清空前拼的（老版本写回，无 resetAt）
+    expect(mergeBuild(reset, stale)!.done).toBe("w10");
+    const stale2 = bs("w10;A1=0-5", 250, { resetAt: 0 });
+    expect(mergeBuild({ ...stale2, resetAt: undefined }, reset)!.done).toBe("w10");
+    const after = bs("w10;A1=7", 400, { resetAt: 300 });
+    expect(mergeBuild(reset, after)!.done).toBe("w10;A1=7");
+    expect(mergeBuild(reset, after)!.resetAt).toBe(300);
+    const legacyAfter = bs("w10;A1=7", 400); // 老版本在清空之后继续拼
+    expect(mergeBuild(reset, legacyAfter)!.done).toBe("w10;A1=7");
+    expect(mergeBuild(bs("w10;A1=0-5", 250, { resetAt: 100 }), reset)!.done).toBe("w10");
+  });
+  it("different chart widths fall back to the newer side", () => {
+    expect(mergeBuild(bs("w10;A1=0-3", 5), bs("w12;A1=2", 6))!.done).toBe("w12;A1=2");
+  });
+  it("handles missing sides and junk", () => {
+    const a = bs("w10;A1=0", 1);
+    expect(mergeBuild(a, undefined)).toBe(a);
+    expect(mergeBuild(undefined, a)).toBe(a);
+    expect(unionDone("w10;A1=zz-0,!;=5", "w10;A1=1")).toBe("w10;A1=1");
+    expect(normalizeDone("w4;A1=3,1,2,0")).toBe("w4;A1=0-3");
+  });
+  it("sameBuild ignores encoding order", () => {
+    expect(sameBuild(bs("w4;A1=0-3", 1), bs("w4;A1=3,2,1,0", 9))).toBe(true);
+    expect(sameBuild(bs("w4;A1=0-3", 1), bs("w4;A1=0-2", 1))).toBe(false);
+  });
+});
+
+describe("cellsBetween", () => {
+  it("covers every step of a fast swipe", () => {
+    expect(cellsBetween(0, 0, 3, 0)).toEqual([[0, 0], [1, 0], [2, 0], [3, 0]]);
+    expect(cellsBetween(2, 2, 2, 2)).toEqual([[2, 2]]);
+    const d = cellsBetween(0, 0, 4, 2);
+    expect(d[0]).toEqual([0, 0]);
+    expect(d[d.length - 1]).toEqual([4, 2]);
+    expect(d).toHaveLength(5);
   });
 });

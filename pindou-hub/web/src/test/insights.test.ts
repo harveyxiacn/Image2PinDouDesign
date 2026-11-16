@@ -110,6 +110,25 @@ describe("monthlyActivity", () => {
     expect(a.hasPrice).toBe(true);
     expect(a.totalSpent).toBe(50);
   });
+  it("uses real completion dates when patterns carry works, estimates the rest", () => {
+    const now = new Date(2026, 5, 15).getTime();
+    const may = new Date(2026, 4, 10).getTime();
+    const apr = new Date(2026, 3, 10).getTime();
+    const jun = new Date(2026, 5, 2).getTime();
+    const patterns = [
+      pat("rec", { A1: 10 }, { status: "done", works: [{ id: "w1", at: jun }, { id: "w2", at: apr }] }),
+      pat("old", { A1: 10 }, { status: "done" })
+    ];
+    const txns = [txn("A1", -10, may, { patternId: "rec" }), txn("A1", -10, may, { patternId: "old" })];
+    const a = monthlyActivity(txns, { months: 3, now, patterns });
+    expect(a.months.map((m) => [m.key, m.completed])).toEqual([["2026-04", 1], ["2026-05", 1], ["2026-06", 1]]);
+    expect(a.months[1].consumed).toBe(20);
+    expect(a.estimatedCompleted).toBe(1);
+    // without patterns the old estimate applies and counts both as estimated
+    const old = monthlyActivity(txns, { months: 3, now });
+    expect(old.months[1].completed).toBe(2);
+    expect(old.estimatedCompleted).toBe(2);
+  });
   it("reports empty", () => {
     const a = monthlyActivity([], { months: 3, now: Date.now() });
     expect(a.hasTxns).toBe(false);

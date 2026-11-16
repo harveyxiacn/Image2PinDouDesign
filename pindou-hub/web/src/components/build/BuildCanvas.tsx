@@ -1,7 +1,7 @@
-// 拼装模式的棋盘：只画当前这块板（最多 58×58 格），支持双指缩放、拖动、点按切换某格完成。
+// 拼装模式的棋盘：只画当前这块板（最多 58×58 格），支持双指缩放、点按切换某格完成、单指划过多个格子连续标记（拖动也可切换成平移）。
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import type { Board } from "../../lib/build";
-import { cellAt } from "../../lib/build";
+import { cellAt, cellsBetween } from "../../lib/build";
 import { labelFontPx, labelsFit, labelTextColor } from "../../lib/matrixLabels";
 import type { Matrix } from "../../lib/matrix";
 import { colorOf } from "../../lib/palette";
@@ -10,6 +10,11 @@ const RULER = 20;
 const MAX_SCALE = 8;
 type View = { scale: number; tx: number; ty: number };
 type Size = { w: number; h: number };
+
+/** 一笔划过的格子（整图坐标的下标）；end = 正常收笔，cancel = 刚落笔就来了第二根手指，整笔作废。 */
+export type StrokeEvent = { type: "cell"; index: number } | { type: "end" } | { type: "cancel" };
+/** 第二根手指在一笔开始后多久内落下仍算“误触”，整笔撤回（毫秒） */
+const CANCEL_WINDOW_MS = 300;
 
 export type BuildCanvasApi = { zoom: (by: "in" | "out" | "fit") => void };
 
@@ -25,6 +30,9 @@ type Props = {
   rowY: number | null;
   label: string;
   onToggle: (index: number) => void;
+  /** 单指拖动的含义：mark = 连续标记；pan = 平移。双指始终是缩放 / 平移。 */
+  dragMode?: "mark" | "pan";
+  onStroke?: (e: StrokeEvent) => void;
 };
 
 function geometry(size: Size, board: Board, view: View) {
@@ -62,7 +70,7 @@ function css(name: string, fallback: string): string {
   return v || fallback;
 }
 
-export default function BuildCanvas({ apiRef, matrix, width, board, code, flags, version, rowY, label, onToggle }: Props) {
+export default function BuildCanvas({ apiRef, matrix, width, board, code, flags, version, rowY, label, onToggle, dragMode = "mark", onStroke }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState<Size>({ w: 0, h: 0 });
@@ -74,7 +82,7 @@ export default function BuildCanvas({ apiRef, matrix, width, board, code, flags,
   const boardRef = useRef(board);
   boardRef.current = board;
   const pointers = useRef(new Map<number, { x: number; y: number }>());
-  const gesture = useRef<{ moved: boolean; t: number; startView: View; dist: number; sx: number; sy: number } | null>(null);
+  const gesture = useRef<{ moved: boolean; t: number; startView: View; dist: number; sx: number; sy: number; stroke: { t0: number; x: number; y: number } | null; panning: boolean } | null>(null);
 
   // 换板时回到整块板
   useEffect(() => { setView({ scale: 1, tx: 0, ty: 0 }); }, [board.index, board.x0, board.y0, board.w, board.h]);
@@ -244,15 +252,20 @@ export default function BuildCanvas({ apiRef, matrix, width, board, code, flags,
     ctx.beginPath(); ctx.moveTo(0, RULER + 0.5); ctx.lineTo(size.w, RULER + 0.5); ctx.moveTo(RULER + 0.5, 0); ctx.lineTo(RULER + 0.5, size.h); ctx.stroke();
   }, [matrix, width, board, code, flags, version, rowY, size, view]);
 
-  const hit = useCallback((px: number, py: number) => {
+  /** 屏幕点所在的格子（整图坐标）；在标尺或棋盘外返回 null。 */
+  const cellAtPoint = useCallback((px: number, py: number): { x: number; y: number } | null => {
     const g = geometry(sizeRef.current, boardRef.current, viewRef.current);
-    if (px < RULER || py < RULER) return;
+    if (px < RULER || py < RULER) return null;
     const b = boardRef.current;
     const x = Math.floor((px - g.ox) / g.cell) + b.x0;
     const y = Math.floor((py - g.oy) / g.cell) + b.y0;
-    if (x < b.x0 || y < b.y0 || x >= b.x0 + b.w || y >= b.y0 + b.h) return;
-    onToggle(y * width + x);
-  }, [onToggle, width]);
+    if (x < b.x0 || y < b.y0 || x >= b.x0 + b.w || y >= b.y0 + b.h) return null;
+    return { x, y };
+  }, []);
+  const hit = useCallback((px: number, py: number) => {
+    const c = cellAtPoint(px, py);
+    if (c) onToggle(c.y * width + c.x);
+  }, [onToggle, width, cellAtPoint]);
 
   const local = (e: React.PointerEvent) => {
     const r = wrapRef.current!.getBoundingClientRect();
@@ -264,7 +277,13 @@ export default function BuildCanvas({ apiRef, matrix, width, board, code, flags,
     const p = local(e);
     pointers.current.set(e.pointerId, p);
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 合成事件没有捕获 */ }
-    gesture.current = { moved: pointers.current.size > 1, t: performance.now(), startView: viewRef.current, dist: dist(), sx: p.x, sy: p.y };
+    const prevG = gesture.current;
+    if (pointers.current.size > 1 && prevG?.stroke) {
+      // 第二根手指落下：刚开始的一笔当作误触整笔撤回，已经划了一会儿的则保留，然后交给缩放 / 平移
+      onStroke?.({ type: performance.now() - prevG.stroke.t0 < CANCEL_WINDOW_MS ? "cancel" : "end" });
+      prevG.stroke = null;
+    }
+    gesture.current = { moved: pointers.current.size > 1, t: prevG && pointers.current.size > 1 ? prevG.t : performance.now(), startView: viewRef.current, dist: dist(), sx: prevG && pointers.current.size > 1 ? prevG.sx : p.x, sy: prevG && pointers.current.size > 1 ? prevG.sy : p.y, stroke: null, panning: pointers.current.size > 1 };
   };
   const onPointerMove = (e: React.PointerEvent) => {
     const prev = pointers.current.get(e.pointerId);
@@ -285,6 +304,24 @@ export default function BuildCanvas({ apiRef, matrix, width, board, code, flags,
       g.dist = d;
       return;
     }
+    if (dragMode === "mark" && onStroke && !g.panning) {
+      const c = cellAtPoint(p.x, p.y);
+      if (!g.stroke) {
+        const start = cellAtPoint(g.sx, g.sy);
+        if (!start) g.panning = true; // 从标尺 / 棋盘外开始拖：当作平移
+        else if (c && (c.x !== start.x || c.y !== start.y)) {
+          g.stroke = { t0: performance.now(), x: start.x, y: start.y };
+          g.moved = true;
+        } else return;
+      }
+      if (g.stroke) {
+        if (c) {
+          for (const [x, y] of cellsBetween(g.stroke.x, g.stroke.y, c.x, c.y)) onStroke({ type: "cell", index: y * width + x });
+          g.stroke.x = c.x; g.stroke.y = c.y;
+        }
+        return;
+      }
+    }
     if (!g.moved && Math.hypot(p.x - g.sx, p.y - g.sy) < 8) return;
     g.moved = true;
     const v = viewRef.current;
@@ -295,7 +332,8 @@ export default function BuildCanvas({ apiRef, matrix, width, board, code, flags,
     const had = pointers.current.delete(e.pointerId);
     if (!had || !g) return;
     if (pointers.current.size === 0) {
-      if (e.type === "pointerup" && !g.moved && performance.now() - g.t < 600) hit(g.sx, g.sy);
+      if (g.stroke) { onStroke?.({ type: e.type === "pointerup" ? "end" : "cancel" }); g.stroke = null; }
+      else if (e.type === "pointerup" && !g.moved && performance.now() - g.t < 600) hit(g.sx, g.sy);
       gesture.current = null;
     } else {
       g.moved = true;

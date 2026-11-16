@@ -83,3 +83,7 @@
   .bd-prev, .bd-done { min-height: 52px; }
   .bc-wrap { cursor: crosshair; }
 }
+.bd-tools .btn { min-height: 44px; }
+.bd-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bd-reset { border-top: 1px solid var(--rule-soft); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.bd-reset .btn { min-height: 44px; }

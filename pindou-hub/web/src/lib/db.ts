@@ -12,6 +12,9 @@ import {
   type Txn,
   uid
 } from "./model";
+import { isBuildState, mergeBuild, sameBuild, type BuildState } from "./build";
+import { bumpStamp } from "./syncPlan";
+import { mergePrefsOrders, readOrders } from "./orders";
 
 const DB_NAME = "pindou-hub";
 const DB_VERSION = 1;
@@ -28,6 +31,22 @@ export type Snapshot = {
 };
 
 type OutboxEntry = { key: string; collection: CollectionName; id: string; updatedAt: number };
+
+/** 同步相关的本机元数据（不进 DeviceSettings，避免动数据模型）：Hub 数据库标识、与 Hub 的时钟偏差。 */
+export type SyncMeta = { epoch: string; skew: number };
+let syncMeta: SyncMeta = { epoch: "", skew: 0 };
+export function getSyncMeta(): SyncMeta {
+  return syncMeta;
+}
+export async function saveSyncMeta(patch: Partial<SyncMeta>): Promise<void> {
+  const next = { ...syncMeta, ...patch };
+  if (next.epoch === syncMeta.epoch && next.skew === syncMeta.skew) return;
+  syncMeta = next;
+  const db = await openDb();
+  const tx = db.transaction("meta", "readwrite");
+  tx.objectStore("meta").put(next, "sync");
+  await done(tx);
+}
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -151,6 +170,8 @@ export async function initDb(): Promise<void> {
   const results = await Promise.all(COLLECTIONS.map((name) => promisify(tx.objectStore(name).getAll())));
   const device = (await promisify(tx.objectStore("meta").get("device"))) as DeviceSettings | undefined;
   const outbox = await promisify(tx.objectStore("outbox").count());
+  const storedSync = (await promisify(tx.objectStore("meta").get("sync"))) as Partial<SyncMeta> | undefined;
+  if (storedSync) syncMeta = { epoch: typeof storedSync.epoch === "string" ? storedSync.epoch : "", skew: Number.isFinite(storedSync.skew) ? Number(storedSync.skew) : 0 };
   COLLECTIONS.forEach((name, index) => {
     const map = raw[name] as Map<string, unknown>;
     map.clear();
@@ -177,7 +198,13 @@ export async function putRecords<C extends CollectionName>(collection: C, record
   if (!records.length) return;
   const db = await openDb();
   const tx = db.transaction([collection, "outbox"], "readwrite");
-  for (const record of records) {
+  const now = Date.now();
+  for (const incoming of records) {
+    // 统一在这里盖时间戳：不小于旧版本 + 1，并按与 Hub 的时钟偏差校正（见 syncPlan.bumpStamp）。
+    // 内容与时间都没变的重复写入保持原样。
+    const existing = (raw[collection] as Map<string, RecordOf<C>>).get(incoming.id);
+    const unchanged = existing && existing.updatedAt === incoming.updatedAt && JSON.stringify(existing) === JSON.stringify(incoming);
+    const record = unchanged ? incoming : ({ ...incoming, updatedAt: bumpStamp(incoming.updatedAt, existing?.updatedAt, syncMeta.skew, now) } as RecordOf<C>);
     tx.objectStore(collection).put(record);
     const entry: OutboxEntry = { key: `${collection}/${record.id}`, collection, id: record.id, updatedAt: record.updatedAt };
     tx.objectStore("outbox").put(entry);
@@ -195,7 +222,8 @@ export async function softDelete(collection: CollectionName, ids: string[]): Pro
   const records = ids
     .map((id) => (raw[collection] as Map<string, { id: string; updatedAt: number }>).get(id))
     .filter((r): r is NonNullable<typeof r> => Boolean(r))
-    .map((r) => ({ ...r, deleted: true, updatedAt: Math.max(now, r.updatedAt + 1) }));
+    // 时间戳由 putRecords 统一校正并保证大于旧版本
+    .map((r) => ({ ...r, deleted: true, updatedAt: now }));
   await putRecords(collection, records as never);
 }
 
@@ -206,10 +234,29 @@ export async function mergeRemote(changes: Array<{ collection: CollectionName; i
   const touched = new Set<CollectionName>();
   const tx = db.transaction([...COLLECTIONS], "readwrite");
   let applied = 0;
+  const pendingBuild = new Map<string, BuildState>();
+  const pendingOrders = new Map<string, { local: unknown[]; remote: unknown[] }>();
   for (const change of changes) {
     if (!COLLECTIONS.includes(change.collection)) continue;
     const map = raw[change.collection] as Map<string, { updatedAt: number }>;
     const local = map.get(change.id);
+    // 拼装进度合并钩子：本地和远端都有 pattern.build 时先记下两边的并集（只增不减，清空重来除外），
+    // 其余字段仍按后写者胜；循环结束后，若胜出一方的进度比并集少，就当作一次本地修改重新写入，让对方也收到。
+    if (change.collection === "patterns" && !change.deleted) {
+      const lb = (local as Pattern | undefined)?.build;
+      const rb = (change.data as { build?: unknown } | null)?.build;
+      if (local && !(local as Pattern).deleted && isBuildState(lb) && isBuildState(rb)) {
+        pendingBuild.set(change.id, mergeBuild(pendingBuild.get(change.id) ?? lb, rb) as BuildState);
+      }
+    }
+    // 在途订单合并钩子：偏好整条记录仍按后写者胜，但 prefs.orders 按“每张订单后写者胜 + 收货记录取并集”合并，
+    // 避免两台设备各自记了订单 / 到货时，一边的被另一边整条覆盖。
+    if (change.collection === "prefs" && !change.deleted && local && !(local as { deleted?: boolean }).deleted) {
+      const lo = (local as { orders?: unknown }).orders;
+      const ro = (change.data as { orders?: unknown } | null)?.orders;
+      if (Array.isArray(lo) && lo.length && Array.isArray(ro)) pendingOrders.set(change.id, { local: lo, remote: ro });
+      else if (Array.isArray(lo) && lo.length && local.updatedAt < change.updatedAt) pendingOrders.set(change.id, { local: lo, remote: [] });
+    }
     if (local && local.updatedAt >= change.updatedAt) continue;
     const record = { ...(change.data as object), id: change.id, updatedAt: change.updatedAt, deleted: change.deleted || undefined };
     tx.objectStore(change.collection).put(record);
@@ -219,6 +266,23 @@ export async function mergeRemote(changes: Array<{ collection: CollectionName; i
   }
   await done(tx);
   publish([...touched]);
+  const rewrite: Pattern[] = [];
+  for (const [id, pending] of pendingBuild) {
+    const cur = (raw.patterns as Map<string, Pattern>).get(id);
+    if (!cur || cur.deleted) continue;
+    const m = mergeBuild(isBuildState(cur.build) ? cur.build : undefined, pending);
+    if (m && !sameBuild(m, cur.build)) rewrite.push({ ...cur, build: m });
+  }
+  if (rewrite.length) await putRecords("patterns", rewrite);
+  const prefsRewrite: Array<{ id: string; updatedAt: number }> = [];
+  for (const [id, pending] of pendingOrders) {
+    const cur = (raw.prefs as unknown as Map<string, { id: string; updatedAt: number; deleted?: boolean; orders?: unknown }>).get(id);
+    if (!cur || cur.deleted) continue;
+    const merged = mergePrefsOrders({ orders: pending.local }, { orders: pending.remote }, Date.now());
+    const mergedAll = mergePrefsOrders({ orders: merged }, { orders: cur.orders }, Date.now());
+    if (JSON.stringify(mergedAll) !== JSON.stringify(readOrders({ orders: cur.orders }))) prefsRewrite.push({ ...cur, orders: mergedAll } as { id: string; updatedAt: number });
+  }
+  if (prefsRewrite.length) await putRecords("prefs", prefsRewrite as never);
   return applied;
 }
 
@@ -232,6 +296,25 @@ export async function readOutbox(): Promise<Array<{ collection: CollectionName; 
     const { deleted, ...data } = record;
     return [{ collection: entry.collection, id: entry.id, data, updatedAt: record.updatedAt, deleted: Boolean(deleted) }];
   });
+}
+
+/** Hub 数据库被恢复/替换后：把本机所有记录（含墓碑）重新放进发件箱。只是重新上传，Hub 仍按“后写者胜”决定取舍，不删除任何记录。 */
+export async function requeueAll(): Promise<number> {
+  const db = await openDb();
+  const tx = db.transaction("outbox", "readwrite");
+  const store = tx.objectStore("outbox");
+  let n = 0;
+  for (const collection of COLLECTIONS) {
+    for (const record of (raw[collection] as Map<string, { id: string; updatedAt: number }>).values()) {
+      const entry: OutboxEntry = { key: `${collection}/${record.id}`, collection, id: record.id, updatedAt: record.updatedAt };
+      store.put(entry);
+      n += 1;
+    }
+  }
+  const count = promisify(store.count());
+  await done(tx);
+  emit({ outbox: await count });
+  return n;
 }
 
 /** 同步成功后清掉已送达的发件箱项（期间又被修改过的保留到下一轮）。 */

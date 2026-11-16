@@ -1,0 +1,27 @@
+/* 在途订单 */
+.ord-section { margin: 16px 0; }
+.ord-top { gap: 10px; flex-wrap: wrap; align-items: center; }
+.ord-h { margin: 0; font-size: var(--t-h3, 1.05rem); }
+.ord-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.ord-card { border: 1px solid var(--rule-soft); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 6px; background: var(--paper); min-width: 0; }
+.ord-closed .ord-card { opacity: 0.8; }
+.ord-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ord-title { overflow-wrap: anywhere; }
+.ord-sum, .ord-note { margin: 0; overflow-wrap: anywhere; }
+.ord-left { color: var(--iron-ink); font-weight: 600; }
+.ord-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ord-chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px 0 4px; border-radius: 999px; background: var(--paper-sunk); font-size: var(--t-small); font-variant-numeric: tabular-nums; }
+.ord-actions { flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.ord-actions .btn { min-height: 36px; }
+.ord-empty { margin: 8px 0 0; }
+.ord-toggle { margin-top: 8px; }
+.ord-edit-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 8px; align-items: center; }
+.ord-edit-row .input { width: 100%; text-align: right; }
+@media (pointer: coarse) { .ord-actions .btn, .ord-toggle { min-height: 44px; } }
+
+/* 采购清单里的“已在路上”提示 */
+.ord-transit { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.ord-transit label { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; cursor: pointer; }
+.ord-transit input { width: 18px; height: 18px; accent-color: var(--iron); flex: none; }
+@media (pointer: coarse) { .ord-transit label { min-height: 44px; } .ord-transit input { width: 22px; height: 22px; } }
+.shop-transit-tag { display: inline-block; margin-top: 2px; font-size: var(--t-small); color: var(--ink-2); }

@@ -668,14 +668,14 @@ try {
     return "hint shown and expands tips";
   });
 
-  for (const [hash, name] of [["#/", "08-dashboard"], ["#/gallery", "09-gallery"], ["#/gallery?tab=images", "10-images"], ["#/shopping", "11-shopping"], ["#/purchase", "11b-purchase"], ["#/insights", "11c-insights"], ["#/history", "12-history"], ["#/settings", "13-settings"]]) {
+  for (const [hash, name] of [["#/", "08-dashboard"], ["#/gallery", "09-gallery"], ["#/gallery?tab=images", "10-images"], ["#/shopping", "11-shopping"], ["#/purchase", "11b-purchase"], ["#/insights", "11c-insights"], ["#/works", "11d-works"], ["#/history", "12-history"], ["#/settings", "13-settings"]]) {
     await step(`page ${hash}`, async () => { await go(hash); await shot(name); await noHorizontalScroll(hash); return (await evaluate("document.querySelector('main').innerText")).slice(0, 300); });
   }
 
 
   // ---- 第 8 阶段证据：无障碍与交互 ----
   const auditAll = [];
-  for (const hash of ["#/", "#/gallery", "#/inventory", "#/shopping", "#/purchase", "#/insights", "#/history", "#/settings", "#/add?mode=recognize", "#/add?mode=generate", "#/add?mode=manual", "#/add?mode=batch"]) {
+  for (const hash of ["#/", "#/gallery", "#/inventory", "#/shopping", "#/purchase", "#/insights", "#/works", "#/history", "#/settings", "#/add?mode=recognize", "#/add?mode=generate", "#/add?mode=manual", "#/add?mode=batch"]) {
     await go(hash);
     const issues = await evaluate(AUDIT);
     auditAll.push(...issues.map((i) => `${hash}: ${i}`));
@@ -808,9 +808,140 @@ try {
     if (!/1\.05/.test(derived)) throw new Error("derived price text: " + derived);
     return derived.replace(/\s+/g, " ");
   });
+  await step("reopen a finished pattern: shortage list, deduct, ask, refund puts beads back", async () => {
+    if (!recognizedHash) throw new Error("no saved pattern");
+    await go(recognizedHash);
+    await clickText("标记完成");
+    await waitFor(`document.querySelector('.sheet')`, 5000, "mark-done sheet");
+    const shortList = await evaluate(`document.querySelector('[data-short-list]')?.innerText ?? ''`);
+    await shot("45-mark-done-short");
+    await clickText("扣除库存并完成", ".sheet button");
+    await waitFor(`!document.querySelector('.sheet')`, 5000, "sheet closed");
+    await sleep(800);
+    await clickText("计划拼");
+    await waitFor(`document.querySelector('[data-reopen-ask]')`, 5000, "reopen question");
+    const ask = await evaluate(`document.querySelector('[data-reopen-ask]').innerText`);
+    await shot("46-reopen-ask");
+    await evaluate(`document.querySelector('[data-reopen-refund]').click()`);
+    await waitFor(`!document.querySelector('[data-reopen-ask]')`, 5000, "reopen sheet closed");
+    await sleep(800);
+    const toastText = await evaluate(`[...document.querySelectorAll('.toast, [role=status]')].map((t) => t.innerText).join(' | ')`);
+    if (!/放回了库存/.test(toastText)) throw new Error("no refund toast: " + toastText.slice(0, 200));
+    const planned = await evaluate(`[...document.querySelectorAll('button[aria-pressed="true"]')].some((b) => b.innerText.trim() === '计划拼')`);
+    if (!planned) throw new Error("status is not 计划拼 after reopening");
+    await go("#/history");
+    const hist = await evaluate(`document.querySelector('main').innerText`);
+    if (!/退回/.test(hist)) throw new Error("history does not show the refund");
+    return `short: ${shortList.replace(/\s+/g, " ").slice(0, 80) || "(none)"} · ask: ${ask.replace(/\s+/g, " ").slice(0, 90)}`;
+  });
+  // ---- 第 5 波：在途订单 / 卖家 / 作品集 / 分板打印 / 快速核对 / 拼装 Esc ----
+  const esc = async () => { await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }); await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }); await sleep(400); };
+  const patternId = () => (recognizedHash.match(/#\/pattern\/([^?]+)/) ?? [])[1];
+  await step("orders: section on the shopping page, manual order sheet opens", async () => {
+    await go("#/shopping");
+    await waitFor(`document.querySelector('[data-orders-section]')`, 8000, "orders section");
+    await evaluate(`document.querySelector('[data-order-add]').click()`);
+    await waitFor(`document.querySelector('.sheet')`, 5000, "manual order sheet");
+    await shot("47-order-add");
+    await esc();
+    await evaluate(`[...document.querySelectorAll('button')].find((b) => /放弃|不保存|离开/.test(b.innerText))?.click()`);
+    await sleep(300);
+    await noHorizontalScroll("#/shopping with orders");
+    return `count=${await evaluate(`document.querySelector('[data-orders-count]')?.innerText ?? ''`)} transit=${await evaluate(`!!document.querySelector('[data-transit-note]')`)}`;
+  });
+  await step("sellers: manage sheet, add form, comparison block", async () => {
+    await go("#/purchase");
+    await waitFor(`document.querySelector('[data-purchase-seller-manage]')`, 8000, "seller manage button");
+    await evaluate(`document.querySelector('[data-purchase-seller-manage]').click()`);
+    await waitFor(`document.querySelector('[data-seller-sheet]')`, 5000, "seller sheet");
+    await evaluate(`document.querySelector('[data-seller-add]').click()`);
+    await waitFor(`document.querySelector('[data-seller-form]')`, 5000, "seller form");
+    await shot("48-seller-form");
+    await esc(); await esc();
+    await evaluate(`[...document.querySelectorAll('button')].find((b) => /放弃|不保存|离开/.test(b.innerText))?.click()`);
+    await sleep(300);
+    return `sum=${(await evaluate(`document.querySelector('[data-purchase-seller-sum]')?.innerText ?? ''`)).replace(/\s+/g, " ").slice(0, 80)}`;
+  });
+  await step("works: finish with a record, 作品集 shows the piece, detail panel lists it", async () => {
+    if (!recognizedHash) throw new Error("no saved pattern");
+    await go(recognizedHash);
+    await clickText("标记完成");
+    await waitFor(`document.querySelector('.sheet [data-work-form], .sheet')`, 5000, "mark-done sheet");
+    const hasForm = await evaluate(`!!document.querySelector('[data-work-form]')`);
+    await shot("49-mark-done-work");
+    await clickText("只标记完成", ".sheet button");
+    await waitFor(`!document.querySelector('.sheet')`, 5000, "sheet closed");
+    await sleep(800);
+    const entries = await evaluate(`document.querySelectorAll('[data-work-entry]').length`);
+    await go("#/works");
+    await waitFor(`document.querySelector('[data-works-page]')`, 8000, "works page");
+    const cards = await evaluate(`document.querySelectorAll('[data-work-card]').length`);
+    await shot("50-works");
+    if (!hasForm) throw new Error("no work form in the mark-done sheet");
+    if (!cards) throw new Error("作品集 has no card after finishing a pattern");
+    if (!entries) throw new Error("detail page shows no work entry");
+    await go(recognizedHash);
+    await clickText("计划拼");
+    await sleep(600);
+    await evaluate(`document.querySelector('[data-reopen-keep]')?.click()`);
+    await sleep(600);
+    return `entries ${entries} · cards ${cards} · totals ${(await evaluate(`document.querySelector('[data-works-totals]')?.innerText ?? ''`)).replace(/\s+/g, " ").slice(0, 60)}`;
+  });
+  await step("print: overview + board pages, legend, all pages present for printing", async () => {
+    const id = patternId(); if (!id) throw new Error("no saved pattern");
+    await go(recognizedHash);
+    if (!(await evaluate(`!!document.querySelector('[data-print-link]')`))) throw new Error("no print link on the detail page");
+    await go("#/print/" + id);
+    await waitFor(`document.querySelector('[data-print-root] [data-print-page]')`, 10000, "print pages");
+    await evaluate(`window.dispatchEvent(new Event('beforeprint'))`);
+    await sleep(1200);
+    const info = await evaluate(`JSON.stringify({ pages: document.querySelectorAll('[data-print-page]').length, boards: document.querySelectorAll('[data-print-page="board"]').length, overview: document.querySelectorAll('[data-print-page="overview"]').length, legend: document.querySelectorAll('[data-print-legend] [data-legend-code]').length, drawn: [...document.querySelectorAll('[data-print-page="board"]')].filter((p) => p.querySelector('svg, canvas, table')).length, summary: document.querySelector('[data-print-summary]')?.innerText ?? '' })`);
+    await evaluate(`window.dispatchEvent(new Event('afterprint'))`);
+    await shot("51-print");
+    const o = JSON.parse(info);
+    if (o.overview !== 1 || o.boards < 1 || o.legend < 1) throw new Error("print pages incomplete: " + info);
+    if (o.drawn !== o.boards) throw new Error("not every board page is rendered for printing: " + info);
+    if (!(await evaluate(`!!document.querySelector('[data-print-go]')`))) throw new Error("no print button");
+    return info;
+  });
+  await step("verify: queue from gallery, ok then undo, flag, keys ignored while typing, leave", async () => {
+    await go("#/gallery");
+    await waitFor(`document.querySelector('[data-verify-start]')`, 8000, "快速核对 button");
+    const label = await evaluate(`document.querySelector('[data-verify-start]').innerText`);
+    await evaluate(`document.querySelector('[data-verify-start]').click()`);
+    await waitFor(`document.querySelector('[data-verify-page]')`, 8000, "verify page");
+    await sleep(800);
+    const p0 = await evaluate(`document.querySelector('[data-verify-progress]')?.innerText ?? ''`);
+    await shot("52-verify");
+    await evaluate(`document.querySelector('[data-verify-ok]').click()`);
+    await sleep(700);
+    await evaluate(`document.querySelector('[data-verify-undo]')?.click()`);
+    await sleep(700);
+    const p1 = await evaluate(`document.querySelector('[data-verify-progress]')?.innerText ?? ''`);
+    if (p1 !== p0) throw new Error("undo did not return to the same place: " + p0 + " / " + p1);
+    await evaluate(`document.querySelector('[data-verify-skip]').click()`);
+    await sleep(600);
+    const after = await evaluate(`document.querySelector('[data-verify-progress]')?.innerText ?? (document.querySelector('[data-verify-end]') ? 'end' : '')`);
+    await evaluate(`document.querySelector('[data-verify-leave]')?.click()`);
+    await sleep(700);
+    return `${label.replace(/\s+/g, " ")} · ${p0.replace(/\s+/g, " ")} → ${String(after).replace(/\s+/g, " ")} · left to ${await evaluate("location.hash")}`;
+  });
+  await step("build: drag toggle present, Esc saves and returns to the pattern", async () => {
+    const id = patternId(); if (!id) throw new Error("no saved pattern");
+    await go("#/build/" + id);
+    await waitFor(`document.querySelector('[data-build-root]')`, 15000, "build page");
+    await sleep(600);
+    if (!(await evaluate(`!!document.querySelector('[data-build-drag-toggle]')`))) throw new Error("no drag toggle");
+    await evaluate(`document.activeElement?.blur?.()`);
+    await esc();
+    await sleep(900);
+    const hash = await evaluate("location.hash");
+    if (!hash.startsWith("#/pattern/")) throw new Error("Esc did not leave build mode: " + hash);
+    return "Esc → " + hash;
+  });
   checks.push({ check: "token contrast (light)", ok: true, detail: JSON.stringify(await evaluate(CONTRAST)) });
   await setViewport(390, 844, true);
-  for (const [hash, name] of [["#/", "m1-dashboard"], ["#/inventory", "m2-inventory"], ["#/add?mode=recognize", "m3-add"], ["#/add?mode=batch", "m8-batch"], ["#/gallery", "m4-gallery"], ["#/shopping", "m5-shopping"], ["#/purchase", "m5b-purchase"], ["#/insights", "m5c-insights"], ["#/settings", "m6-settings"]]) {
+  for (const [hash, name] of [["#/", "m1-dashboard"], ["#/inventory", "m2-inventory"], ["#/add?mode=recognize", "m3-add"], ["#/add?mode=batch", "m8-batch"], ["#/gallery", "m4-gallery"], ["#/shopping", "m5-shopping"], ["#/purchase", "m5b-purchase"], ["#/insights", "m5c-insights"], ["#/works", "m5d-works"], ["#/settings", "m6-settings"]]) {
     await step(`mobile ${hash}`, async () => { await go(hash); await shot(name); await noHorizontalScroll(hash); return "ok"; });
   }
 

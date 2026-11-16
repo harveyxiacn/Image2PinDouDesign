@@ -1,7 +1,7 @@
 // 焦点元素：拼豆图纸本身（可缩放的图）与它旁边的用量/库存缺口表。
 import { useEffect, useMemo, useState } from "react";
 import { putRecords, softDelete, useData } from "../lib/db";
-import { consumeTxns, countsToCsv, stockByCode, compareCodes } from "../lib/inventory";
+import { consumeTxns, countsToCsv, stockByCode, compareCodes, planReopen, readiness, refundTxns, reopenedPattern } from "../lib/inventory";
 import { METHOD_LABEL, STATUS_LABEL, totalOf, type Counts, type Pattern, type PatternStatus } from "../lib/model";
 import { colorOf } from "../lib/palette";
 import { Icon, Sheet, fmt, fmtTime, navigate, toast, useBlobUrl, useRoute, DiffNumber } from "../components/ui";
@@ -14,6 +14,9 @@ import CountsEditor from "../components/pattern/CountsEditor";
 import { cleanCounts } from "../components/pattern/save";
 import { matrixOf } from "../lib/matrix";
 import { parseTags } from "../components/pattern/SaveForm";
+import { WorkFields, draftToInput, newDraft, type WorkDraft } from "../components/worklog/WorkFields";
+import { WorkPanel } from "../components/worklog/WorkPanel";
+import { completedPattern } from "../lib/worklog";
 import "../components/pattern/pattern.css";
 import "./PatternDetail.css";
 
@@ -50,11 +53,17 @@ export default function PatternDetail({ id }: { id: string }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [editing, setEditing] = useState<Counts | null>(null);
   const [confirm, setConfirm] = useState(false);
+  // 已完成的图纸要改回别的状态：先问扣掉的豆子怎么处理
+  const [reopen, setReopen] = useState<PatternStatus | null>(null);
   const [tagText, setTagText] = useState("");
   const [editingCells, setEditingCells] = useState(false);
   const [editDirty, setEditDirty] = useState(false);
   const [liveCounts, setLiveCounts] = useState<Counts | null>(null);
   const [savingCells, setSavingCells] = useState(false);
+  // 标记完成时顺手记下的完工信息（日期、照片、评分、标签、用时、备注）
+  const [draft, setDraft] = useState<WorkDraft>(() => newDraft(Date.now()));
+  const [completing, setCompleting] = useState(false);
+  useEffect(() => { if (confirm) setDraft(newDraft(Date.now(), pattern?.build)); }, [confirm]); // eslint-disable-line react-hooks/exhaustive-deps
   const askDone = useRoute().query.get("done") === "1";
   // 从拼装模式完成后跳回来：自动打开“标记完成”（只开一次）
   useEffect(() => { if (askDone && pattern && pattern.status !== "done") setConfirm(true); }, [askDone, !!pattern]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -113,19 +122,46 @@ export default function PatternDetail({ id }: { id: string }) {
     if (name && name !== pattern.name) await save({ name });
   };
 
+  const reopenPlan = planReopen(pattern, data.txns);
   const setStatus = (s: PatternStatus) => {
     if (s === pattern.status) return;
     if (s === "done") { setConfirm(true); return; }
-    void save({ status: s });
+    if (pattern.status === "done" && reopenPlan.ask) { setReopen(s); return; }
+    // 没扣过库存的完成（或扣的记录已找不到）：直接改状态；若带着“已扣库存”标记则一并清掉
+    void putRecords("patterns", [pattern.status === "done" ? reopenedPattern(pattern, s) : { ...pattern, status: s, updatedAt: Math.max(Date.now(), pattern.updatedAt + 1) }]);
+  };
+
+  /** 重新打开已完成的图纸。refund = 把当初扣的豆子用新的“调整”流水放回库存；否则库存保持不变。 */
+  const reopenTo = async (s: PatternStatus, refund: boolean) => {
+    setReopen(null);
+    const before = pattern;
+    const at = Date.now();
+    const refunds = refund ? refundTxns(reopenPlan.originals, pattern, STATUS_LABEL[s], data.device.deviceId, at) : [];
+    if (refunds.length) await putRecords("txns", refunds);
+    await putRecords("patterns", [reopenedPattern(pattern, s, at)]);
+    const back = refunds.reduce((a, t) => a + t.delta, 0);
+    toast(back > 0 ? `已改回${STATUS_LABEL[s]}，${fmt(back)} 颗豆子放回了库存` : `已改回${STATUS_LABEL[s]}，库存保持已扣除`, {
+      label: "撤销",
+      run: async () => {
+        if (refunds.length) await softDelete("txns", refunds.map((t) => t.id));
+        await putRecords("patterns", [{ ...before, updatedAt: Date.now() + 2 }]);
+      }
+    });
   };
 
   const complete = async (deduct: boolean) => {
-    setConfirm(false);
+    if (completing) return;
+    setCompleting(true);
     const before = pattern;
+    let input: Awaited<ReturnType<typeof draftToInput>>;
+    try { input = await draftToInput(draft, Date.now()); } finally { setCompleting(false); }
+    setConfirm(false);
+    if (input.photoFailed) toast("照片没存上，已不带照片记录完成");
+    const finish = (base: Pattern) => putRecords("patterns", [completedPattern(base, input.input)]);
     if (deduct && !pattern.consumed) {
       const txns = consumeTxns(pattern, data.device.deviceId);
       await putRecords("txns", txns);
-      await save({ consumed: true, status: "done" });
+      await finish({ ...pattern, consumed: true });
       toast(`已完成，扣除 ${fmt(total * copies)} 颗`, {
         label: "撤销",
         run: async () => {
@@ -134,7 +170,7 @@ export default function PatternDetail({ id }: { id: string }) {
         }
       });
     } else {
-      await save({ status: "done" });
+      await finish(pattern);
       toast("已标记完成", { label: "撤销", run: () => void putRecords("patterns", [{ ...before, updatedAt: Date.now() }]) });
     }
   };
@@ -163,6 +199,8 @@ export default function PatternDetail({ id }: { id: string }) {
     setTagText("");
     if (add.length) void save({ tags: Array.from(new Set([...pattern.tags, ...add])) });
   };
+
+  const short = confirm && !pattern.consumed ? readiness(pattern, stock).missing : [];
 
   return (
     <div>
@@ -255,11 +293,14 @@ export default function PatternDetail({ id }: { id: string }) {
             <div className="pd-actions">
               {hasMatrix && pattern.status !== "done" ? <button className="btn btn-primary" onClick={startBuild}>{pattern.build ? "继续拼" : "开始拼"}</button> : null}
               {pattern.status !== "done" ? <button className="btn btn-iron" onClick={() => setConfirm(true)} disabled={!total}><Icon name="check" />标记完成</button> : null}
+              {hasMatrix ? <a className="btn" href={`#/print/${pattern.id}`} data-print-link>打印分板图纸</a> : null}
               <button className="btn" onClick={exportCsv} disabled={!total}><Icon name="download" />导出 CSV</button>
               <button className="btn" onClick={copyUsage} disabled={!total}><Icon name="copy" />复制用量</button>
               <button className="btn btn-ghost" onClick={remove}><Icon name="trash" />删除</button>
             </div>
           </div>
+
+          <WorkPanel pattern={pattern} />
 
           <div className="panel panel-pad stack">
             <span className="label">标签</span>
@@ -281,10 +322,31 @@ export default function PatternDetail({ id }: { id: string }) {
       {confirm ? (
         <Sheet title="标记完成" onClose={() => setConfirm(false)}
           footer={<>
-            <button className="btn" onClick={() => void complete(false)}>只标记完成</button>
-            {!pattern.consumed ? <button className="btn btn-iron" onClick={() => void complete(true)}>扣除库存并完成</button> : null}
+            <button className="btn" disabled={completing} onClick={() => void complete(false)}>只标记完成</button>
+            {!pattern.consumed ? <button className="btn btn-iron" disabled={completing} onClick={() => void complete(true)}>扣除库存并完成</button> : null}
           </>}>
           {pattern.consumed ? <p>这张图纸已经扣过库存，只会更新状态。</p> : <p>将从库存扣除 <b className="num">{fmt(total * copies)}</b> 颗（<b className="num">{used}</b> 色{copies > 1 ? `，${copies} 份` : ""}）。库存不足的色号会变成负数，之后可在“豆盒库存”里盘点修正。</p>}
+          {!pattern.consumed && inventoryReady && short.length ? (
+            <div data-short-list>
+              <p className="meta" style={{ marginTop: 8 }}>其中 <b className="num">{short.length}</b> 个色号库存不够，扣完会变成负数：</p>
+              <p style={{ marginTop: 4 }}>{short.slice(0, 8).map((m) => <span className="chip chip-amber" key={m.code} style={{ marginRight: 6, marginBottom: 4 }}>{m.code} 差 {fmt(m.need - m.have)}</span>)}{short.length > 8 ? <span className="meta">等 {short.length} 个</span> : null}</p>
+            </div>
+          ) : null}
+          <h4 className="wk-sheet-h">完工记录（都可以不填，之后也能补）</h4>
+          <WorkFields draft={draft} now={Date.now()} onChange={setDraft} />
+        </Sheet>
+      ) : null}
+      {reopen ? (
+        <Sheet title="重新打开这张图纸" onClose={() => setReopen(null)}
+          footer={<>
+            <button className="btn" data-reopen-keep onClick={() => void reopenTo(reopen, false)}>保持已扣除</button>
+            <button className="btn btn-primary" data-reopen-refund onClick={() => void reopenTo(reopen, true)}>把豆子放回库存</button>
+          </>}>
+          <div data-reopen-ask>
+            <p>这张图纸标记完成时，从库存扣掉了 <b className="num">{fmt(reopenPlan.beads)}</b> 颗（<b className="num">{reopenPlan.colors}</b> 色）。要改成“{STATUS_LABEL[reopen]}”，这些豆子怎么处理？</p>
+            <p className="meta"><b>放回库存</b>：当初是点错了、其实没拼，豆子会作为一条新的“调整”记录加回来（记录里能看到）。<br /><b>保持已扣除</b>：这张已经拼好了，你想再拼一份，库存不变。</p>
+            <p className="meta">两种选择都会让图纸重新出现在采购清单里；之后可以在提示里撤销。</p>
+          </div>
         </Sheet>
       ) : null}
     </div>
