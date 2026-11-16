@@ -41,6 +41,7 @@ Everything runs **client-side** — images never leave the device, and the built
 - Finished-size estimate (2.6 mm / 5 mm beads) and a fused / loose bead look preview.
 - Save up to six private local pattern drafts; export / import pattern files (`.pindou.json`) and the bead inventory (CSV) to back up or move between devices — still no account or upload.
 - Inventory-aware substitution: swap colors you are short of for close colors you own (strict / medium / loose CIEDE2000 thresholds), previewed before applying.
+- Color codes stay visible in the cells while editing (toggle above the canvas, one-click zoom until they are readable); the PNG sheet has black lines every 5 / 10 cells and at board edges, row/column numbers on all four sides, and a legend with per-code counts and a total.
 - Optional link to 拼豆仓 (pindou-hub): built with `VITE_HUB_LINK=1`, the palette dialog gains “从拼豆仓导入库存”, which reads the stock CSV exported by pindou-hub, replaces the registered inventory and turns on “only colors I own”. It is a local file read (no server); the public build leaves it off.
 - Per-image and whole-**project** color/count aggregation, filterable by project or local draft, with inventory shortfall and purchase-list CSV export.
 - Adjustments: brightness/contrast, color simplification, dithering (Floyd-Steinberg or Bayer ordered), and non-destructive outer H7 black outlining.
