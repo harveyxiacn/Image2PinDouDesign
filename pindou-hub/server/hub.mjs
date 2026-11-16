@@ -31,6 +31,7 @@ const BLOB_DIR = path.join(DATA_DIR, "blobs");
 mkdirSync(BLOB_DIR, { recursive: true });
 const config = loadConfig();
 const store = openStore(DATA_DIR);
+reconcileEpoch();
 
 function parseArgs(list) {
   const out = {};
@@ -58,6 +59,18 @@ function loadConfig() {
     renameSync(tmp, file);
   }
   return current;
+}
+
+/** 数据库标识同时记在 config.json。两边对不上 = hub.db 被恢复成旧备份或被换掉：换一个新标识，让所有设备重新对账。 */
+function reconcileEpoch() {
+  const current = store.epoch();
+  if (config.dbEpoch === current) return;
+  const next = config.dbEpoch === undefined ? current : store.rotateEpoch();
+  config.dbEpoch = next;
+  const file = path.join(DATA_DIR, "config.json");
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, JSON.stringify(config, null, 2));
+  renameSync(tmp, file);
 }
 
 function lanAddresses() {
@@ -297,7 +310,8 @@ async function handle(req, res) {
     const pulled = store.changesSince(body.since ?? 0, 2000);
     const have = new Set(Array.isArray(body.blobsHave) ? body.blobsHave.filter((id) => BLOB_RE.test(id)) : []);
     const missing = [...have].filter((id) => !existsSync(path.join(BLOB_DIR, id)));
-    sendJson(res, 200, { accepted, ...pulled, blobsMissing: missing, serverTime: Date.now() });
+    // epoch / maxSeq：让客户端发现“Hub 数据库被恢复或替换”（游标比 Hub 的最大序号还大）。老客户端忽略这两个字段。
+    sendJson(res, 200, { accepted, ...pulled, blobsMissing: missing, serverTime: Date.now(), epoch: store.epoch(), maxSeq: store.highWater() });
     return;
   }
   const blobMatch = /^\/api\/blobs\/([a-f0-9]{64})$/.exec(p);

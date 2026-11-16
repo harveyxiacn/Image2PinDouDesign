@@ -5,6 +5,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 export const COLLECTIONS = new Set(["patterns", "txns", "images", "prefs"]);
 const ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
@@ -30,7 +31,27 @@ export function openStore(dataDir) {
       name TEXT NOT NULL DEFAULT '',
       last_seen INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
+
+  // 数据库标识（epoch）：随数据库文件走。客户端记住它；Hub 数据库被恢复/替换后标识变化，客户端据此重置游标并重新上传。
+  const getMeta = db.prepare("SELECT value FROM meta WHERE key = ?");
+  const setMeta = db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  function epoch() {
+    const row = getMeta.get("epoch");
+    if (row) return String(row.value);
+    const fresh = crypto.randomBytes(12).toString("base64url");
+    setMeta.run("epoch", fresh);
+    return fresh;
+  }
+  function rotateEpoch() {
+    const fresh = crypto.randomBytes(12).toString("base64url");
+    setMeta.run("epoch", fresh);
+    return fresh;
+  }
 
   const selectOne = db.prepare("SELECT updated_at, device FROM records WHERE collection = ? AND id = ?");
   const upsert = db.prepare(`
@@ -119,6 +140,9 @@ export function openStore(dataDir) {
     referencedBlobIds,
     stats,
     exportAll,
+    epoch,
+    rotateEpoch,
+    highWater: () => Number(maxSeq.get().seq),
     touchDevice: (id, name) => touchDevice.run(String(id).slice(0, 80), String(name ?? "").slice(0, 80), Date.now()),
     close: () => db.close()
   };

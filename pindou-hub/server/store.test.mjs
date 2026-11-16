@@ -46,3 +46,34 @@ test("invalid records are dropped without failing the batch", () => {
     assert.equal(accepted, 1);
   });
 });
+
+test("epoch is stable per database, rotates on demand, high-water mark tracks seq", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "pindou-hub-test-"));
+  try {
+    const a = openStore(dir);
+    const epoch = a.epoch();
+    assert.ok(epoch.length >= 8);
+    assert.equal(a.epoch(), epoch, "same value on every call");
+    assert.equal(a.highWater(), 0);
+    a.applyChanges([{ collection: "txns", id: "t1", updatedAt: 5, data: {} }, { collection: "txns", id: "t2", updatedAt: 6, data: {} }], "pc");
+    assert.equal(a.highWater(), 2);
+    a.close();
+    const b = openStore(dir);
+    assert.equal(b.epoch(), epoch, "survives reopen");
+    const next = b.rotateEpoch();
+    assert.notEqual(next, epoch);
+    assert.equal(b.epoch(), next);
+    b.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("pushing the same batch in chunks, in any order and repeated, converges", () => {
+  withStore((store) => {
+    const all = Array.from({ length: 30 }, (_, i) => ({ collection: "txns", id: `t${i}`, updatedAt: 100 + i, data: { delta: i } }));
+    const chunks = [all.slice(0, 10), all.slice(10, 20), all.slice(20)];
+    for (const c of [chunks[2], chunks[0], chunks[0], chunks[1], chunks[2]]) store.applyChanges(c, "pc");
+    const { changes } = store.changesSince(0, 100);
+    assert.equal(changes.length, 30);
+    assert.equal(store.applyChanges(all, "pc"), 0, "full replay accepts nothing new");
+  });
+});

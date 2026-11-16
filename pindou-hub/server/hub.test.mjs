@@ -100,3 +100,21 @@ test("two devices converge through the hub; blobs are hash-checked", async () =>
   const got = await fetch(`${base}/api/blobs/${id}`, auth());
   assert.equal(Buffer.from(await got.arrayBuffer()).toString(), "fake-png-bytes");
 });
+
+test("sync response exposes database identity, high-water mark and server time; chunked replay is idempotent", async () => {
+  const config = JSON.parse(readFileSync(path.join(dataDir, "config.json"), "utf8"));
+  const sync = (body) => fetch(`${base}/api/sync`, { ...json(body), headers: { "content-type": "application/json", "x-pindou-token": config.token } }).then((r) => r.json());
+  const first = await sync({ deviceId: "tablet", since: 0, changes: [{ collection: "txns", id: "c1", updatedAt: 300, data: { code: "A1", delta: 1, kind: "purchase", at: 300 } }] });
+  assert.equal(typeof first.epoch, "string");
+  assert.equal(first.epoch, config.dbEpoch, "hub keeps the epoch in config.json too");
+  assert.ok(first.maxSeq >= first.cursor);
+  assert.equal(typeof first.serverTime, "number");
+  // 游标比 Hub 的最大序号大（客户端的视角：Hub 被恢复成旧备份）：Hub 如实报告 maxSeq，不报错
+  const ahead = await sync({ deviceId: "tablet", since: first.maxSeq + 1000, changes: [] });
+  assert.equal(ahead.changes.length, 0);
+  assert.equal(ahead.maxSeq, first.maxSeq);
+  assert.equal(ahead.epoch, first.epoch);
+  // 同一批分两次重放：第二次不再被接受
+  const again = await sync({ deviceId: "tablet", since: 0, changes: [{ collection: "txns", id: "c1", updatedAt: 300, data: { code: "A1", delta: 1, kind: "purchase", at: 300 } }] });
+  assert.equal(again.accepted, 0);
+});
