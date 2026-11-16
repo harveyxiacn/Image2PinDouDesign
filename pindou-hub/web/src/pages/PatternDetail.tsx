@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { putRecords, softDelete, useData } from "../lib/db";
 import { consumeTxns, countsToCsv, stockByCode, compareCodes, planReopen, readiness, refundTxns, reopenedPattern } from "../lib/inventory";
 import { METHOD_LABEL, STATUS_LABEL, totalOf, type Counts, type Pattern, type PatternStatus } from "../lib/model";
-import { colorOf } from "../lib/palette";
+import { PALETTE, colorOf } from "../lib/palette";
 import { Icon, Sheet, fmt, fmtTime, navigate, toast, useBlobUrl, useRoute, DiffNumber } from "../components/ui";
 import MatrixView from "../components/pattern/MatrixView";
 import MatrixEditor from "../components/pattern/MatrixEditor";
@@ -13,6 +13,9 @@ import DetailTable from "../components/pattern/DetailTable";
 import CountsEditor from "../components/pattern/CountsEditor";
 import { cleanCounts } from "../components/pattern/save";
 import { matrixOf } from "../lib/matrix";
+import { getHighResolutionCellSize, renderDesignToBlob } from "@engine/rendering";
+import { previewCellSize } from "../lib/generate";
+import { sheetPlan } from "../lib/sheetExport";
 import { parseTags } from "../components/pattern/SaveForm";
 import { WorkFields, draftToInput, newDraft, type WorkDraft } from "../components/worklog/WorkFields";
 import { WorkPanel } from "../components/worklog/WorkPanel";
@@ -62,6 +65,7 @@ export default function PatternDetail({ id }: { id: string }) {
   const [editDirty, setEditDirty] = useState(false);
   const [liveCounts, setLiveCounts] = useState<Counts | null>(null);
   const [savingCells, setSavingCells] = useState(false);
+  const [sheetBusy, setSheetBusy] = useState(false);
   // 标记完成时顺手记下的完工信息（日期、照片、评分、标签、用时、备注）
   const [draft, setDraft] = useState<WorkDraft>(() => newDraft(Date.now()));
   const [completing, setCompleting] = useState(false);
@@ -202,6 +206,19 @@ export default function PatternDetail({ id }: { id: string }) {
     const csv = countsToCsv(rows, [["code", "色号"], ["name", "颜色"], ["each", "每份"], ["total", `×${copies} 份`], ["stock", "库存"], ["gap", "缺口"]]);
     download(`${pattern.name}-用量.csv`, new Blob([csv], { type: "text/csv;charset=utf-8" }));
   };
+  // 导出图纸 PNG：黑线分格、边上标数字、底部色号统计，和小红书上常见的图纸一样（画法在引擎的 sheet 模式里）
+  const sheet = sheetPlan(pattern, matrix);
+  const exportSheet = async () => {
+    if (!sheet.ok || sheetBusy) return;
+    setSheetBusy(true);
+    try {
+      const cellSize = previewCellSize(sheet.design, getHighResolutionCellSize(sheet.design));
+      const blob = await renderDesignToBlob(sheet.design, PALETTE, { cellSize, showLabels: true, boardLineEvery: sheet.boardLineEvery, showCoordinates: true, sheet: true });
+      download(sheet.fileName, blob);
+      toast(`已导出 ${sheet.fileName}`);
+    } catch (e) { toast(e instanceof Error ? `导出图纸失败：${e.message}` : "导出图纸失败"); }
+    finally { setSheetBusy(false); }
+  };
   const copyUsage = async () => {
     const text = `${pattern.name}${copies > 1 ? `（×${copies} 份）` : ""}\n` + rowsFor().map((c) => `${c} ${pattern.counts[c] * copies}`).join("\n") + `\n共 ${fmt(total * copies)} 颗，${used} 色`;
     toast((await copyText(text)) ? "用量已复制" : "复制失败，请手动选择");
@@ -310,9 +327,11 @@ export default function PatternDetail({ id }: { id: string }) {
               {pattern.status !== "done" ? <button className="btn btn-iron" onClick={() => setConfirm(true)} disabled={!total}><Icon name="check" />标记完成</button> : null}
               {hasMatrix ? <a className="btn" href={`#/print/${pattern.id}`} data-print-link>打印分板图纸</a> : null}
               <button className="btn" onClick={exportCsv} disabled={!total}><Icon name="download" />导出 CSV</button>
+              <button className="btn" data-export-sheet data-busy={sheetBusy ? "true" : undefined} onClick={() => void exportSheet()} disabled={!sheet.ok || sheetBusy} aria-busy={sheetBusy} title={sheet.ok ? "导出带黑线分格、边缘数字和底部色号统计的图纸图片" : sheet.reason}><Icon name="download" />{sheetBusy ? "正在生成…" : "导出图纸 PNG"}</button>
               <button className="btn" onClick={copyUsage} disabled={!total}><Icon name="copy" />复制用量</button>
               <button className="btn btn-ghost" onClick={remove}><Icon name="trash" />删除</button>
             </div>
+            {!sheet.ok ? <p className="meta" data-export-sheet-reason>不能导出图纸 PNG：{sheet.reason}。</p> : null}
           </div>
 
           <WorkPanel pattern={pattern} />

@@ -3,7 +3,7 @@ import { renderDesignToCanvas } from "@engine/rendering";
 import type { BeadDesign } from "@engine/types";
 import { PALETTE, colorOf } from "../../lib/palette";
 import { brushCells, matrixCellAtPoint, strokeCells, type BrushSize, type MatrixCell } from "../../lib/matrixEdit";
-import { labelFontPx, labelTextColor, labelsFit, LABEL_MIN_CELL } from "../../lib/matrixLabels";
+import { labelFontPx, LABEL_MIN_CELL, labelMinCell, labelTextColor, labelsFit, longestCodeLength } from "../../lib/matrixLabels";
 import { Icon } from "../ui";
 import { contentPoint, isPanGesture, pinScroll, wheelZoomCell } from "./zoomMath";
 import "./pattern.css";
@@ -28,14 +28,17 @@ export type MatrixTool = "pan" | "brush" | "eraser" | "pick";
  *  - pick：点格子取色，不修改矩阵。
  *  - focusCode 高亮某个色号（其余变淡）；编辑时由调用方传 null，避免整图变淡。
  *  - showCodes：格子里写色号（格子够大时才画，开关记在 localStorage）；不传则用上次的选择，默认开。
+ *    传了就以它为准且不改写记住的选择，只有用户自己点开关才会记。
+ *  - autoZoomCodes：刚打开时若开着色号但格子太小，自动放大到能看清（编辑格子时用）。
  */
 export default function MatrixView({
-  matrix, width, height, focusCode, labels = true, showCodes,
+  matrix, width, height, focusCode, labels = true, showCodes, autoZoomCodes = false,
   tool = "pan", brushCode = null, brushSize = 1, onCellsChange, onPickCode
 }: {
   matrix: Array<Array<string | null>>; width: number; height: number; focusCode?: string | null; labels?: boolean;
   /** 色号初始开关；不传时读取上次记住的选择，再回退到 labels。 */
   showCodes?: boolean;
+  autoZoomCodes?: boolean;
   tool?: MatrixTool;
   brushCode?: string | null;
   brushSize?: BrushSize;
@@ -53,10 +56,21 @@ export default function MatrixView({
   const maxCell = Math.max(6, Math.min(48, Math.floor(Math.sqrt(MAX_PIXELS / Math.max(1, width * height)))));
   const design = useMemo<BeadDesign>(() => ({ id: "view", fileName: "", boardWidth: width, boardHeight: height, matrix, colorCounts: {} }), [matrix, width, height]);
 
+  // 图里最长的色号决定“放大到能看清”要放多大；是否画色号只看基础尺寸（2 字），这样边画边出现新的 3 字色号时不会整图色号突然消失
+
+  const codeLen = useMemo(() => longestCodeLength(matrix), [matrix]);
+  const codesReachable = LABEL_MIN_CELL <= maxCell;
+  const codesMinCell = Math.min(labelMinCell(codeLen), maxCell);
+
   useEffect(() => {
     const w = wrap.current?.clientWidth ?? 360;
-    setCell(Math.max(4, Math.min(maxCell, Math.min(28, Math.floor((w - 2) / Math.max(1, width))))) || 8);
-  }, [width, maxCell]);
+    const fitCell = Math.max(4, Math.min(maxCell, Math.min(28, Math.floor((w - 2) / Math.max(1, width))))) || 8;
+    // 编辑时要看清每格的色号：开着色号而适应宽度放不下，就直接放大到刚好能看清（用户随时可点“适应宽度”）
+    const zoomIn = autoZoomCodes && showLabels && codesReachable && fitCell < codesMinCell;
+    // 放大后图比窗口大：把图的正中放到窗口正中，而不是停在左上角的空白处
+    if (zoomIn) { const el = wrap.current; anchor.current = { cx: width / 2, cy: height / 2, px: (el?.clientWidth ?? w) / 2, py: (el?.clientHeight ?? w) / 2 }; }
+    setCell(zoomIn ? codesMinCell : fitCell);
+  }, [width, maxCell]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** 重画整张图；拖动预览是直接画在位图上的，取消一笔时要靠它恢复。 */
   const draw = () => {
@@ -68,13 +82,20 @@ export default function MatrixView({
     if (showLabels && labelsFit(size)) drawCodes(cv, size);
   };
 
+  /** 在 (left, top) 的格子里写色号；字号随格子与字数缩放，深浅底自动黑白字。 */
+  const drawCode = (ctx: CanvasRenderingContext2D, code: string, left: number, top: number, size: number, setFont = true) => {
+    if (setFont) ctx.font = `700 ${labelFontPx(size, code.length)}px ui-monospace, monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = labelTextColor(colorOf(code)?.hex);
+    ctx.fillText(code, left + size / 2, top + size / 2 + 0.5);
+  };
+
   const drawCodes = (cv: HTMLCanvasElement, size: number) => {
     const ctx = cv.getContext("2d");
     if (!ctx) return;
     const gutterX = cv.width - width * size, gutterY = cv.height - height * size;
     ctx.save();
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
     let fontLen = 0;
     for (let r = 0; r < height; r += 1) {
       const row = matrix[r];
@@ -82,10 +103,9 @@ export default function MatrixView({
       for (let c = 0; c < width; c += 1) {
         const code = row[c];
         if (!code) continue;
-        if (code.length !== fontLen) { fontLen = code.length; ctx.font = `700 ${labelFontPx(size, fontLen)}px ui-monospace, monospace`; }
         ctx.globalAlpha = focusCode && code !== focusCode ? 0.28 : 1;
-        ctx.fillStyle = labelTextColor(colorOf(code)?.hex);
-        ctx.fillText(code, gutterX + c * size + size / 2, gutterY + r * size + size / 2 + 0.5);
+        drawCode(ctx, code, gutterX + c * size, gutterY + r * size, size, code.length !== fontLen);
+        fontLen = code.length;
       }
     }
     ctx.restore();
@@ -160,6 +180,7 @@ export default function MatrixView({
       if (code) {
         ctx.fillStyle = colorOf(code)?.hex ?? "#d4d4d8";
         ctx.fillRect(left, top, size, size);
+        if (showLabels && labelsFit(size)) drawCode(ctx, code, left, top, size); // 拖动中就能看到新色号
       } else {
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(left, top, size, size);
@@ -334,7 +355,7 @@ export default function MatrixView({
         <button className="btn btn-sm" onClick={() => zoom(0.8)} aria-label="缩小" title="缩小（−）">−</button>
         <button className="btn btn-sm" onClick={() => zoom(1.25)} aria-label="放大" title="放大（+）">+</button>
         <button className="btn btn-sm btn-ghost" onClick={fit} title="适应宽度（0）">适应宽度</button>
-        <label className="pt-check pt-codes-toggle">
+        <label className="pt-check pt-codes-toggle" data-codes-toggle>
           <input type="checkbox" checked={showLabels} onChange={(e) => { setShowLabels(e.target.checked); storeCodes(e.target.checked); }} />显示色号
         </label>
         <span className="meta num">{width}×{height}</span>
@@ -344,9 +365,13 @@ export default function MatrixView({
         <canvas ref={canvas} />
       </div>
       {showLabels && cell > 0 && !labelsFit(cell) ? (
-        <p className="meta" style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
-          <button type="button" className="btn btn-sm btn-ghost" onClick={() => zoomTo(Math.max(LABEL_MIN_CELL + 2, cell))}>放大后显示色号</button>
-          <span>（格子 {cell}px，需要 ≥ {LABEL_MIN_CELL}px）</span>
+        <p className="meta" data-codes-hint style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+          {codesReachable ? (
+            <>
+              <button type="button" className="btn btn-sm" style={{ minHeight: 44 }} data-codes-zoom onClick={() => zoomTo(codesMinCell)}>放大到能看清色号</button>
+              <span>格子太小，色号没画出来（现在 {cell}px，需要 ≥ {codesMinCell}px）</span>
+            </>
+          ) : <span>这张图太大，格子放不到能写下色号的尺寸；可以只看局部或关掉“显示色号”。</span>}
         </p>
       ) : null}
       {focusCode ? <p className="meta" style={{ marginTop: 6 }}><Icon name="search" size={12} /> 正在高亮 {focusCode}</p> : null}

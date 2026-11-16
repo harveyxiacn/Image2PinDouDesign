@@ -1033,6 +1033,38 @@ try {
     await shot("58-nextup-card");
     return JSON.stringify(out);
   });
+  // ---- 编辑时格内色号 + 导出图纸 PNG（黑线分割、四边编号、底部色号统计） ----
+  await step("sheet: codes on while editing, zoom-to-codes, export sheet PNG", async () => {
+    const out = {};
+    await go(recognizedHash || "#/gallery");
+    await waitFor(`document.querySelector('[data-export-sheet]')`, 15000, "export sheet button");
+    await evaluate(`localStorage.setItem('pindou.matrix.showCodes', '0')`);
+    await evaluate(`(() => { window.__dlr = null; if (window.__capOn) return; window.__capOn = true; const oc = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download && this.href.startsWith('blob:')) { const name = this.download; fetch(this.href).then((r) => r.blob()).then((b) => { const fr = new FileReader(); fr.onload = () => { window.__dlr = { name, size: b.size, data: fr.result }; }; fr.readAsDataURL(b); }).catch((e) => { window.__dlr = { error: String(e) }; }); return; } return oc.call(this); }; })()`);
+    await evaluate(`document.querySelector('[data-export-sheet]').click()`);
+    await waitFor(`window.__dlr`, 60000, "sheet PNG download");
+    const dl = await evaluate(`window.__dlr`);
+    if (dl.error || !/^data:image\/png;base64,/.test(dl.data)) throw new Error("sheet export: " + JSON.stringify({ ...dl, data: String(dl.data).slice(0, 40) }));
+    const png = Buffer.from(dl.data.split(",")[1], "base64");
+    writeFileSync(resolve(outDir, "59-sheet-export.png"), png);
+    out.file = dl.name; out.bytes = png.length; out.w = png.readUInt32BE(16); out.h = png.readUInt32BE(20);
+    if (out.w < 600 || out.h <= out.w * 0.5) throw new Error("sheet size looks wrong: " + JSON.stringify(out));
+    await clickText("编辑格子");
+    await waitFor(`document.querySelector('.me [data-codes-toggle]')`, 10000, "editor codes toggle");
+    await sleep(600);
+    out.toggle = await evaluate(`(() => { const t = document.querySelector('.me [data-codes-toggle]'); const i = t.matches('input') ? t : t.querySelector('input'); return i ? i.checked : t.getAttribute('aria-pressed'); })()`);
+    out.codes = await evaluate(`document.querySelector('.me .pt-matrix')?.dataset.codes`);
+    out.hint = await evaluate(`!!document.querySelector('.me [data-codes-hint]')`);
+    if (out.codes !== "on" && out.hint) { await evaluate(`document.querySelector('.me [data-codes-zoom]').click()`); await sleep(600); out.codesAfterZoom = await evaluate(`document.querySelector('.me .pt-matrix')?.dataset.codes`); }
+    await evaluate(`document.querySelector('.me .pt-matrix-scroll')?.scrollIntoView({ block: 'center' })`);
+    await shot("60-edit-codes");
+    if (String(out.toggle) !== "true" || (out.codes !== "on" && out.codesAfterZoom !== "on")) throw new Error("codes not shown while editing: " + JSON.stringify(out));
+    out.remembered = await evaluate(`localStorage.getItem('pindou.matrix.showCodes')`);
+    await go("#/gallery");
+    await sleep(300);
+    await evaluate(`[...document.querySelectorAll('.sheet button, dialog button, button')].find((b) => /放弃|不保存|离开/.test(b.innerText))?.click()`);
+    await sleep(300);
+    return JSON.stringify(out);
+  });
   checks.push({ check: "token contrast (light)", ok: true, detail: JSON.stringify(await evaluate(CONTRAST)) });
   await setViewport(390, 844, true);
   for (const [hash, name] of [["#/", "m1-dashboard"], ["#/inventory", "m2-inventory"], ["#/add?mode=recognize", "m3-add"], ["#/add?mode=batch", "m8-batch"], ["#/gallery", "m4-gallery"], ["#/shopping", "m5-shopping"], ["#/purchase", "m5b-purchase"], ["#/insights", "m5c-insights"], ["#/works", "m5d-works"], ["#/settings", "m6-settings"]]) {

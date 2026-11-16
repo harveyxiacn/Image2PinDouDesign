@@ -149,7 +149,7 @@ export default function MatrixEditor({ matrix: matrixProp, counts: countsProp, w
         </div>
       </div>
 
-      <MatrixView matrix={st.matrix} width={width} height={height} focusCode={null}
+      <MatrixView matrix={st.matrix} width={width} height={height} focusCode={null} showCodes autoZoomCodes
         tool={tool} brushCode={brush} brushSize={size} onCellsChange={paint} onPickCode={pick} />
 
       <p className="meta" aria-live="polite">
