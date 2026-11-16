@@ -9,6 +9,7 @@ import {
   type MattingStrength
 } from "../domain/matting";
 import type { BackgroundMethod } from "../domain/backgroundRemoval";
+import { localModelKnown, probeLocalModel } from "../domain/bgAssets";
 import type { PixelSource } from "../domain/types";
 import "./background-matting.css";
 
@@ -41,6 +42,7 @@ export function BackgroundMattingPanel({ source, value, disabled, onChange }: Pr
   const [tool, setTool] = useState<EditTool>("none");
   const [view, setView] = useState<"after" | "before">("after");
   const [history, setHistory] = useState<EditAction[]>([]);
+  const [localModel, setLocalModel] = useState<boolean | null>(localModelKnown());
 
   const preview = useMemo(
     () => buildMattingPreview(source, value.strength, value.edits),
@@ -49,6 +51,12 @@ export function BackgroundMattingPanel({ source, value, disabled, onChange }: Pr
   const forcedLocal = value.method === "local";
   // 背景杂乱且未强制本地：预览不跑算法，提交时由 AI 模型处理。
   const modelPending = !preview.analysis.usable && !forcedLocal;
+  useEffect(() => {
+    if (!modelPending || localModel !== null) return;
+    let active = true;
+    void probeLocalModel().then((path) => { if (active) setLocalModel(path !== null); });
+    return () => { active = false; };
+  }, [modelPending, localModel]);
   const shown = view === "before" || !preview.output ? preview.source : preview.output.source;
 
   useEffect(() => {
@@ -69,7 +77,7 @@ export function BackgroundMattingPanel({ source, value, disabled, onChange }: Pr
 
   let line: string;
   if (modelPending) {
-    line = `${describeBackground(preview.analysis)}，本地方式不够准，添加时会改用 AI 模型（首次需联网下载，下载失败会自动退回本地方式）。`;
+    line = `${describeBackground(preview.analysis)}，本地方式不够准，添加时会改用 AI 模型（${localModel === null ? "" : localModel ? "模型已随应用安装，无需联网，" : "首次需联网下载，"}失败会自动退回本地方式）。`;
   } else if (preview.output) {
     line = localMethodLine(preview.analysis);
   } else if (preview.analysis.usable) {

@@ -13,6 +13,9 @@ jobs:
   test-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # CI 只做检查不部署：跳过抠图模型的下载（约 285 MB），应用会按没有本地模型的情况构建
+      BG_ASSETS_SKIP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

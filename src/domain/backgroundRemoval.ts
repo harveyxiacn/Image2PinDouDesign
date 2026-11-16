@@ -1,3 +1,4 @@
+import { probeLocalModel } from "./bgAssets";
 import { blobToPixelSource, pixelSourceToBlob } from "./image";
 import {
   analyzeBackground,
@@ -32,7 +33,8 @@ export type RemovalResult = {
 
 // 智能去背景：先看四边背景像不像纯色/渐变/双色。像 → 本地快速方式（无需联网、更准，
 // 也不会误抠白色爪尖、眼睛）；背景杂乱（照片）→ 才加载 AI 模型。模型加载失败（离线、被拦截）
-// 时不再报错，而是退回本地方式并说明原因。不新增任何网络请求，模型仍按原方式按需加载。
+// 时不再报错，而是退回本地方式并说明原因。模型文件优先取本站 bg-model/（安装时由脚本准备，
+// 运行时不访问第三方）；本地文件不存在时才沿用库默认的在线地址。
 export async function removeBackgroundSmart(source: PixelSource, options: RemovalOptions = {}): Promise<RemovalResult> {
   const { onProgress } = options;
   const strength = options.strength ?? DEFAULT_STRENGTH;
@@ -64,11 +66,14 @@ export async function removeBackgroundSmart(source: PixelSource, options: Remova
     return localBestEffort(source, strength, edits, onProgress, "已按你的要求只用本地方式；背景较杂，可能留有残余，可用「点选去除」修正。");
   }
 
+  let localPath: string | null = null;
   try {
+    localPath = await probeLocalModel();
     const { removeBackground } = await import("@imgly/background-removal");
     const input = await pixelSourceToBlob(source);
     const output = await removeBackground(input, {
       model: "isnet_fp16",
+      ...(localPath ? { publicPath: localPath } : {}),
       output: { format: "image/png" },
       progress: (stage, current, total) => {
         onProgress?.({ stage, ratio: total > 0 ? current / total : 0 });
@@ -90,7 +95,9 @@ export async function removeBackgroundSmart(source: PixelSource, options: Remova
       strength,
       edits,
       onProgress,
-      "AI 模型没能加载（可能离线或被拦截），已改用本地快速方式；复杂背景可能留有残余，可用「点选去除」修正。"
+      localPath
+        ? "AI 模型没能运行（本机的模型文件可能缺失、损坏或浏览器不支持），已改用本地快速方式；复杂背景可能留有残余，可用「点选去除」修正。"
+        : "AI 模型没能加载（可能离线或被拦截），已改用本地快速方式；复杂背景可能留有残余，可用「点选去除」修正。"
     );
   }
 }

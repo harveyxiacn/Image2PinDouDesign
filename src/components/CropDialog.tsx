@@ -263,7 +263,7 @@ export function CropDialog({
         <div className="crop-controls">
           <label className="toggle">
             <input type="checkbox" checked={removeBg} onChange={(event) => setRemoveBg(event.target.checked)} disabled={busy} />
-            <span>智能去背景（只有复杂背景才会下载 AI 模型）</span>
+            <span>智能去背景（只有复杂背景才会用到 AI 模型）</span>
           </label>
           <div className="button-row">
             <button type="button" className="button secondary" onClick={resetAutoFocus} disabled={busy}>

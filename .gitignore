@@ -22,3 +22,7 @@ testimage/
 vite-dev*.log
 
 vite-*.log
+
+# 抠图模型（安装时由 scripts/copy-bg-assets.mjs 下载，约 100MB）
+public/bg-model/
+public/.bg-model-tmp/

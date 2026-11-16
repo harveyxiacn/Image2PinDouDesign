@@ -102,6 +102,8 @@ async function step(label, fn) {
     checks.push(`FAIL ${label}: ${error.message}`);
   }
 }
+// SMOKE_MODEL 步骤期间记录的请求（requestId → url / 传输字节数）。
+let netLog = null;
 const overflow = () => evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth");
 
 try {
@@ -117,6 +119,10 @@ try {
     if (msg.id && pending.has(msg.id)) {
       const p = pending.get(msg.id); pending.delete(msg.id);
       msg.error ? p.rej(new Error(msg.error.message)) : p.res(msg.result);
+    } else if (msg.method === "Network.requestWillBeSent" && netLog) {
+      netLog.requests.set(msg.params.requestId, msg.params.request.url);
+    } else if (msg.method === "Network.loadingFinished" && netLog) {
+      netLog.sizes.set(msg.params.requestId, msg.params.encodedDataLength ?? 0);
     } else if (msg.method === "Inspector.targetCrashed") {
       errors.push("smoke failure: page crashed");
     } else if (msg.method === "Runtime.exceptionThrown") {
@@ -128,6 +134,7 @@ try {
     }
   });
   await send("Page.enable"); await send("Inspector.enable"); await send("Runtime.enable"); await send("Log.enable"); await send("DOM.enable");
+  await send("Network.enable");
   await viewport(1440, 900);
   await send("Page.navigate", { url });
   await waitFor("document.readyState === 'complete' && !!document.querySelector('input[type=file]')");
@@ -329,9 +336,11 @@ try {
   });
 
 
-  // 可选：SMOKE_MODEL=1 时验证「复杂背景 → AI 抠图模型」这条路径（首次会从模型 CDN 下载权重，需要联网，较慢）。
+  // 可选：SMOKE_MODEL=1 时验证「复杂背景 → AI 抠图模型」这条路径。模型文件应全部来自本站（public/bg-model/），
+  // 记录这一步里的每个请求，出现非本站主机、或提示用了兜底方式都算失败。
   if (process.env.SMOKE_MODEL === "1") {
     await step("paste a busy-background image, model matting path", async () => {
+      netLog = { requests: new Map(), sizes: new Map() };
       const before = await evaluate("document.querySelectorAll('.design-card').length");
       await evaluate(`(async () => {
         const c = document.createElement('canvas'); c.width = 420; c.height = 420; const g = c.getContext('2d');
@@ -351,14 +360,30 @@ try {
       const opened = await evaluate(`(() => { const b = [...document.querySelectorAll('button')].find((el) => el.textContent.includes('裁剪 / 去背景') && el.offsetParent !== null); if (!b) return false; b.click(); return true; })()`);
       if (!opened) throw new Error("no crop button after paste");
       await waitFor("(document.querySelector('[data-matting-line]')?.textContent ?? '').trim().length > 0", 30000);
+      await sleep(700);
       console.log("model: matting line", await evaluate("document.querySelector('[data-matting-line]')?.textContent"));
       await shot("09e-matting-busy");
       const started = Date.now();
       await click("添加为新图纸");
       await waitFor("!document.querySelector('.crop-overlay') && !document.querySelector('.converting-banner')", 300000);
       await sleep(800);
-      console.log("model: removal took ms", Date.now() - started, "toasts", await evaluate("JSON.stringify([...document.querySelectorAll('.toast')].map((t) => t.textContent.trim()))"));
+      const toasts = JSON.parse(await evaluate("JSON.stringify([...document.querySelectorAll('.toast')].map((t) => t.textContent.trim()))"));
+      console.log("model: removal took ms", Date.now() - started, "toasts", JSON.stringify(toasts));
       await shot("09f-after-model-matting");
+      const origin = new URL(url).origin;
+      const urls = [...netLog.requests.values()].filter((u) => /^https?:/i.test(u));
+      const foreign = urls.filter((u) => new URL(u).origin !== origin);
+      const modelIds = [...netLog.requests].filter(([, u]) => u.startsWith(origin) && u.includes("/bg-model/"));
+      const modelBytes = modelIds.reduce((sum, [id]) => sum + (netLog.sizes.get(id) ?? 0), 0);
+      console.log("model: hosts", JSON.stringify([...new Set(urls.map((u) => new URL(u).host))]), "requests", urls.length);
+      console.log("model: bg-model files loaded", modelIds.length, "transferred bytes", modelBytes);
+      if (foreign.length) console.log("model: FOREIGN requests", JSON.stringify(foreign.slice(0, 10)));
+      netLog = null;
+      const usedModel = toasts.some((t) => t.includes("已用 AI 模型抠图"));
+      const usedFallback = toasts.some((t) => t.includes("AI 模型没能"));
+      if (foreign.length) throw new Error(`model path contacted a non-origin host: ${foreign[0]}`);
+      if (!usedModel || usedFallback) throw new Error("toast does not report the AI model as used");
+      if (modelIds.length === 0) throw new Error("no /bg-model/ files were requested");
       return (await evaluate("document.querySelectorAll('.design-card').length")) === before + 2;
     });
   }

@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "postinstall": "node scripts/copy-bg-assets.mjs",
+    "prebuild": "node scripts/copy-bg-assets.mjs",
     "build": "tsc -b && vite build",
     "test": "vitest --run",
     "test:watch": "vitest",
