@@ -39,3 +39,41 @@
 .shop-split { padding: 6px 0 0; }
 .shop-pack { width: 84px; text-align: right; }
 .dash-onboard { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+
+.shop-more { display: none; }
+.shop-order-note { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.shop-kept { margin: 0; color: var(--leaf); }
+.shop-source { align-self: flex-start; max-width: 100%; flex-wrap: wrap; }
+.shop-source button { height: auto; min-height: 30px; padding: 4px 12px; text-align: left; }
+@media (pointer: coarse) { .shop-source button { min-height: 44px; } .shop-buy, .shop-pack { min-height: 44px; } }
+
+/* 手机：每个色号一张卡片（同一份 <table> 数据和输入框，只是换排版）。 */
+@media (max-width: 560px) {
+  .shop-wrap { overflow-x: visible; }
+  .table.shop-table, .shop-table tbody { display: block; width: 100%; min-width: 0; }
+  .shop-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .table.shop-table tr.shop-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 12px;
+    padding: 12px 14px; border-bottom: 1px solid var(--rule-soft);
+  }
+  .table.shop-table tr.shop-row:last-child { border-bottom: 0; }
+  .table.shop-table td { display: block; padding: 0; border: 0; min-width: 0; text-align: left; }
+  .table.shop-table tbody tr:hover td { background: transparent; }
+  .table.shop-table td.shop-c-code { grid-column: 1; grid-row: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .shop-more { display: inline-flex; align-items: center; }
+  .table.shop-table td.shop-c-short { grid-column: 2; grid-row: 1; text-align: right; font-weight: 600; }
+  .shop-c-short::before { content: "缺 "; font-weight: 400; }
+  .table.shop-table td.shop-c-short[data-zero="true"] { display: none; }
+  .table.shop-table td.shop-c-buy { grid-column: 1; grid-row: 2; }
+  .table.shop-table td.shop-c-cost { grid-column: 2; grid-row: 2; text-align: right; font-weight: 600; white-space: nowrap; }
+  .shop-buy { width: 100%; max-width: 220px; }
+  .table.shop-table td.shop-c-need, .table.shop-table td.shop-c-stock, .table.shop-table td.shop-c-pack, .table.shop-table td.shop-c-why { display: none; grid-column: 1 / -1; }
+  .table.shop-table tr[data-open="true"] td.shop-c-need,
+  .table.shop-table tr[data-open="true"] td.shop-c-stock,
+  .table.shop-table tr[data-open="true"] td.shop-c-pack,
+  .table.shop-table tr[data-open="true"] td.shop-c-why { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--ink-2); font-size: var(--t-small); }
+  .shop-table td[data-label]::before { content: attr(data-label); color: var(--ink-3); }
+  .shop-table .shop-pack { width: 120px; }
+  .table.shop-table tr.shop-done { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+  .table.shop-table tr.shop-done td { display: block; }
+}

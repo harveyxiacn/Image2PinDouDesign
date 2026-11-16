@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classify, folderOf, gridCapacity, headerChecks, isHashName, isImageFile, itemProgress, mismatchCount, nextWaiting, reduceBatch, summarize, announceFor, type BatchItem } from "../lib/batch";
+import { classify, folderOf, gridCapacity, headerChecks, isHashName, isImageFile, itemProgress, mismatchCount, nextWaiting, reduceBatch, summarize, announceFor, savedName, matchesFilter, readBatchStatus, type BatchItem } from "../lib/batch";
 import type { AnalyzeResult } from "../lib/recognize/types";
 
 const file = (name: string, rel = "", size = 10) => ({ name, type: "image/jpeg", size, webkitRelativePath: rel }) as unknown as File;
@@ -87,7 +87,15 @@ describe("queue reducer", () => {
     expect(items[0].force).toBe(true);
     items = reduceBatch(items, { type: "name", id: "id-a.jpg", name: "黑魔导士" });
     expect(items[0].name).toBe("黑魔导士");
-    expect(reduceBatch(items, { type: "name", id: "id-a.jpg", name: "   " })[0].name).toBe("黑魔导士");
+    // 输入框里的值原样保存：可以清空、可以带空格；保存时才 trim / 回退
+    expect(reduceBatch(items, { type: "name", id: "id-a.jpg", name: "" })[0].name).toBe("");
+    expect(reduceBatch(items, { type: "name", id: "id-a.jpg", name: "黑魔导士 " })[0].name).toBe("黑魔导士 ");
+  });
+  it("savedName trims and falls back to the file base name", () => {
+    const [it] = add(["a.jpg"]);
+    expect(savedName({ ...it, name: "  黑魔导士 " })).toBe("黑魔导士");
+    expect(savedName({ ...it, name: "   " })).toBe("a");
+    expect(savedName({ ...it, name: "" })).toBe("a");
   });
   it("marks a reviewed item verified and clears it on retry", () => {
     let items = add(["a.jpg"]);
@@ -164,5 +172,20 @@ describe("classify / headerChecks", () => {
   it("announce text mentions name and state", () => {
     const it0 = { ...add(["a.jpg"])[0] } as BatchItem;
     expect(announceFor({ ...it0, state: "notchart" })).toContain("不是图纸");
+  });
+});
+
+describe("batch filter and status default", () => {
+  const base = { id: "a", file: file("a.png"), name: "a", folder: "", tag: "", steps: [], reasons: [] } as unknown as BatchItem;
+  it("filters by category", () => {
+    const review = { ...base, state: "done", review: true } as BatchItem;
+    expect(matchesFilter(review, "review")).toBe(true);
+    expect(matchesFilter({ ...review, verifiedAt: 1 } as BatchItem, "review")).toBe(false);
+    expect(matchesFilter({ ...base, state: "notchart", review: false } as BatchItem, "notchart")).toBe(true);
+    expect(matchesFilter({ ...review, savedId: "p1" } as BatchItem, "saved")).toBe(true);
+    expect(matchesFilter(review, "all")).toBe(true);
+  });
+  it("status defaults to planned when storage is unavailable", () => {
+    expect(readBatchStatus()).toBe("planned");
   });
 });

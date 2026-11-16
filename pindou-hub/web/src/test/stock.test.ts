@@ -17,6 +17,17 @@ describe("parseBatchText", () => {
     const r = parseBatchText("Ａ１　１,000、A1*500", norm);
     expect(r.rows).toEqual([{ code: "A1", qty: 1500 }]);
   });
+  it("does not split a bare code into code + quantity", () => {
+    const known2 = new Set(["A1", "A12", "H1", "H19"]);
+    const n2 = (s: string) => { const t = s.normalize("NFKC").toUpperCase().replace(/\s+/g, ""); return known2.has(t) ? t : null; };
+    expect(parseBatchText("A12", n2).rows).toEqual([]);
+    expect(parseBatchText("H19", n2).rows).toEqual([]);
+    expect(parseBatchText("H19 300", n2).rows).toEqual([{ code: "H19", qty: 300 }]);
+    expect(parseBatchText("A1x20", n2).rows).toEqual([{ code: "A1", qty: 20 }]);
+    expect(parseBatchText("A1:20", n2).rows).toEqual([{ code: "A1", qty: 20 }]);
+    expect(parseBatchText("A1 20", n2).rows).toEqual([{ code: "A1", qty: 20 }]);
+    expect(parseBatchText("A12 x 5, H1=7", n2).rows).toEqual([{ code: "A12", qty: 5 }, { code: "H1", qty: 7 }]);
+  });
   it("reports unknown codes and dangling tokens", () => {
     const r = parseBatchText("Z99 100, A1", norm);
     expect(r.rows).toEqual([]);

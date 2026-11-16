@@ -3,10 +3,21 @@ import { renderDesignToCanvas } from "@engine/rendering";
 import type { BeadDesign } from "@engine/types";
 import { PALETTE, colorOf } from "../../lib/palette";
 import { brushCells, matrixCellAtPoint, strokeCells, type BrushSize, type MatrixCell } from "../../lib/matrixEdit";
+import { labelFontPx, labelTextColor, labelsFit, LABEL_MIN_CELL } from "../../lib/matrixLabels";
 import { Icon } from "../ui";
+import { contentPoint, isPanGesture, pinScroll, wheelZoomCell } from "./zoomMath";
 import "./pattern.css";
+import "./MatrixView.css";
 
 const MAX_PIXELS = 16_000_000;
+const CODES_KEY = "pindou.matrix.showCodes";
+
+function readStoredCodes(): boolean | null {
+  try { const v = localStorage.getItem(CODES_KEY); return v === "1" ? true : v === "0" ? false : null; } catch { return null; }
+}
+function storeCodes(on: boolean) {
+  try { localStorage.setItem(CODES_KEY, on ? "1" : "0"); } catch { /* 无痕模式等：不记住也不影响使用 */ }
+}
 
 export type MatrixTool = "pan" | "brush" | "eraser" | "pick";
 
@@ -16,12 +27,15 @@ export type MatrixTool = "pan" | "brush" | "eraser" | "pick";
  *  - brush / eraser：单指拖动连续改色 / 清空，抬笔时整笔一次提交；双指仍可缩放。
  *  - pick：点格子取色，不修改矩阵。
  *  - focusCode 高亮某个色号（其余变淡）；编辑时由调用方传 null，避免整图变淡。
+ *  - showCodes：格子里写色号（格子够大时才画，开关记在 localStorage）；不传则用上次的选择，默认开。
  */
 export default function MatrixView({
-  matrix, width, height, focusCode, labels = true,
+  matrix, width, height, focusCode, labels = true, showCodes,
   tool = "pan", brushCode = null, brushSize = 1, onCellsChange, onPickCode
 }: {
   matrix: Array<Array<string | null>>; width: number; height: number; focusCode?: string | null; labels?: boolean;
+  /** 色号初始开关；不传时读取上次记住的选择，再回退到 labels。 */
+  showCodes?: boolean;
   tool?: MatrixTool;
   brushCode?: string | null;
   brushSize?: BrushSize;
@@ -32,7 +46,7 @@ export default function MatrixView({
   const wrap = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [cell, setCell] = useState(0);
-  const [showLabels, setShowLabels] = useState(labels);
+  const [showLabels, setShowLabels] = useState(() => showCodes ?? readStoredCodes() ?? labels);
   // 缩放后要保持不动的“锚点”：内容坐标（以格为单位）对应容器内的像素位置
   const anchor = useRef<{ cx: number; cy: number; px: number; py: number } | null>(null);
 
@@ -49,7 +63,32 @@ export default function MatrixView({
     const cv = canvas.current;
     const size = cellRef.current;
     if (!cv || !size) return;
-    renderDesignToCanvas(cv, design, PALETTE, { cellSize: size, showLabels, boardLineEvery: 10, focusCode: focusCode ?? null });
+    // 色号由下面自己画：字号随格子与字数缩放，深浅底自动黑白字，非高亮色号变淡
+    renderDesignToCanvas(cv, design, PALETTE, { cellSize: size, showLabels: false, boardLineEvery: 10, focusCode: focusCode ?? null });
+    if (showLabels && labelsFit(size)) drawCodes(cv, size);
+  };
+
+  const drawCodes = (cv: HTMLCanvasElement, size: number) => {
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    const gutterX = cv.width - width * size, gutterY = cv.height - height * size;
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    let fontLen = 0;
+    for (let r = 0; r < height; r += 1) {
+      const row = matrix[r];
+      if (!row) continue;
+      for (let c = 0; c < width; c += 1) {
+        const code = row[c];
+        if (!code) continue;
+        if (code.length !== fontLen) { fontLen = code.length; ctx.font = `700 ${labelFontPx(size, fontLen)}px ui-monospace, monospace`; }
+        ctx.globalAlpha = focusCode && code !== focusCode ? 0.28 : 1;
+        ctx.fillStyle = labelTextColor(colorOf(code)?.hex);
+        ctx.fillText(code, gutterX + c * size + size / 2, gutterY + r * size + size / 2 + 0.5);
+      }
+    }
+    ctx.restore();
   };
 
   useLayoutEffect(() => {
@@ -83,7 +122,13 @@ export default function MatrixView({
 
   // ---- 指针手势：1 指平移（滚动），2 指捏合；编辑工具下 1 指改格 ----
   const ptrs = useRef(new Map<number, { x: number; y: number }>());
-  const gesture = useRef<{ d: number; cell: number } | null>(null);
+  const gesture = useRef<{ d: number; cell: number; pin: { cx: number; cy: number } } | null>(null);
+  const spaceHeld = useRef(false);
+  const [panning, setPanning] = useState(false);
+  const maxCellRef = useRef(maxCell);
+  maxCellRef.current = maxCell;
+  const zoomToRef = useRef(zoomTo);
+  zoomToRef.current = zoomTo;
   const pan = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
   const raf = useRef(0);
   const cellRef = useRef(cell);
@@ -162,21 +207,39 @@ export default function MatrixView({
     return true;
   };
 
+  /** 双指缩放 + 平移：让两指中点下的内容点始终跟着中点走 */
+  const pinZoom = (next: number, pin: { cx: number; cy: number }, mx: number, my: number) => {
+    const el = wrap.current;
+    if (!el) return;
+    const n = clampCell(next);
+    if (n === cellRef.current) {
+      const p = pinScroll(pin, n, mx, my);
+      el.scrollLeft = p.left; el.scrollTop = p.top;
+      return;
+    }
+    anchor.current = { cx: pin.cx, cy: pin.cy, px: mx, py: my };
+    setCell(n);
+  };
+
   const onDown = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest("button, input, label")) return;
-    if (editing && e.button !== 0) return;
+    const panBtn = isPanGesture(e.button, spaceHeld.current);
+    if (editing && e.button !== 0 && e.button !== 1) return;
+    if (e.button === 1) e.preventDefault();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     ptrs.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     const el = wrap.current!;
     if (ptrs.current.size === 2) {
       finishStroke(true);
       const [a, b] = [...ptrs.current.values()];
-      gesture.current = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, cell: cellRef.current };
+      const r0 = el.getBoundingClientRect();
+      const m0 = { x: (a.x + b.x) / 2 - r0.left, y: (a.y + b.y) / 2 - r0.top };
+      gesture.current = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, cell: cellRef.current, pin: contentPoint(el.scrollLeft, el.scrollTop, m0.x, m0.y, cellRef.current) };
       pan.current = null;
       return;
     }
     if (ptrs.current.size === 1) {
-      if (editing) {
+      if (editing && !panBtn) {
         const at = pointCell(e.clientX, e.clientY);
         if (tool === "pick") {
           if (at) onPickCode?.(matrix[at.r]?.[at.c] ?? null);
@@ -211,7 +274,7 @@ export default function MatrixView({
       const mx = (a.x + b.x) / 2 - r.left, my = (a.y + b.y) / 2 - r.top;
       const g = gesture.current;
       cancelAnimationFrame(raf.current);
-      raf.current = requestAnimationFrame(() => zoomTo(g.cell * (d / g.d), mx, my));
+      raf.current = requestAnimationFrame(() => pinZoom(g.cell * (d / g.d), g.pin, mx, my));
     } else if (pan.current) {
       el.scrollLeft = pan.current.sl - (e.clientX - pan.current.x);
       el.scrollTop = pan.current.st - (e.clientY - pan.current.y);
@@ -235,29 +298,57 @@ export default function MatrixView({
     pan.current = null;
   };
   const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === "+" || e.key === "=") { e.preventDefault(); zoom(1.25); }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === " " && e.target === e.currentTarget) { e.preventDefault(); spaceHeld.current = true; setPanning(true); }
+    else if (e.key === "+" || e.key === "=") { e.preventDefault(); zoom(1.25); }
     else if (e.key === "-") { e.preventDefault(); zoom(0.8); }
+    else if (e.key === "0") { e.preventDefault(); fit(); }
   };
+  const onKeyUp = (e: React.KeyboardEvent) => { if (e.key === " ") { spaceHeld.current = false; setPanning(false); } };
+  // Ctrl / ⌘ + 滚轮（触控板捏合同样走这里）：以鼠标位置为中心缩放。普通滚轮保持滚动。需要非被动监听才能阻止页面缩放。
+  useEffect(() => {
+    const el = wrap.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      zoomToRef.current(wheelZoomCell(cellRef.current, e.deltaY, e.deltaMode, 3, maxCellRef.current), e.clientX - r.left, e.clientY - r.top);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+  useEffect(() => {
+    const clear = () => { spaceHeld.current = false; setPanning(false); };
+    window.addEventListener("blur", clear);
+    return () => window.removeEventListener("blur", clear);
+  }, []);
 
   const label = editing
-    ? "拼豆图编辑：单指拖动使用当前工具，双指捏合缩放；方向键滚动，+ − 缩放"
+    ? "拼豆图编辑：单指拖动使用当前工具，双指捏合缩放并拖动；方向键滚动，+ − 缩放，0 适应宽度；按住空格或鼠标中键拖动平移；Ctrl 加滚轮缩放"
     : "拼豆图，可双指捏合缩放、拖动平移；键盘方向键滚动，+ − 缩放";
 
   return (
-    <div className="pt-matrix">
+    <div className="pt-matrix" data-codes={showLabels && labelsFit(cell) ? "on" : "off"}>
       <div className="pt-matrix-tools">
-        <button className="btn btn-sm" onClick={() => zoom(0.8)} aria-label="缩小">−</button>
-        <button className="btn btn-sm" onClick={() => zoom(1.25)} aria-label="放大">+</button>
-        <button className="btn btn-sm btn-ghost" onClick={fit}>适应宽度</button>
-        <label className="pt-check" style={{ minHeight: 0, marginLeft: "auto" }}>
-          <input type="checkbox" checked={showLabels} onChange={(e) => setShowLabels(e.target.checked)} />色号
+        <button className="btn btn-sm" onClick={() => zoom(0.8)} aria-label="缩小" title="缩小（−）">−</button>
+        <button className="btn btn-sm" onClick={() => zoom(1.25)} aria-label="放大" title="放大（+）">+</button>
+        <button className="btn btn-sm btn-ghost" onClick={fit} title="适应宽度（0）">适应宽度</button>
+        <label className="pt-check pt-codes-toggle">
+          <input type="checkbox" checked={showLabels} onChange={(e) => { setShowLabels(e.target.checked); storeCodes(e.target.checked); }} />显示色号
         </label>
         <span className="meta num">{width}×{height}</span>
       </div>
-      <div className="pt-matrix-scroll" ref={wrap} tabIndex={0} role="group" aria-label={label} data-tool={tool}
-        onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onCancel} onKeyDown={onKey}>
+      <div className="pt-matrix-scroll" ref={wrap} tabIndex={0} role="group" aria-label={label} data-tool={tool} data-panning={panning ? "true" : undefined}
+        onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onCancel} onKeyDown={onKey} onKeyUp={onKeyUp} onMouseDown={(e) => { if (e.button === 1) e.preventDefault(); }}>
         <canvas ref={canvas} />
       </div>
+      {showLabels && cell > 0 && !labelsFit(cell) ? (
+        <p className="meta" style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={() => zoomTo(Math.max(LABEL_MIN_CELL + 2, cell))}>放大后显示色号</button>
+          <span>（格子 {cell}px，需要 ≥ {LABEL_MIN_CELL}px）</span>
+        </p>
+      ) : null}
       {focusCode ? <p className="meta" style={{ marginTop: 6 }}><Icon name="search" size={12} /> 正在高亮 {focusCode}</p> : null}
     </div>
   );

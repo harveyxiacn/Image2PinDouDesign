@@ -1,0 +1,41 @@
+/* 手机底栏「更多」按钮 + 底部弹层列表 */
+@media (max-width: 820px) {
+  .tabbar button.tab-more {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 48px;
+    color: var(--ink-3); font: inherit; font-size: var(--t-meta); font-weight: 500; background: none; border: 0;
+    border-radius: var(--r-ctl); cursor: pointer; padding: 0;
+  }
+  .tabbar button.tab-more[aria-current="page"] { color: var(--ink); }
+}
+@media (max-width: 820px) and (prefers-reduced-motion: no-preference) {
+  .tabbar button.tab-more[aria-current="page"]::after { content: ""; width: 16px; height: 3px; border-radius: 999px; background: var(--iron); margin-top: 1px; }
+}
+.more-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.more-list li + li { border-top: 1px solid var(--rule-soft); }
+.more-row {
+  display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 8px 4px;
+  color: var(--ink); text-decoration: none; border-radius: var(--r-ctl);
+}
+.more-row[aria-current="page"] { color: var(--iron); }
+.more-row > svg { flex: none; }
+.more-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.more-text b { font-weight: 600; }
+.more-text small { color: var(--ink-3); font-size: var(--t-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.more-sync { display: flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: var(--t-meta); min-width: 0; }
+.more-sync span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 点按：去掉 300ms 双击缩放等待（touch-action: manipulation 仍允许捏合与滚动） */
+a, button, summary, select, label, [role="button"], input:not([type="text"]):not([type="search"]):not([type="number"]) { touch-action: manipulation; }
+
+/* 键盘快捷键帮助 + 侧栏入口（仅桌面可见，手机没有侧栏） */
+.kb { display: flex; flex-direction: column; gap: 14px; }
+.kb-group h4 { margin: 0 0 6px; }
+.kb-group dl { margin: 0; display: flex; flex-direction: column; }
+.kb-row { display: grid; grid-template-columns: minmax(96px, 36%) minmax(0, 1fr); gap: 10px; padding: 6px 0; border-top: 1px solid var(--rule-soft); align-items: baseline; }
+.kb-row dt { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.kb-row dt i { font-style: normal; color: var(--ink-4); }
+.kb-row dd { margin: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+kbd { display: inline-block; min-width: 22px; padding: 1px 6px; text-align: center; font: 600 12px/1.5 var(--font-code); color: var(--ink); background: var(--paper-sunk); border: 1px solid var(--rule-strong); border-bottom-width: 2px; border-radius: 5px; }
+.kb-open { width: 100%; border: 0; background: none; font: inherit; cursor: pointer; text-align: left; margin-bottom: 4px; }
+.kb-open kbd { min-width: 20px; padding: 0 5px; }
+@media (max-width: 520px) { .kb-row { grid-template-columns: 1fr; gap: 2px; } }

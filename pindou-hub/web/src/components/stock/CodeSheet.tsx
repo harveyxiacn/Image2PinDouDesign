@@ -5,6 +5,7 @@ import { colorOf } from "../../lib/palette";
 import { demandByCode, stockByCode, stocktakeTxn, isActive } from "../../lib/inventory";
 import { STATUS_LABEL, uid } from "../../lib/model";
 import { levelOf } from "../../lib/stockview";
+import { parseFen, perThousandText, unitFromFen, yuanText } from "../../lib/pricing";
 import { addTxns, deviceId } from "./actions";
 import "./stock.css";
 
@@ -25,7 +26,7 @@ export function CodeSheet({ code, onClose }: { code: string; onClose: () => void
 
   const [actual, setActual] = useState("");
   const [buyQty, setBuyQty] = useState("");
-  const [price, setPrice] = useState("");
+  const [paid, setPaid] = useState("");
   const [min, setMin] = useState(data.prefs.minStock[code] !== undefined ? String(data.prefs.minStock[code]) : "");
 
   const quick = async (delta: number) => {
@@ -42,10 +43,14 @@ export function CodeSheet({ code, onClose }: { code: string; onClose: () => void
     const qty = Math.round(Number(buyQty));
     if (!(qty > 0)) return;
     const at = Date.now();
-    const unit = Number(price) > 0 ? Number(price) : undefined;
-    await addTxns([{ id: uid("t"), code, delta: qty, kind: "purchase", unitPrice: unit, device: deviceId(), at, updatedAt: at }], `${code} 入库 ${fmt(qty)}`);
-    setBuyQty(""); setPrice("");
+    const fen = parseFen(paid);
+    const unit = fen !== undefined ? unitFromFen(fen, qty) : undefined; // 元/颗：这次花的钱 ÷ 这次入库的颗数
+    await addTxns([{ id: uid("t"), code, delta: qty, kind: "purchase", unitPrice: unit, device: deviceId(), at, updatedAt: at }], `${code} 入库 ${fmt(qty)}${fen !== undefined ? ` · ${yuanText(fen)}` : ""}`);
+    setBuyQty(""); setPaid("");
   };
+  const qtyNow = Math.round(Number(buyQty)) || 0;
+  const paidFen = parseFen(paid);
+  const derived = paidFen !== undefined && qtyNow > 0 ? perThousandText(paidFen, qtyNow) : undefined;
   const saveMin = async () => {
     const minStock = { ...data.prefs.minStock };
     const n = Math.round(Number(min));
@@ -85,9 +90,14 @@ export function CodeSheet({ code, onClose }: { code: string; onClose: () => void
         <span className="label">入库</span>
         <div className="sk-inline">
           <label className="field"><span>数量</span><input className="input num" type="number" inputMode="numeric" min={0} value={buyQty} onChange={(e) => setBuyQty(e.target.value)} /></label>
-          <label className="field"><span>单价（元/颗，选填）</span><input className="input num" type="number" inputMode="decimal" min={0} step="0.001" value={price} onChange={(e) => setPrice(e.target.value)} /></label>
+          <label className="field"><span>这次花了多少钱（元，选填）</span><input className="input num" type="number" inputMode="decimal" min={0} step="0.01" value={paid} onChange={(e) => setPaid(e.target.value)} placeholder="买这些一共付了多少" data-buy-paid /></label>
           <button className="btn btn-primary" disabled={!(Number(buyQty) > 0)} onClick={buy}>入库</button>
         </div>
+        <div className="sk-packs" role="group" aria-label="按包装加数量">
+          {[500, 1200, 4000].map((n) => <button key={n} type="button" className="btn btn-sm" data-pack={n} onClick={() => setBuyQty(String(qtyNow + n))}>+{fmt(n)} 颗一包</button>)}
+          {qtyNow > 0 ? <button type="button" className="btn btn-ghost btn-sm" onClick={() => setBuyQty("")}>清空数量</button> : null}
+        </div>
+        {derived ? <p className="meta sk-derive" role="status" data-buy-derived>{derived}（每颗 ¥{(paidFen! / 100 / qtyNow).toPrecision(3)}），统计里按这个价格算。</p> : null}
       </div>
 
       <div className="sk-sec">

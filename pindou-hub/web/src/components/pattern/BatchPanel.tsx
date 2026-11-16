@@ -1,6 +1,7 @@
 // 焦点元素：队列清单——每一张的状态一眼可见（等待 / 识别中 / 完成 / 不是图纸 / 失败）。
 import { useEffect, useMemo, useRef, useState } from "react";
-import { announceFor, itemProgress, summarize, isImageFile, isHashName, type BatchItem } from "../../lib/batch";
+import { announceFor, itemProgress, summarize, isImageFile, isHashName, savedName, matchesFilter, readBatchStatus, writeBatchStatus, type BatchFilter, type BatchItem } from "../../lib/batch";
+import { useLeaveGuard } from "./useLeaveGuard";
 import { METHOD_LABEL, totalOf, type PatternStatus } from "../../lib/model";
 import { Icon, fmt, toast, DiffNumber } from "../ui";
 import Progress from "./Progress";
@@ -46,17 +47,46 @@ function StatusChip({ it }: { it: BatchItem }) {
   }
 }
 
+/** “⋯”更多操作：按钮 + 展开的小菜单；Esc / 点外面关闭。 */
+function RowMenu({ label, items }: { label: string; items: { text: string; run: () => void }[] }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: Event) => { if (!box.current?.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setOpen(false); btn.current?.focus(); } };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("pointerdown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  return (
+    <div className="bt-menu" ref={box}>
+      <button ref={btn} type="button" className="btn btn-sm btn-ghost bt-more" aria-label={label} aria-haspopup="true" aria-expanded={open} onClick={() => setOpen((o) => !o)}>⋯</button>
+      {open ? (
+        <div className="bt-menu-pop" role="group" aria-label={label}>
+          {items.map((m) => <button key={m.text} type="button" className="bt-menu-item" onClick={() => { setOpen(false); m.run(); }}>{m.text}</button>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+const FILTER_LABEL: Record<BatchFilter, string> = { all: "全部", review: "需检查", notchart: "不是图纸", saved: "已保存" };
+
 export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: BatchItem) => void; onGenerate: (file: File) => void }) {
   const items = useBatch();
   const sum = useMemo(() => summarize(items), [items]);
   const files = useRef<HTMLInputElement>(null);
   const folder = useRef<HTMLInputElement>(null);
-  const [plan, setPlan] = useState(false);
+  const [status, setStatus] = useState<PatternStatus>(readBatchStatus);
+  const [filter, setFilter] = useState<BatchFilter>("all");
   const [saving, setSaving] = useState(false);
   const [over, setOver] = useState(false);
   const [live, setLive] = useState("");
   const prev = useRef(new Map<string, string>());
-  const status: PatternStatus = plan ? "planned" : "idea";
+  const plan = status === "planned";
+  const chooseStatus = (s: PatternStatus) => { setStatus(s); writeBatchStatus(s === "idea" ? "idea" : "planned"); };
 
   // 每张识别结束时播报一句（live region）
   useEffect(() => {
@@ -92,7 +122,7 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
     finally { setSaving(false); }
   };
   const saveOne = async (it: BatchItem) => {
-    try { await saveItem(it, status); toast(`已保存“${it.name}”`); } catch (e) { toast(e instanceof Error ? e.message : "保存失败"); }
+    try { await saveItem(it, status); toast(`已保存“${savedName(it)}”`); } catch (e) { toast(e instanceof Error ? e.message : "保存失败"); }
   };
 
   const empty = items.length === 0;
@@ -110,6 +140,15 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
     }
   };
   const unsavedDone = items.filter((it) => it.state === "done" && !it.savedId).length;
+  useLeaveGuard(unsavedDone > 0);
+  const counts: Record<BatchFilter, number> = {
+    all: items.length,
+    review: items.filter((it) => matchesFilter(it, "review")).length,
+    notchart: items.filter((it) => matchesFilter(it, "notchart")).length,
+    saved: items.filter((it) => matchesFilter(it, "saved")).length
+  };
+  const activeFilter: BatchFilter = counts[filter] ? filter : "all"; // 筛选项变空时自动回到“全部”
+  const shown = activeFilter === "all" ? items : items.filter((it) => matchesFilter(it, activeFilter));
   const hashItems = items.filter((it) => !it.savedId && isHashName(it.name));
   const notchartItems = items.filter((it) => it.state === "notchart" && !it.savedId);
   const renameByFolder = () => {
@@ -138,7 +177,7 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
         <span className="pt-drop-icon"><Icon name="upload" /></span>
         <div>
           <h3>{empty ? "一次选很多张图纸" : "继续添加"}</h3>
-          {empty ? <p className="meta">逐张自动识别，识别完可一起保存到图库。{native ? "" : "推荐选整个文件夹：文件夹名会作为标签，并按内容哈希自动跳过重复图片。"}</p> : null}
+          {empty ? <p className="meta">逐张自动识别，识别完可一起保存到图库。{native ? "" : "推荐选整个文件夹：文件夹名会作为标签，并自动跳过内容完全相同的重复图片。"}</p> : null}
         </div>
         <div className="row bt-pick">
           {!native ? <button type="button" className="btn btn-primary" onClick={() => void pickFolder()}><Icon name="gallery" />选择文件夹</button> : null}
@@ -168,13 +207,21 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
           </div>
           <Progress value={sum.active ? sum.progress : 1} label="批量识别进度" className="bt-bar" />
 
+          {counts.review + counts.notchart + counts.saved > 0 ? (
+            <div className="seg bt-filter" role="group" aria-label="筛选队列">
+              {(["all", "review", "notchart", "saved"] as const).filter((f) => f === "all" || counts[f] > 0).map((f) => (
+                <button key={f} type="button" aria-pressed={activeFilter === f} onClick={() => setFilter(f)}>{FILTER_LABEL[f]} <span className="num">{counts[f]}</span></button>
+              ))}
+            </div>
+          ) : null}
+
           <ul className="bt-list">
-            {items.map((it) => (
+            {shown.map((it) => (
               <li key={it.id} className="bt-item" data-state={it.state} data-review={it.review} data-verified={!!it.verifiedAt} data-saved={!!it.savedId}>
                 <div className="bt-main">
                   <div className="bt-title">
                     <input className="input bt-name bt-name-input" value={it.name} aria-label={`${it.name} 的名称`} disabled={!!it.savedId} onChange={(e) => batchStore.dispatch({ type: "name", id: it.id, name: e.target.value })} />
-                    {isHashName(it.name) ? <span className="chip chip-amber" title="文件名像哈希值，建议改成可读的名称">哈希名</span> : null}
+                    {isHashName(it.name) ? <span className="chip chip-amber" title="文件名是一串乱码，建议改成可读的名称">文件名是乱码</span> : null}
                     <StatusChip it={it} />
                   </div>
                   <div className="bt-detail meta">
@@ -189,7 +236,7 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
                       </>
                     ) : null}
                     {it.state === "notchart" ? <>{it.error || "没有找到拼豆格子或色号图例"}</> : null}
-                    {it.state === "duplicate" ? <>图库里已经有同一张图（SHA-256 相同），已跳过识别</> : null}
+                    {it.state === "duplicate" ? <>图库里已经有同一张图（内容完全相同），已跳过识别</> : null}
                     {it.state === "failed" ? <>{it.error}</> : null}
                     {it.state === "waiting" ? <>排队中</> : null}
                     {it.state === "cancelled" ? <>未识别</> : null}
@@ -204,8 +251,12 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
                   {it.state === "done" && !it.savedId ? (
                     <>
                       {it.review ? <button type="button" className="btn btn-sm btn-iron" onClick={() => onReview(it)}>检查</button> : <button type="button" className="btn btn-sm" onClick={() => onReview(it)}>查看</button>}
-                      {it.review ? <button type="button" className="btn btn-sm btn-ghost" onClick={() => batchStore.dispatch({ type: "verify", id: it.id })}>标为已核对</button> : null}
-                      {it.review ? <button type="button" className="btn btn-sm btn-ghost" onClick={() => void saveOne(it)}>仍然保存</button> : <button type="button" className="btn btn-sm" onClick={() => void saveOne(it)}>保存</button>}
+                      {it.review ? (
+                        <RowMenu label={`${it.name} 的更多操作`} items={[
+                          { text: "标为已核对", run: () => batchStore.dispatch({ type: "verify", id: it.id }) },
+                          { text: "仍然保存", run: () => void saveOne(it) }
+                        ]} />
+                      ) : <button type="button" className="btn btn-sm" onClick={() => void saveOne(it)}>保存</button>}
                     </>
                   ) : null}
                   {it.state === "notchart" ? (
@@ -225,15 +276,15 @@ export default function BatchPanel({ onReview, onGenerate }: { onReview: (item: 
 
           <div className="bt-foot">
             <div className="seg" role="group" aria-label="保存后的状态">
-              <button type="button" aria-pressed={!plan} onClick={() => setPlan(false)}>收藏</button>
-              <button type="button" aria-pressed={plan} onClick={() => setPlan(true)}>计划拼</button>
+              <button type="button" aria-pressed={plan} onClick={() => chooseStatus("planned")}>计划拼</button>
+              <button type="button" aria-pressed={!plan} onClick={() => chooseStatus("idea")}>收藏</button>
             </div>
             <span className="spacer" />
             <span className="meta">{unsavedDone ? <><DiffNumber value={unsavedDone} /> 张待保存</> : "没有待保存的"}{sum.review ? `，${sum.review} 张带检查提示` : ""}</span>
             {hashItems.length ? <button type="button" className="btn btn-sm" onClick={renameByFolder}>按文件夹改名 {hashItems.length}</button> : null}
             {notchartItems.length ? <button type="button" className="btn" onClick={() => void saveIdeas()}>把 {notchartItems.length} 张不是图纸的存为收藏</button> : null}
             {sum.savable && sum.review ? <button type="button" className="btn" onClick={() => void saveAll(false)} disabled={saving}>{saving ? "保存中…" : `只保存干净项 ${sum.savable}`}</button> : null}
-            <button type="button" className="btn btn-iron" onClick={() => void saveAll(true)} disabled={!unsavedDone || saving}>{saving ? "保存中…" : "接受全部并保存"}</button>
+            <button type="button" className="btn btn-iron" onClick={() => void saveAll(true)} disabled={!unsavedDone || saving}>{saving ? "保存中…" : plan ? "全部保存为计划拼" : "全部保存为收藏"}</button>
           </div>
           {sum.saved && !sum.savable ? <p className="meta bt-done"><a href="#/gallery">去图库看看 →</a></p> : null}
         </section>

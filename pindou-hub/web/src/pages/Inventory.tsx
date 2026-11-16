@@ -70,7 +70,7 @@ export default function Inventory() {
           ) : null}
         </div>
         <div className="row">
-          <input className="input inv-search" type="search" placeholder="搜索色号或颜色名" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="搜索" />
+          <input className="input inv-search" type="search" placeholder="搜索色号或颜色名" title="搜索（按 / 跳到这里）" data-quick-search value={query} onChange={(e) => setQuery(e.target.value)} aria-label="搜索" />
           <div className="inv-scroll"><div className="seg" role="group" aria-label="系列">
             <button aria-pressed={series === ""} onClick={() => setSeries("")}>全部</button>
             {seriesList.map((s) => <button key={s} aria-pressed={series === s} onClick={() => setSeries(s)}>{s}</button>)}

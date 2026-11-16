@@ -4,7 +4,7 @@ import { analyzePattern } from "../../lib/recognize/assistant";
 import type { AnalyzeResult } from "../../lib/recognize/types";
 import { imageContentId, loadPixelSource, saveImage } from "../../lib/images";
 import { getSnapshot } from "../../lib/db";
-import { reduceBatch, nextWaiting, type BatchAction, type BatchItem } from "../../lib/batch";
+import { reduceBatch, nextWaiting, savedName, type BatchAction, type BatchItem } from "../../lib/batch";
 import type { PatternStatus } from "../../lib/model";
 import { createPattern } from "./save";
 import { parseTags } from "./SaveForm";
@@ -80,7 +80,7 @@ export async function saveItem(it: BatchItem, status: PatternStatus): Promise<st
   const meta = await saveImage(it.file, it.file.name || it.name, "source");
   const method = res.method === "none" ? "manual" : res.method;
   const p = await createPattern(
-    { name: it.name, tags: parseTags(it.tag), status, copies: 1 },
+    { name: savedName(it), tags: parseTags(it.tag), status, copies: 1 },
     { kind: "recognized", method, counts: res.counts, imageId: meta.id, width: res.grid?.grid.cols, height: res.grid?.grid.rows, matrix: res.grid?.matrix, confidence: res.confidence, colorMatch: res.colorMatch, reviewReasons: it.reasons.length ? it.reasons : undefined, verifiedAt: it.verifiedAt }
   );
   batchStore.dispatch({ type: "saved", id: it.id, patternId: p.id });
@@ -92,7 +92,7 @@ export async function saveIdea(it: BatchItem): Promise<string | null> {
   if (it.savedId || (it.state !== "notchart" && it.state !== "done")) return null;
   const meta = await saveImage(it.file, it.file.name || it.name, "source");
   const p = await createPattern(
-    { name: it.name, tags: parseTags(it.tag), status: "idea", copies: 1 },
+    { name: savedName(it), tags: parseTags(it.tag), status: "idea", copies: 1 },
     { kind: "recognized", method: "manual", counts: {}, imageId: meta.id }
   );
   batchStore.dispatch({ type: "saved", id: it.id, patternId: p.id });

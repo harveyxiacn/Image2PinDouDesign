@@ -30,3 +30,38 @@
 .purchase-chip { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px 0 4px; font-variant-numeric: tabular-nums; }
 .purchase-avoid { margin: 8px 0 0; padding-left: 18px; color: var(--ink-2); }
 .purchase-avoid li { margin: 4px 0; }
+
+.purchase-badge { margin-left: 6px; white-space: nowrap; }
+.purchase-reco { margin: 16px 0; padding: 20px 22px; border-color: var(--iron); background: var(--iron-wash); display: flex; flex-direction: column; gap: 10px; }
+.purchase-reco-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.purchase-reco-head .purchase-badge:first-child { margin-left: 0; }
+.purchase-reco h2 { font-size: var(--t-h2, 1.4rem); margin: 0; overflow-wrap: anywhere; }
+.purchase-reco-nums { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 20px; }
+.purchase-reco-nums > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.purchase-reco-nums b { font-size: var(--t-h3); font-weight: 600; }
+.purchase-reco-nums .purchase-price { font-size: var(--t-display); }
+.purchase-why { margin: 0; }
+.purchase-reco-actions { flex-wrap: wrap; gap: 8px; }
+.purchase-reco-actions .btn svg { width: 16px; height: 16px; }
+.purchase-card-tags { display: flex; flex-wrap: wrap; gap: 4px; min-height: 22px; }
+.purchase-card-tags .purchase-badge:first-child { margin-left: 0; }
+@media (max-width: 600px) {
+  .purchase-reco { padding: 16px; }
+  .purchase-reco-nums { grid-template-columns: minmax(0, 1fr); }
+}
+
+.purchase-detail { margin: 8px 0; padding: 0; }
+.purchase-detail > summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 12px 16px; cursor: pointer; min-height: 44px; }
+.purchase-detail[data-rec="true"] { border-color: var(--iron); }
+.purchase-detail-name { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.purchase-detail-name .purchase-badge:first-of-type { margin-left: 8px; }
+.purchase-detail-body { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+.purchase-group-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-bottom: 4px; }
+.purchase-sup td, .purchase-sup th { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.purchase-code { display: inline-flex; align-items: center; gap: 6px; }
+.purchase-hint { margin: 0; }
+.purchase-detail-actions { flex-wrap: wrap; gap: 8px; }
+.purchase-left { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; color: var(--ink-2); font-size: var(--t-small); }
+.purchase-left b { color: var(--ink); font-weight: 600; }
+.purchase-controls .seg { flex-wrap: wrap; }
+@media (pointer: coarse) { .purchase-controls .seg button { height: 40px; } }

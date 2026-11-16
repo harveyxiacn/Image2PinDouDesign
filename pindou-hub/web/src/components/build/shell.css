@@ -1,0 +1,5 @@
+/* 拼装模式全屏：隐藏侧栏与手机底部导航，页面不再滚动。 */
+.shell[data-fullscreen] { display: block; }
+.shell[data-fullscreen] .rail,
+.shell[data-fullscreen] .tabbar { display: none; }
+.shell[data-fullscreen] .main { padding: 0; max-width: none; }

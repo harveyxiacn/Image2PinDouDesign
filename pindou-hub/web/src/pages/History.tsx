@@ -7,7 +7,8 @@ import { toast } from "../components/ui";
 import { useData, putRecords, softDelete } from "../lib/db";
 import { countsToCsv } from "../lib/inventory";
 import { METHOD_LABEL, totalOf, type Txn, type TxnKind } from "../lib/model";
-import { groupLedger, limitGroups, txnsToCsvRows, type LedgerGroup } from "../lib/stockview";
+import { groupLedger, limitGroups, repriceTxns, txnsToCsvRows, type LedgerGroup } from "../lib/stockview";
+import { parseFen, yuanText } from "../lib/pricing";
 import { downloadText } from "../components/stock/download";
 import "./History.css";
 
@@ -54,6 +55,15 @@ export default function History() {
       setSay(`已恢复 ${originals.length} 条记录`);
     });
   };
+  const setPrice = async (g: Extract<LedgerGroup, { type: "txns" }>, fen: number | undefined) => {
+    const next = repriceTxns(g.txns, fen, Date.now());
+    if (!next.length) return;
+    const before = g.txns.filter((t) => t.kind === "purchase" && t.delta > 0);
+    await putRecords("txns", next);
+    const msg = fen === undefined ? "已清除这一批的价格" : `已记下这一批花了 ${yuanText(fen)}`;
+    setSay(msg);
+    toast(msg, { label: "撤销", run: () => { void putRecords("txns", before.map((t) => ({ ...t, updatedAt: Date.now() + 1 }))); } });
+  };
   const exportCsv = () => downloadText("拼豆库存流水.csv", countsToCsv(txnsToCsvRows(data.txns), [["time", "时间"], ["code", "色号"], ["delta", "数量"], ["kind", "类型"], ["unitPrice", "单价"], ["note", "备注"], ["batch", "批次"]]), "text/csv;charset=utf-8");
 
   return (
@@ -90,7 +100,7 @@ export default function History() {
                       <div className="meta">{METHOD_LABEL[g.pattern.method]} · {Object.keys(g.pattern.counts).length} 色 · {fmt(totalOf(g.pattern.counts))} 颗</div>
                     </div>
                   </div>
-                ) : <TxnGroup key={g.key} g={g} onUndo={() => undo(g)} onRestore={() => restore(g.txns)} />)}
+                ) : <TxnGroup key={g.key} g={g} onUndo={() => undo(g)} onRestore={() => restore(g.txns)} onPrice={(fen) => setPrice(g, fen)} />)}
               </div>
             </section>
           ))}
@@ -105,8 +115,10 @@ export default function History() {
   );
 }
 
-function TxnGroup({ g, onUndo, onRestore }: { g: Extract<LedgerGroup, { type: "txns" }>; onUndo: () => void; onRestore: () => void }) {
+function TxnGroup({ g, onUndo, onRestore, onPrice }: { g: Extract<LedgerGroup, { type: "txns" }>; onUndo: () => void; onRestore: () => void; onPrice: (fen: number | undefined) => void | Promise<void> }) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
   if (g.undone) {
     return (
       <div className="hist-group hist-undone">
@@ -120,6 +132,13 @@ function TxnGroup({ g, onUndo, onRestore }: { g: Extract<LedgerGroup, { type: "t
   }
   const preview = g.txns.slice(0, 6);
   const price = g.txns.reduce((a, t) => a + (t.unitPrice ? t.unitPrice * t.delta : 0), 0);
+  const canPrice = g.kind === "purchase" && g.txns.some((t) => t.kind === "purchase" && t.delta > 0);
+  const openEdit = () => { setDraft(price > 0 ? (Math.round(price * 100) / 100).toFixed(2) : ""); setEditing(true); };
+  const savePrice = async () => {
+    if (draft.trim() !== "" && parseFen(draft) === undefined) return;
+    await onPrice(parseFen(draft));
+    setEditing(false);
+  };
   const panelId = `hist-d-${g.key}`;
   return (
     <div className="hist-group">
@@ -130,9 +149,19 @@ function TxnGroup({ g, onUndo, onRestore }: { g: Extract<LedgerGroup, { type: "t
           <span className={`hist-delta ${signCls(g)}`}>{g.delta > 0 ? "+" : g.delta < 0 ? "−" : "±"}{fmt(Math.abs(g.delta))} 颗</span>
           <span className="meta">{g.codes} 色{price > 0 ? ` · ¥${price.toFixed(2)}` : ""}</span>
           <span className="spacer" /><span className="meta">{fmtTime(g.at)}</span>
-          <button className="btn btn-ghost btn-sm" onClick={onUndo} aria-label="撤销这一组"><Icon name="trash" />撤销</button>
+          <button className="btn btn-ghost btn-sm" onClick={onUndo} aria-label="撤销这一组"><Icon name="back" />撤销</button>
         </div>
         {g.note ? <div className="hist-note">{g.note}</div> : null}
+        {canPrice ? (editing ? (
+          <div className="hist-price" data-hist-price-edit>
+            <label className="field"><span>这一批一共花了（元）</span><input className="input num" type="number" inputMode="decimal" min={0} step="0.01" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="留空 = 不记价格" autoFocus /></label>
+            <button className="btn btn-primary btn-sm" onClick={savePrice}>保存</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditing(false)}>取消</button>
+            <p className="meta hist-price-note">按颗数分摊到这一批的每个色号；统计里的花费会跟着更新。</p>
+          </div>
+        ) : (
+          <button className="btn btn-ghost btn-sm hist-price-btn" data-hist-price onClick={openEdit}>{price > 0 ? `改价格（现为 ${yuanText(Math.round(price * 100))}）` : "补填价格"}</button>
+        )) : null}
         {g.txns.length > 1 || g.txns.some((t) => t.unitPrice) ? (
           <button className="hist-expand" aria-expanded={open} aria-controls={panelId} onClick={() => setOpen(!open)}>
             <span className="hist-chips" aria-hidden={open}>

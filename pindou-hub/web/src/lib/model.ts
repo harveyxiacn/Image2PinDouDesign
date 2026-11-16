@@ -1,5 +1,7 @@
 // 拼豆仓的数据模型。所有记录都带 updatedAt / deleted，便于局域网多设备“后写者胜”合并。
 
+import type { BuildState } from "./build";
+
 export type Counts = Record<string, number>;
 
 export type PatternStatus = "idea" | "planned" | "making" | "done";
@@ -37,6 +39,8 @@ export type Pattern = {
   notes: string;
   /** 已从库存扣减（完成时），避免重复扣 */
   consumed?: boolean;
+  /** 拼装模式的进度（随图纸同步），见 lib/build.ts */
+  build?: BuildState;
   createdAt: number;
   updatedAt: number;
   deleted?: boolean;
@@ -90,8 +94,20 @@ export type SharedPrefs = {
   packSizes: Counts;
   /** 用户点过“录入现有库存”或“跳过”的时间；用来区分“未录入库存”和“库存真的为 0” */
   inventoryStartedAt?: number;
+  /** 最近一次“复制采购清单/文本”时保存的下单快照；入库时可按它核对，随偏好同步 */
+  lastOrder?: LastOrder;
   updatedAt: number;
   deleted?: boolean;
+};
+
+/** 下单快照：复制采购文本那一刻，每个色号买了多少。 */
+export type LastOrder = {
+  at: number;
+  items: Array<{ code: string; qty: number }>;
+  planId?: string;
+  cost?: number;
+  /** 已按这份快照入过库的时间；有值就不再提示 */
+  receivedAt?: number;
 };
 
 export type DeviceSettings = {

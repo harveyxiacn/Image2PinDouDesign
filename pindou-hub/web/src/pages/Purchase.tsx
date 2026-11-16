@@ -1,14 +1,78 @@
 // 采购方案：把用户 2026-11-06 确认的套装/补充包报价，按当前缺口算成 6 个方案。
 // 纯前端计算（web/src/lib/purchase.ts），不依赖服务端；应用方案时把每色购买量带回采购清单。
 import { useEffect, useMemo, useState } from "react";
-import { Bead, Icon, fmt, useRoute } from "../components/ui";
+import { Bead, Icon, fmt, toast, useRoute } from "../components/ui";
+import { copyText } from "../components/stock/download";
 import { useData } from "../lib/db";
-import { demandByCode, isActive } from "../lib/inventory";
+import { demandByCode, isActive, needAfterStock, stockByCode, withLoss as applyLoss } from "../lib/inventory";
 import { totalOf } from "../lib/model";
+import { setLastOrder } from "../lib/lastOrder";
 import {
-  PURCHASE_OFFERS, buildPurchasePlans, formatMoney, formatPacks, type PurchaseOffer, type PurchasePlan
+  MIN_PACKS_500, PURCHASE_OFFERS, PURCHASE_PREFER_LABEL, applyPlanToEdits, buildPurchasePlans, formatMoney, formatPacks, formatPurchaseText, groupSupplements,
+  leftoverBreakdown, makeOrderSnapshot, parsePrefer, recommendationReason, type PurchaseOffer, type PurchasePlan, type PurchasePrefer
 } from "../lib/purchase";
 import "./Purchase.css";
+
+const PACK_LABEL = { p4000: "4000 颗装", p1200: "1200 颗装", p500: "500 颗装" } as const;
+const PREFER_KEY = "ph.purchase.prefer";
+const PREFER_ORDER: PurchasePrefer[] = ["balanced", "cheapest", "leastWaste"];
+function readPrefer(): PurchasePrefer {
+  try { return parsePrefer(localStorage.getItem(PREFER_KEY)); } catch { return "balanced"; }
+}
+const pct = (v: number) => `${(Math.round(v * 1000) / 10).toFixed(1)}%`;
+
+function Badges({ plan }: { plan: PurchasePlan }) {
+  return (
+    <>
+      {plan.recommended ? <span className="chip chip-leaf purchase-badge">推荐</span> : null}
+      {plan.cheapest ? <span className="chip purchase-badge">最省钱</span> : null}
+      {plan.leastWaste ? <span className="chip purchase-badge">最少浪费</span> : null}
+    </>
+  );
+}
+
+function SupplementDetail({ plan, price1200, href, onCopy }: { plan: PurchasePlan; price1200: number; href: string; onCopy: (plan: PurchasePlan) => void }) {
+  const groups = groupSupplements(plan, price1200);
+  const copy = () => onCopy(plan);
+  return (
+    <details className="panel purchase-detail" data-rec={plan.recommended}>
+      <summary>
+        <span className="purchase-detail-name"><b>{plan.name}</b><Badges plan={plan} /></span>
+        <span className="meta num">{formatMoney(plan.totalCost)} · 浪费 {pct(plan.wastePct)}</span>
+      </summary>
+      <div className="purchase-detail-body">
+        {plan.setOffer ? <p className="meta">套装：{plan.setOffer.name}，{formatMoney(plan.setPrice)}；套装里用不上的颜色 {fmt(plan.unusedSetBeads)} 颗。</p> : null}
+        {groups.length ? groups.map((group) => (
+          <div className="purchase-group" key={group.size}>
+            <div className="purchase-group-head"><b>{PACK_LABEL[group.size]}</b><span className="meta num">共 {group.packs} 包 · 小计 {formatMoney(group.cost)}</span></div>
+            <div className="table-wrap">
+              <table className="table purchase-sup">
+                <thead><tr><th>色号</th><th className="r">包数</th><th className="r">买到</th><th className="r">需要</th><th className="r">剩余</th><th className="r">小计</th></tr></thead>
+                <tbody>
+                  {group.rows.map((row) => (
+                    <tr key={row.code}>
+                      <td><span className="purchase-code"><Bead code={row.code} size={16} /><span className="code">{row.code}</span></span></td>
+                      <td className="r">×{row.packs}</td>
+                      <td className="r">{fmt(row.beads)}</td>
+                      <td className="r">{row.continued ? "同上" : fmt(row.need)}</td>
+                      <td className="r">{row.continued ? "同上" : fmt(row.surplus)}</td>
+                      <td className="r">{formatMoney(row.cost)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )) : <p className="meta">这个方案不需要单色补充包。</p>}
+        {plan.packs.p500 ? <p className="meta purchase-hint">500 颗装满 {MIN_PACKS_500} 包才能备注色号；本方案共 {plan.packs.p500} 包{plan.packs.p500 >= MIN_PACKS_500 ? "，可以指定色号" : ""}。</p> : null}
+        <div className="row purchase-detail-actions">
+          <button type="button" className="btn btn-sm" onClick={copy}>复制采购清单</button>
+          <a className="btn btn-sm" href={href}>应用此方案</a>
+        </div>
+      </div>
+    </details>
+  );
+}
 
 const yuanPerK = (offer: PurchaseOffer) => ((offer.perBead * 1000)).toFixed(2);
 
@@ -24,6 +88,11 @@ export default function Purchase() {
   const route = useRoute();
   const [onlyVerified, setOnlyVerified] = useState(route.query.get("verified") === "1");
   const [price1200, setPrice1200] = useState(1.26);
+  const [prefer, setPrefer] = useState<PurchasePrefer>(readPrefer);
+  const pickPrefer = (v: PurchasePrefer) => {
+    setPrefer(v);
+    try { localStorage.setItem(PREFER_KEY, v); } catch { /* 隐私模式等：只在本次生效 */ }
+  };
   useEffect(() => { setOnlyVerified(route.query.get("verified") === "1"); }, [route.query]);
 
   const active = useMemo(() => data.patterns.filter(isActive), [data.patterns]);
@@ -32,22 +101,38 @@ export default function Purchase() {
   const demand = useMemo(() => demandByCode(scoped), [scoped]);
   const need = useMemo(() => {
     const out: Record<string, number> = {};
-    for (const [code, n] of Object.entries(demand)) out[code] = Math.ceil(n * (1 + lossRate));
+    for (const [code, n] of Object.entries(demand)) out[code] = applyLoss(n, lossRate);
     return out;
   }, [demand, lossRate]);
-  const plans = useMemo(() => buildPurchasePlans(need, demand, price1200), [need, demand, price1200]);
+  // 方案按“含损耗、已扣库存”的缺口计算（库存还没录入时不扣，与采购清单一致）
+  const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
+  const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
+  const planNeed = useMemo(() => needAfterStock(demand, inventoryReady ? stock : {}, lossRate), [demand, stock, inventoryReady, lossRate]);
+  const plans = useMemo(() => buildPurchasePlans(planNeed, demand, price1200, prefer), [planNeed, demand, price1200, prefer]);
 
   const net = totalOf(demand);
   const withLoss = totalOf(need);
   const colors = Object.keys(demand).length;
   const unverified = active.filter((p) => p.verifiedAt == null).length;
   const verified = active.length - unverified;
-  const best = plans[0];
-  const singles = plans.find((p) => p.id === "plan-all-singles") ?? best;
+  const best = plans.find((p) => p.cheapest) ?? plans[0];
+  const recommended = plans.find((p) => p.recommended) ?? best;
+  const leastWaste = plans.find((p) => p.leastWaste) ?? best;
+  const reason = recommendationReason(plans, prefer);
+  const leftover = recommended ? leftoverBreakdown(recommended) : null;
+  // 复制采购清单的同时保存下单快照：入库时可以按“当时下的单”核对
+  const copyPlan = async (plan: PurchasePlan) => {
+    const ok = await copyText(formatPurchaseText(plan, price1200));
+    toast(ok ? "已复制采购清单" : "复制失败，请手动选择文字");
+    if (!ok) return;
+    const items = Object.entries(applyPlanToEdits(plan)).map(([code, qty]) => ({ code, qty }));
+    try { await setLastOrder(data.prefs, makeOrderSnapshot(items, { planId: plan.id, cost: plan.totalCost })); } catch { toast("下单快照没保存成功，入库时请按当前清单"); }
+  };
+  const featured = [recommended, best, leastWaste].filter((p, i, arr) => p && arr.findIndex((x) => x?.id === p.id) === i);
   const set221 = plans.find((p) => p.id === "plan-set221-185") ?? best;
   const notRecommended = plans.filter((p) => p.id !== best?.id && (p.id === "plan-set265-257" || p.id === "plan-app-current" || p.id === "plan-set295-352"));
   const offers = useMemo(() => [...PURCHASE_OFFERS].sort((a, b) => a.perBead - b.perBead), []);
-  const shoppingHref = (id: string) => `#/shopping?plan=${encodeURIComponent(id)}${onlyVerified ? "&verified=1" : ""}`;
+  const shoppingHref = (id: string) => `#/shopping?plan=${encodeURIComponent(id)}${onlyVerified ? "&verified=1" : ""}${price1200 !== 1.26 ? `&p1200=${price1200}` : ""}`;
 
   if (!active.length) {
     return (
@@ -71,7 +156,7 @@ export default function Purchase() {
         <div className="purchase-kpis">
           <div><span className="label">净需求</span><b className="num">{fmt(net)}</b><span className="meta">颗 · {colors} 色</span></div>
           <div><span className="label">含 {Math.round(lossRate * 1000) / 10}% 损耗</span><b className="num">{fmt(withLoss)}</b><span className="meta">颗</span></div>
-          <div><span className="label">最省方案</span><b className="num">{scoped.length && best ? formatMoney(best.totalCost) : "—"}</b><span className="meta">{scoped.length && best ? best.name : "没有计入的图纸"}</span></div>
+          <div><span className="label">最省钱方案</span><b className="num">{scoped.length && best ? formatMoney(best.totalCost) : "—"}</b><span className="meta">{scoped.length && best ? best.name : "没有计入的图纸"}</span></div>
           <div><span className="label">未核对</span><b className="num">{unverified}</b><span className="meta">张 · 共 {active.length} 张</span></div>
         </div>
         <div className="row purchase-controls">
@@ -81,6 +166,11 @@ export default function Purchase() {
               <option value={1.5}>¥1.50 / 包</option>
             </select>
           </label>
+          <div className="field"><span id="purchase-prefer-label">推荐依据</span>
+            <div className="seg" role="group" aria-labelledby="purchase-prefer-label">
+              {PREFER_ORDER.map((v) => <button type="button" key={v} aria-pressed={prefer === v} onClick={() => pickPrefer(v)}>{PURCHASE_PREFER_LABEL[v]}</button>)}
+            </div>
+          </div>
           <label className="row purchase-check"><input type="checkbox" checked={onlyVerified} disabled={!verified} onChange={(e) => setOnlyVerified(e.target.checked)} />只算已核对（{verified} 张）</label>
         </div>
       </section>
@@ -97,33 +187,60 @@ export default function Purchase() {
         <div className="panel empty pegboard"><h3>没有已核对的图纸</h3><p>先把图库里的图纸标为“已核对”，或关掉“只算已核对”。</p><a className="btn" href="#/gallery?verify=unverified">去图库核对</a></div>
       ) : (
         <>
-          <div className="purchase-cards">
-            {[best, singles].filter((p, i, arr) => p && arr.findIndex((x) => x?.id === p.id) === i).map((plan, i) => (
-              <article className="panel purchase-card" key={plan.id} data-best={i === 0}>
-                <span className="label">{i === 0 ? "A · 最省方案" : "B · 少囤方案"}</span>
-                <h3>{plan.name}</h3>
-                <div className="purchase-price">{formatMoney(plan.totalCost)}</div>
-                <p className="meta">总颗数 {fmt(plan.totalBeads)} · 多出 {fmt(plan.surplus)} 颗 · 覆盖 {plan.coverage} 色{plan.missing.length ? ` · 缺 ${plan.missing.length} 色` : " · 全覆盖"}</p>
-                <p className="meta">{plan.note}</p>
-                <a className="btn btn-iron" href={shoppingHref(plan.id)}>应用此方案<Icon name="chevron" /></a>
-              </article>
-            ))}
-          </div>
+          {recommended ? (
+            <section className="panel purchase-reco" aria-label="推荐组合">
+              <div className="purchase-reco-head">
+                <span className="chip chip-leaf purchase-badge">推荐组合</span>
+                <Badges plan={{ ...recommended, recommended: false }} />
+              </div>
+              <h2>{recommended.setOffer ? recommended.setOffer.name : "全部用单色补充包"}{recommended.setOffer && recommended.singlesCost > 0 ? " + 补充包" : ""}</h2>
+              <div className="purchase-reco-nums">
+                <div><span className="label">总价</span><b className="num purchase-price">{formatMoney(recommended.totalCost)}</b></div>
+                <div><span className="label">浪费</span><b className="num">{pct(recommended.wastePct)}</b><span className="meta">{fmt(recommended.wasteBeads)} 颗用不上</span></div>
+                <div><span className="label">一共买到</span><b className="num">{fmt(recommended.totalBeads)}</b><span className="meta">颗 · 补充包 {formatPacks(recommended.packs)}</span></div>
+              </div>
+              <p className="purchase-why"><b>为什么推荐：</b>{reason}</p>
+              {leftover ? (
+                <ul className="purchase-left" aria-label="剩余豆子的来源">
+                  {leftover.unusedBeads > 0 ? <li>套装里用不上的颜色 <b className="num">{fmt(leftover.unusedColors)}</b> 色 / <b className="num">{fmt(leftover.unusedBeads)}</b> 颗</li> : null}
+                  <li>整包凑整多出 <b className="num">{fmt(leftover.roundingBeads)}</b> 颗</li>
+                </ul>
+              ) : null}
+              <div className="row purchase-reco-actions">
+                <a className="btn btn-iron" href={shoppingHref(recommended.id)}>应用推荐方案<Icon name="chevron" /></a>
+                <button type="button" className="btn" onClick={() => copyPlan(recommended)}>复制采购清单</button>
+              </div>
+            </section>
+          ) : null}
+
+          {featured.filter((p) => p && p.id !== recommended?.id).length ? (
+            <div className="purchase-cards">
+              {featured.filter((p) => p && p.id !== recommended?.id).map((plan) => (
+                <article className="panel purchase-card" key={plan.id}>
+                  <span className="purchase-card-tags"><Badges plan={plan} /></span>
+                  <h3>{plan.name}</h3>
+                  <div className="purchase-price">{formatMoney(plan.totalCost)}</div>
+                  <p className="meta">总颗数 {fmt(plan.totalBeads)} · 浪费 {pct(plan.wastePct)}（{fmt(plan.wasteBeads)} 颗）{plan.missing.length ? ` · 缺 ${plan.missing.length} 色` : ""}</p>
+                  <a className="btn" href={shoppingHref(plan.id)}>应用此方案<Icon name="chevron" /></a>
+                </article>
+              ))}
+            </div>
+          ) : null}
 
           <section className="panel purchase-section">
-            <div className="panel-head"><h3>6 个方案对比</h3><span className="meta">按总价从低到高；总颗数包含套装里用不上的颜色。</span></div>
+            <div className="panel-head"><h3>6 个方案对比</h3><span className="meta">按总价从低到高；浪费 = 需要的色号买多的 + 套装里用不上的颜色。</span></div>
             <div className="table-wrap">
               <table className="table purchase-plans">
-                <thead><tr><th>方案</th><th className="r">套装</th><th className="r">补充包</th><th className="r">合计</th><th className="r">总颗数</th><th className="r">多出需求</th><th>覆盖</th><th>包装数量</th><th /></tr></thead>
+                <thead><tr><th>方案</th><th className="r">套装</th><th className="r">补充包</th><th className="r">合计</th><th className="r">总颗数</th><th className="r">浪费</th><th>覆盖</th><th>包装数量</th><th /></tr></thead>
                 <tbody>
                   {plans.map((plan) => (
-                    <tr key={plan.id} data-best={plan.id === best?.id}>
-                      <td><b>{plan.name}</b>{plan.id === best?.id ? <span className="chip chip-leaf purchase-best">最省</span> : null}<div className="meta">{plan.note}</div></td>
+                    <tr key={plan.id} data-best={plan.recommended}>
+                      <td><b>{plan.name}</b><Badges plan={plan} /><div className="meta">{plan.note}</div></td>
                       <td className="r">{plan.setPrice ? formatMoney(plan.setPrice) : "—"}</td>
                       <td className="r">{plan.singlesCost ? formatMoney(plan.singlesCost) : "—"}</td>
                       <td className="r"><b>{formatMoney(plan.totalCost)}</b></td>
                       <td className="r">{fmt(plan.totalBeads)}</td>
-                      <td className="r">+{fmt(plan.surplus)}</td>
+                      <td className="r">{pct(plan.wastePct)}<div className="meta">{fmt(plan.wasteBeads)} 颗</div></td>
                       <td className="purchase-coverage">{plan.coverage} 色{plan.missing.length ? ` · 缺 ${plan.missing.length}` : " · 全覆盖"}</td>
                       <td className="purchase-packs">{formatPacks(plan.packs)}</td>
                       <td><a className="btn btn-sm" href={shoppingHref(plan.id)}>应用</a></td>
@@ -132,6 +249,11 @@ export default function Purchase() {
                 </tbody>
               </table>
             </div>
+          </section>
+
+          <section className="purchase-section" aria-label="补充包明细">
+            <div className="panel-head"><h3>补充包明细：每个色号买什么规格</h3><span className="meta">展开看色号 × 规格 × 包数；500 颗装满 {MIN_PACKS_500} 包才能指定色号，不足会自动改买别的规格或补到 {MIN_PACKS_500} 包。</span></div>
+            {plans.map((plan) => <SupplementDetail key={plan.id} plan={plan} price1200={price1200} href={shoppingHref(plan.id)} onCopy={copyPlan} />)}
           </section>
 
           {set221?.missing.length ? (

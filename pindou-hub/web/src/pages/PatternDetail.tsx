@@ -1,11 +1,13 @@
 // 焦点元素：拼豆图纸本身（可缩放的图）与它旁边的用量/库存缺口表。
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { putRecords, softDelete, useData } from "../lib/db";
 import { consumeTxns, countsToCsv, stockByCode, compareCodes } from "../lib/inventory";
 import { METHOD_LABEL, STATUS_LABEL, totalOf, type Counts, type Pattern, type PatternStatus } from "../lib/model";
 import { colorOf } from "../lib/palette";
-import { Icon, Sheet, fmt, fmtTime, navigate, toast, useBlobUrl, DiffNumber } from "../components/ui";
+import { Icon, Sheet, fmt, fmtTime, navigate, toast, useBlobUrl, useRoute, DiffNumber } from "../components/ui";
 import MatrixView from "../components/pattern/MatrixView";
+import MatrixEditor from "../components/pattern/MatrixEditor";
+import { editedPatternPatch } from "../lib/patternEdit";
 import ZoomImage from "../components/pattern/ZoomImage";
 import DetailTable from "../components/pattern/DetailTable";
 import CountsEditor from "../components/pattern/CountsEditor";
@@ -49,6 +51,24 @@ export default function PatternDetail({ id }: { id: string }) {
   const [editing, setEditing] = useState<Counts | null>(null);
   const [confirm, setConfirm] = useState(false);
   const [tagText, setTagText] = useState("");
+  const [editingCells, setEditingCells] = useState(false);
+  const [editDirty, setEditDirty] = useState(false);
+  const [liveCounts, setLiveCounts] = useState<Counts | null>(null);
+  const [savingCells, setSavingCells] = useState(false);
+  const askDone = useRoute().query.get("done") === "1";
+  // 从拼装模式完成后跳回来：自动打开“标记完成”（只开一次）
+  useEffect(() => { if (askDone && pattern && pattern.status !== "done") setConfirm(true); }, [askDone, !!pattern]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 有未保存的格子修改时，点任何站内链接（导航栏等）都先确认；关闭标签页由 useLeaveGuard 负责
+  useEffect(() => {
+    if (!editDirty) return;
+    const onClick = (e: MouseEvent) => {
+      const a = (e.target as HTMLElement | null)?.closest?.("a[href^='#/']");
+      if (a && !window.confirm("格子的修改还没保存，确定离开吗？")) { e.preventDefault(); e.stopPropagation(); }
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, [editDirty]);
 
   if (!pattern) {
     return (
@@ -68,6 +88,24 @@ export default function PatternDetail({ id }: { id: string }) {
   const available: View[] = [...(hasMatrix ? ["matrix" as const] : []), ...(pattern.previewId ? ["preview" as const] : []), ...(pattern.imageId ? ["source" as const] : [])];
   const current: View | null = view && available.includes(view) ? view : available[0] ?? null;
   const used = Object.keys(pattern.counts).filter((c) => pattern.counts[c] > 0).length;
+
+  const startBuild = () => {
+    if (pattern.status === "idea" || pattern.status === "planned") void save({ status: "making" });
+    navigate(`/build/${pattern.id}`);
+  };
+  const closeCellEditor = () => { setEditingCells(false); setEditDirty(false); setLiveCounts(null); };
+  const saveCells = async (edited: NonNullable<typeof matrix>, counts: Counts, original: NonNullable<typeof matrix>) => {
+    const patch = editedPatternPatch(pattern, original, edited, counts);
+    if (!patch) { closeCellEditor(); return; }
+    const before = pattern;
+    setSavingCells(true);
+    try {
+      await save(patch);
+      closeCellEditor();
+      toast("格子修改已保存", { label: "撤销", run: () => void putRecords("patterns", [{ ...before, updatedAt: Date.now() + 1 }]) });
+    } catch (e) { toast(e instanceof Error ? `保存失败：${e.message}` : "保存失败"); }
+    finally { setSavingCells(false); }
+  };
 
   const rename = async () => {
     const name = (renaming ?? "").trim();
@@ -169,12 +207,20 @@ export default function PatternDetail({ id }: { id: string }) {
 
       <div className="pd-grid">
         <section className="panel panel-pad pd-image stack">
-          {available.length > 1 ? (
-            <div className="seg" role="group" aria-label="图片视图" style={{ alignSelf: "flex-start" }}>
-              {available.map((v) => <button key={v} aria-pressed={current === v} onClick={() => setView(v)}>{v === "matrix" ? "拼豆图" : v === "preview" ? "预览图" : "原图"}</button>)}
+          {(available.length > 1 && !editingCells) || (current === "matrix" && matrix && !editingCells) ? (
+            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+              {available.length > 1 ? (
+                <div className="seg" role="group" aria-label="图片视图">
+                  {available.map((v) => <button key={v} aria-pressed={current === v} onClick={() => setView(v)}>{v === "matrix" ? "拼豆图" : v === "preview" ? "预览图" : "原图"}</button>)}
+                </div>
+              ) : <span />}
+              {current === "matrix" && matrix ? <button className="btn btn-sm" onClick={() => { setFocus(null); setEditingCells(true); }}><Icon name="edit" />编辑格子</button> : null}
             </div>
           ) : null}
-          {current === "matrix" && matrix ? (
+          {current === "matrix" && matrix && editingCells ? (
+            <MatrixEditor matrix={matrix} counts={pattern.counts} width={pattern.width!} height={pattern.height!}
+              onSave={saveCells} onCancel={closeCellEditor} onCountsChange={setLiveCounts} onDirtyChange={setEditDirty} saving={savingCells} />
+          ) : current === "matrix" && matrix ? (
             <MatrixView matrix={matrix} width={pattern.width!} height={pattern.height!} focusCode={focus} />
           ) : current === "preview" ? (
             previewUrl ? <ZoomImage src={previewUrl} alt="预览图" /> : <div className="empty pegboard">图片同步中…</div>
@@ -202,11 +248,12 @@ export default function PatternDetail({ id }: { id: string }) {
                 </div>
               ) : <button className="btn btn-sm" onClick={() => setEditing({ ...pattern.counts })}><Icon name="edit" />编辑用量</button>}
             </div>
-            {editing ? <CountsEditor counts={editing} onChange={setEditing} /> : <DetailTable counts={pattern.counts} copies={copies} stock={stock} inventoryReady={inventoryReady} focusCode={focus} onPick={(c) => setFocus((f) => (f === c ? null : c))} />}
+            {editing ? <CountsEditor counts={editing} onChange={setEditing} /> : <DetailTable counts={editingCells && liveCounts ? liveCounts : pattern.counts} copies={copies} stock={stock} inventoryReady={inventoryReady} focusCode={focus} onPick={(c) => setFocus((f) => (f === c ? null : c))} />}
           </div>
 
           <div className="panel panel-pad stack">
             <div className="pd-actions">
+              {hasMatrix && pattern.status !== "done" ? <button className="btn btn-primary" onClick={startBuild}>{pattern.build ? "继续拼" : "开始拼"}</button> : null}
               {pattern.status !== "done" ? <button className="btn btn-iron" onClick={() => setConfirm(true)} disabled={!total}><Icon name="check" />标记完成</button> : null}
               <button className="btn" onClick={exportCsv} disabled={!total}><Icon name="download" />导出 CSV</button>
               <button className="btn" onClick={copyUsage} disabled={!total}><Icon name="copy" />复制用量</button>

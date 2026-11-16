@@ -163,7 +163,7 @@ function PrefsSection() {
       <div className="panel panel-pad stack">
         <div className="set-prefs">
           <label className="field"><span>低库存阈值（颗）</span><input className="input num" type="number" inputMode="numeric" min={0} value={low} onChange={(e) => setLow(e.target.value)} /></label>
-          <label className="field"><span>包装规格（颗/包）</span><input className="input num" type="number" inputMode="numeric" min={1} value={pack} onChange={(e) => setPack(e.target.value)} /></label>
+          <label className="field"><span>默认包装规格（颗/包）</span><input className="input num" type="number" inputMode="numeric" min={1} value={pack} onChange={(e) => setPack(e.target.value)} /></label>
           <label className="field"><span>损耗率（%）</span><input className="input num" type="number" inputMode="decimal" min={0} value={loss} onChange={(e) => setLoss(e.target.value)} /></label>
           <label className="field"><span>默认色卡套装</span><select className="select" value={kit} onChange={(e) => setKit(e.target.value)}>{PALETTE_KITS.map((k) => <option key={k.id} value={k.id}>{k.name}（{k.codes.length} 色）</option>)}</select></label>
         </div>

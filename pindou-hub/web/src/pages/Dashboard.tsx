@@ -10,9 +10,13 @@ import { BatchEntry } from "../components/stock/BatchEntry";
 import { CodeSheet } from "../components/stock/CodeSheet";
 import { KitInit } from "../components/stock/KitInit";
 import { UsageChart } from "../components/dash/UsageChart";
+import { ForecastCard } from "../components/insights/ForecastCard";
 import { Collections } from "../components/dash/Collections";
 import "../components/stock/stock.css";
 import "./Dashboard.css";
+
+const SKIP_KEY = "ph.dash.onboardSkipped";
+const readSkipped = () => { try { return localStorage.getItem(SKIP_KEY) === "1"; } catch { return false; } };
 
 const KIND_LABEL: Record<string, string> = { purchase: "入库", consume: "消耗", adjust: "调整", stocktake: "盘点", mixed: "混合" };
 
@@ -22,7 +26,8 @@ export default function Dashboard() {
   const [batch, setBatch] = useState(false);
   const [kitInit, setKitInit] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
-  const [invSkipped, setInvSkipped] = useState(false);
+  const [invSkipped, setInvSkipped] = useState(readSkipped);
+  const skipOnboard = () => { setInvSkipped(true); try { localStorage.setItem(SKIP_KEY, "1"); } catch { /* 无痕模式等：本次会话内仍然生效 */ } };
 
   const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
   const stock = useMemo(() => stockByCode(data.txns), [data.txns]);
@@ -54,15 +59,15 @@ export default function Dashboard() {
         <section className="panel pegboard dash-welcome">
           <h2>欢迎来到拼豆仓</h2>
           <p className="meta">记下手上有哪些豆子、要做哪些图纸，它会告诉你还差什么、该买多少。</p>
+          <a className="btn btn-iron" href="#/add">添加第一张图纸</a>
           <div className="dash-steps">
-            <div className="dash-step"><span className="n">1</span><h4>录入现有库存</h4><p className="meta">按套装一次初始化，或逐个色号入库。</p>
-              <div className="row"><button className="btn btn-sm" onClick={() => setKitInit(true)}>按套装初始化库存</button><button className="btn btn-sm btn-ghost" onClick={() => setBatch(true)}>批量入库</button></div></div>
-            <div className="dash-step"><span className="n">2</span><h4>添加图纸</h4><p className="meta">拍下或上传图纸识别用量，也能用照片生成。</p>
+            <div className="dash-step"><span className="n">1</span><h4>添加第一张图纸</h4><p className="meta">拍下或上传图纸识别用量，也能用照片生成。</p>
               <div className="row"><a className="btn btn-sm" href="#/add?mode=recognize">识别图纸</a><a className="btn btn-sm btn-ghost" href="#/add?mode=generate">生成图纸</a></div></div>
+            <div className="dash-step"><span className="n">2</span><h4>再录入现有库存（可稍后）</h4><p className="meta">按套装一次初始化，或逐个色号入库。</p>
+              <div className="row"><button className="btn btn-sm" onClick={() => setKitInit(true)}>按套装初始化库存</button><button className="btn btn-sm btn-ghost" onClick={() => setBatch(true)}>批量入库</button></div></div>
             <div className="dash-step"><span className="n">3</span><h4>看采购清单</h4><p className="meta">把图纸标为“计划拼”，缺哪些色一目了然。</p>
               <div className="row"><a className="btn btn-sm" href="#/shopping">采购清单</a></div></div>
           </div>
-          <a className="btn btn-iron" href="#/add">添加第一张图纸</a>
         </section>
         {sheets}
       </div>
@@ -86,12 +91,13 @@ export default function Dashboard() {
           <span className="spacer" />
           <button className="btn btn-sm btn-primary" onClick={() => setKitInit(true)}>按套装录入</button>
           <button className="btn btn-sm" onClick={() => setBatch(true)}>批量入库</button>
-          <button className="btn btn-sm btn-ghost" onClick={() => setInvSkipped(true)}>跳过，先看需求</button>
+          <button className="btn btn-sm btn-ghost" onClick={skipOnboard}>跳过，先看需求</button>
         </div>
       ) : null}
 
       <section className="panel dash-hero" aria-label="本周计划">
         <div className="dash-hero-list">
+          {!inventoryReady && active.length ? <p className="meta" style={{ padding: "10px 16px 0" }}>库存还没录入：下面只列出每张图纸需要的色号。</p> : null}
           {active.length ? active.slice(0, 6).map((p) => {
             const r = readiness(p, stock);
             const copies = Math.max(1, p.copies || 1);
@@ -103,8 +109,12 @@ export default function Dashboard() {
                   <span className="meta">{copies > 1 ? `计划 ${copies} 份 · ` : ""}{!inventoryReady ? `需要 ${Object.keys(p.counts).filter((c) => p.counts[c] > 0).length} 色` : ready ? "豆子够做" : `库存能做 ${r.makeable} 份`}</span>
                 </div>
                 <div className="stack" style={{ gap: 4 }}>
-                  <div className="row" style={{ justifyContent: "space-between", gap: 4 }}><span className="meta">{inventoryReady ? "备豆" : "库存"}</span><span className="meta num">{inventoryReady ? `${Math.round(r.coverage * 100)}%` : "未录入"}</span></div>
-                  <div className={`meter ${!inventoryReady ? "" : ready ? "ok" : r.coverage > 0.6 ? "low" : "short"}`}><i style={{ width: inventoryReady ? `${Math.min(100, r.coverage * 100)}%` : "0%" }} /></div>
+                  {inventoryReady ? (
+                    <>
+                      <div className="row" style={{ justifyContent: "space-between", gap: 4 }}><span className="meta">备豆</span><span className="meta num">{Math.round(r.coverage * 100)}%</span></div>
+                      <div className={`meter ${ready ? "ok" : r.coverage > 0.6 ? "low" : "short"}`}><i style={{ width: `${Math.min(100, r.coverage * 100)}%` }} /></div>
+                    </>
+                  ) : null}
                 </div>
                 {!inventoryReady ? (
                   <div className="dash-pat-miss">
@@ -155,6 +165,8 @@ export default function Dashboard() {
         <div><span className="label">快用完</span><b style={{ color: low.length ? "var(--amber)" : undefined }}>{low.length}</b></div>
       </div>
 
+      <ForecastCard />
+
       <div className="dash-two">
         <section className="panel" aria-labelledby="dash-col-h">
           <div className="panel-head"><h3 id="dash-col-h">合集</h3><a className="meta" href="#/gallery?group=tag">按标签看图库</a></div>
@@ -184,6 +196,8 @@ export default function Dashboard() {
           )) : <div className="empty" style={{ padding: 24 }}>还没有动态。</div>}
         </section>
       </div>
+
+      <a className="meta" href="#/insights" style={{ display: "inline-block", marginTop: 16 }}>查看数据洞察 →</a>
 
       <div className="dash-sync">
         <span className={`sync-dot ${sync.phase}`} />

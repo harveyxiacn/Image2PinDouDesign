@@ -1,0 +1,25 @@
+/* 识别页：底部保存条 + 识别设置 / 依据折叠 */
+.rc-savebar {
+  position: sticky; bottom: 0; z-index: 20; display: flex; align-items: center; gap: 12px; justify-content: space-between;
+  padding: 10px 12px calc(10px + var(--safe-bottom)); background: var(--paper-raised); border: 1px solid var(--rule-strong); border-radius: var(--r-panel);
+}
+.rc-savebar-info { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.rc-savebar-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-savebar-btn { flex: none; min-width: 120px; }
+@media (max-width: 820px) {
+  /* 固定标签栏高度约 60px + 安全区；保存条停在它上方 */
+  .rc-savebar { bottom: calc(64px + var(--safe-bottom)); padding-bottom: 10px; }
+}
+@media (max-width: 460px) {
+  .rc-savebar { flex-wrap: wrap; }
+  .rc-savebar-info { flex-basis: 100%; }
+  .rc-savebar-btn { flex: 1; }
+}
+.rc-settings > summary, .rc-basis > summary, .rc-more > summary {
+  cursor: pointer; font-size: var(--t-small); font-weight: 500; color: var(--ink-2); padding: 6px 0; display: flex; align-items: center; gap: 8px; min-height: 32px;
+}
+.rc-settings-body { margin-top: 6px; }
+.rc-basis { padding: 0 12px 4px; }
+.rc-basis > .row { padding-bottom: 6px; }
+.rc-more { padding: 0 12px; }
+.rc-more > .notice { margin: 0 0 8px !important; }

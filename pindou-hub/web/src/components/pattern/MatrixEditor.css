@@ -1,0 +1,20 @@
+.me { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.me-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--paper-sunk); }
+.me-bar .seg button { min-height: 40px; min-width: 44px; }
+.me-actions { display: flex; gap: 6px; margin-left: auto; }
+.me-actions .btn { min-height: 40px; }
+.me-color { display: flex; flex-direction: column; gap: 8px; }
+.me-select, .me-src { display: flex; align-items: center; gap: 6px; }
+.me-select .select, .me-src .select { flex: 1; min-width: 0; }
+.me-swatch { flex: none; width: 18px; height: 18px; border-radius: 4px; border: 1px solid var(--rule-strong); }
+.me-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 96px; overflow-y: auto; }
+.me-chip { display: inline-flex; align-items: center; gap: 4px; min-height: 40px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 999px; background: var(--paper); color: inherit; font: inherit; font-size: var(--t-small, 13px); cursor: pointer; }
+.me-chip[aria-pressed="true"] { border-color: var(--ink-2); box-shadow: 0 0 0 2px var(--ink-2) inset; font-weight: 700; }
+.me-whole { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 12px; border: 1px dashed var(--rule-strong); border-radius: var(--r-ctl); }
+.me-whole .row { flex-wrap: wrap; gap: 6px; align-items: center; }
+.me-src { min-width: 150px; }
+.me-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+@media (pointer: coarse) {
+  .me-bar .seg button, .me-actions .btn { min-height: 44px; }
+  .me-chip { min-height: 40px; }
+}

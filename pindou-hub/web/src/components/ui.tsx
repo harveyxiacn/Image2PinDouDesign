@@ -25,6 +25,7 @@ const ICONS: Record<string, string> = {
   chevron: "M9 6l6 6-6 6",
   back: "M15 6l-6 6 6 6",
   alert: "M12 9v4M12 17h.01M10.3 4.2 2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z",
+  chart: "M4 20h16M7 20v-7M12 20V6M17 20v-10",
   sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z",
   phone: "M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM11 18h2"
 };
@@ -101,6 +102,9 @@ export function DiffNumber({ value, format = fmt, className }: { value: number; 
 // 输入框获得焦点时滚进可视区，避免被软键盘挡住。
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/** 当前打开的弹层栈：Esc / Tab 只交给最上面一个（叠着两层弹层时，Esc 一次只关一层）。 */
+const sheetStack: object[] = [];
+
 export function Sheet({ title, onClose, children, footer, wide }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
@@ -121,8 +125,11 @@ export function Sheet({ title, onClose, children, footer, wide }: { title: React
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const node = ref.current;
+    const me = {};
+    sheetStack.push(me);
     node?.focus();
     const onKey = (e: KeyboardEvent) => {
+      if (sheetStack[sheetStack.length - 1] !== me) return;
       if (e.key === "Escape") { e.stopPropagation(); close(); return; }
       if (e.key !== "Tab" || !node) return;
       const items = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.offsetParent !== null);
@@ -145,7 +152,11 @@ export function Sheet({ title, onClose, children, footer, wide }: { title: React
       document.removeEventListener("keydown", onKey);
       node?.removeEventListener("focusin", onFocusIn);
       document.body.style.overflow = overflow;
-      previous?.focus?.();
+      const at = sheetStack.indexOf(me);
+      if (at >= 0) sheetStack.splice(at, 1);
+      // 焦点回到打开它的控件；那个控件已不在页面上（如被重绘）时回到主内容区，不留在 <body>
+      if (previous && previous.isConnected && previous !== document.body) previous.focus?.();
+      else document.getElementById("main")?.focus?.({ preventScroll: true });
     };
   }, [close]);
 
@@ -217,7 +228,7 @@ export function toast(text: string, action?: ToastItem["action"]) {
   // 最多同时 3 条，最旧的先让位
   toasts = [...toasts.slice(-2), { id, text, action }];
   toastListeners.forEach((l) => l());
-  setTimeout(() => dismissToast(id), action ? 6000 : 3200);
+  setTimeout(() => dismissToast(id), action ? 10000 : 3200);
 }
 function dismissToast(id: number) {
   if (!toasts.some((t) => t.id === id && !t.leaving)) return;

@@ -20,7 +20,14 @@
 .bt-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .bt-tag { display: block; }
 .bt-tag .input { width: 112px; height: 32px; }
-.bt-foot { display: flex; align-items: center; gap: 10px 12px; padding: 12px; border-top: 1px solid var(--rule-soft); flex-wrap: wrap; }
+/* 长队列时保存栏始终可见；手机上让出底部标签栏（约 60px + 安全区，见 styles.css .tabbar） */
+.bt-foot { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 10px 12px; padding: 12px; border-top: 1px solid var(--rule-soft); background: var(--paper-raised); border-radius: 0 0 var(--r-panel) var(--r-panel); flex-wrap: wrap; }
+.bt-filter { margin: 8px 12px 0; max-width: calc(100% - 24px); overflow-x: auto; }
+.bt-menu { position: relative; }
+.bt-menu-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 6; min-width: 132px; display: flex; flex-direction: column; padding: 4px; background: var(--paper-raised); border: 1px solid var(--rule); border-radius: var(--r-ctl); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14); }
+.bt-menu-item { text-align: left; padding: 8px 10px; min-height: 36px; border: 0; border-radius: var(--r-ctl); background: transparent; color: var(--ink); font: inherit; cursor: pointer; white-space: nowrap; }
+.bt-menu-item:hover, .bt-menu-item:focus-visible { background: var(--paper-sunk); }
+@media (max-width: 820px) { .bt-foot { bottom: calc(60px + var(--safe-bottom)); } }
 .bt-done { padding: 0 12px 12px; }
 .bt-item-bar { margin-top: 2px; }
 @media (max-width: 560px) {
@@ -29,10 +36,12 @@
   .bt-tag { flex: 1 1 140px; }
   .bt-tag .input { width: 100%; }
   .bt-foot .btn-iron { flex: 1 1 100%; }
+  .bt-menu-pop { right: auto; left: 0; }
 }
 @media (pointer: coarse) {
   .bt-tools .btn-sm, .bt-tag .input { min-height: 44px; }
-  .bt-x { min-width: 44px; }
+  .bt-x, .bt-more { min-width: 44px; }
+  .bt-menu-item { min-height: 44px; }
 }
 @keyframes bt-in { from { opacity: 0; transform: translateY(4px); } }
 @media (prefers-reduced-motion: reduce) { .bt-item { animation: none; } }

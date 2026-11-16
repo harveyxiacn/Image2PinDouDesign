@@ -1,8 +1,11 @@
-import { lazy, Suspense, useEffect, useRef } from "react";
-import { Icon, PageSkeleton, ToastHost, useRoute } from "./components/ui";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Icon, PageSkeleton, Sheet, ToastHost, useRoute } from "./components/ui";
 import { useData } from "./lib/db";
 import { useSyncState } from "./lib/sync";
 import { isActive } from "./lib/inventory";
+import { globalKey, groupsForRoute } from "./lib/shortcuts";
+import "./shell-more.css";
+import "./components/build/shell.css";
 
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const AddPattern = lazy(() => import("./pages/AddPattern"));
@@ -11,6 +14,8 @@ const PatternDetail = lazy(() => import("./pages/PatternDetail"));
 const Inventory = lazy(() => import("./pages/Inventory"));
 const Shopping = lazy(() => import("./pages/Shopping"));
 const Purchase = lazy(() => import("./pages/Purchase"));
+const Insights = lazy(() => import("./pages/Insights"));
+const Build = lazy(() => import("./pages/Build"));
 const History = lazy(() => import("./pages/History"));
 const Settings = lazy(() => import("./pages/Settings"));
 
@@ -21,9 +26,32 @@ const NAV: NavItem[] = [
   { href: "#/inventory", label: "豆盒库存", icon: "box", match: (p) => p.startsWith("/inventory") },
   { href: "#/shopping", label: "采购清单", icon: "cart", match: (p) => p.startsWith("/shopping") },
   { href: "#/purchase", label: "采购方案", icon: "sparkle", match: (p) => p.startsWith("/purchase") },
+  { href: "#/insights", label: "数据洞察", icon: "chart", match: (p) => p.startsWith("/insights") },
   { href: "#/history", label: "记录", icon: "history", match: (p) => p.startsWith("/history") },
   { href: "#/settings", label: "同步与设置", icon: "sync", match: (p) => p.startsWith("/settings") }
 ];
+
+/** 手机底栏「更多」收纳的页面（桌面侧栏里都有）。采购清单原本是底栏一级入口，所以排第一。 */
+const MORE: { href: string; desc: string }[] = [
+  { href: "#/shopping", desc: "按计划拼的图纸，算出要买哪些色、多少颗" },
+  { href: "#/purchase", desc: "对比不同买法，看哪种更省" },
+  { href: "#/insights", desc: "用量、花费与库存趋势" },
+  { href: "#/history", desc: "入库、消耗、盘点的流水" },
+  { href: "#/settings", desc: "连接电脑 Hub、备份与偏好" }
+];
+const moreItem = (href: string) => NAV.find((n) => n.href === href)!;
+const moreMatch = (p: string) => MORE.some((m) => moreItem(m.href).match(p));
+
+function SyncLine() {
+  const sync = useSyncState();
+  const label = sync.phase === "unpaired" ? "仅本机" : sync.phase === "syncing" ? "同步中" : sync.phase === "error" ? "同步失败" : sync.phase === "offline" ? "离线" : "已同步";
+  return (
+    <div className="more-sync" role="status">
+      <span className={`sync-dot ${sync.phase}`} />
+      <span>{label}{sync.hubName ? ` · ${sync.hubName}` : ""}{sync.message && sync.phase !== "idle" && sync.phase !== "unpaired" ? ` · ${sync.message}` : ""}</span>
+    </div>
+  );
+}
 
 function Page() {
   const route = useRoute();
@@ -36,7 +64,9 @@ function Page() {
     case "inventory": return <Inventory />;
     case "shopping": return <Shopping />;
     case "purchase": return <Purchase />;
+    case "insights": return <Insights />;
     case "history": return <History />;
+    case "build": return <Build id={id ?? ""} />;
     case "settings": return <Settings />;
     default: return <Dashboard />;
   }
@@ -44,7 +74,7 @@ function Page() {
 
 const TITLES: Record<string, string> = {
   "": "总览", add: "添加图纸", gallery: "图库", pattern: "图纸详情", inventory: "豆盒库存",
-  shopping: "采购清单", purchase: "采购方案", history: "记录", settings: "同步与设置"
+  shopping: "采购清单", purchase: "采购方案", insights: "数据洞察", history: "记录", build: "拼装模式", settings: "同步与设置"
 };
 
 /** 路由切换：更新标签页标题，并把焦点移到新页面的 h1（键盘/读屏用户知道已到新页面）。首次载入不抢焦点。 */
@@ -61,6 +91,70 @@ function useRouteFocus(path: string, head: string | undefined) {
     };
     focusHeading();
   }, [path, head]);
+}
+
+/** 桌面快捷键：/ 搜索，? 帮助，g 然后字母 跳页（判断逻辑见 lib/shortcuts.ts）。弹层打开时不响应。 */
+function focusSearch(): boolean {
+  const el = Array.from(document.querySelectorAll<HTMLInputElement>('#main [data-quick-search], #main input[type="search"]')).find((x) => x.offsetParent !== null && !x.disabled);
+  if (!el) return false;
+  el.focus();
+  el.select?.();
+  return true;
+}
+function useGlobalKeys(openHelp: () => void) {
+  const pending = useRef(false);
+  const timer = useRef<number | undefined>(undefined);
+  const helpRef = useRef(openHelp);
+  helpRef.current = openHelp;
+  useEffect(() => {
+    // 捕获阶段：先于各页面自己的键盘处理，处理过的键会 preventDefault，页面的 defaultPrevented 判断就会跳过
+    const onKey = (e: KeyboardEvent) => {
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) { pending.current = false; return; }
+      const r = globalKey(e, e.target as HTMLElement | null, pending.current);
+      pending.current = r.pendingG;
+      window.clearTimeout(timer.current);
+      if (r.pendingG) timer.current = window.setTimeout(() => { pending.current = false; }, 1200);
+      const a = r.action;
+      if (!a) return;
+      e.preventDefault();
+      if (a.type === "help") helpRef.current();
+      else if (a.type === "goto") { location.hash = a.href; }
+      else if (a.type === "focusSearch" && !focusSearch()) {
+        // 当前页没有搜索框：去图库，等页面出来再聚焦
+        location.hash = "#/gallery";
+        let tries = 0;
+        const wait = () => { if (focusSearch()) return; if (tries++ < 30) window.setTimeout(wait, 80); };
+        window.setTimeout(wait, 200);
+      }
+    };
+    const onOpen = () => helpRef.current();
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pindou:shortcuts", onOpen);
+    return () => { window.removeEventListener("keydown", onKey, true); window.removeEventListener("pindou:shortcuts", onOpen); window.clearTimeout(timer.current); };
+  }, []);
+}
+
+function ShortcutHelp({ head, onClose }: { head: string | undefined; onClose: () => void }) {
+  return (
+    <Sheet title="键盘快捷键" onClose={onClose}>
+      <div className="kb" data-shortcut-help>
+        <p className="meta">在输入框里打字时快捷键不会触发。手机上不需要快捷键：单指点按 / 拖动，双指缩放。</p>
+        {groupsForRoute(head).map((g) => (
+          <section key={g.id} className="kb-group" data-shortcut-group={g.id}>
+            <h4>{g.title}</h4>
+            <dl>
+              {g.rows.map((r) => (
+                <div className="kb-row" key={r.keys.join("|")}>
+                  <dt>{r.keys.map((k, i) => <span key={k}>{i ? <i aria-hidden="true"> / </i> : null}<kbd>{k}</kbd></span>)}</dt>
+                  <dd>{r.desc}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        ))}
+      </div>
+    </Sheet>
+  );
 }
 
 function SyncBadge() {
@@ -83,8 +177,12 @@ export default function App() {
   const planned = data.patterns.filter(isActive).length;
   const path = route.path;
   useRouteFocus(path, route.parts[0]);
+  const [more, setMore] = useState(false);
+  const [help, setHelp] = useState(false);
+  useEffect(() => { setMore(false); }, [path]);
+  useGlobalKeys(() => setHelp(true));
   return (
-    <div className="shell">
+    <div className="shell" data-fullscreen={route.parts[0] === "build" ? "true" : undefined}>
       <a className="skip-link" href="#main" onClick={(e) => { e.preventDefault(); document.getElementById("main")?.focus(); }}>跳到主要内容</a>
       <nav className="rail" aria-label="主导航">
         <div className="brand">
@@ -99,7 +197,12 @@ export default function App() {
             {item.href === "#/gallery" && planned ? <span className="count num">{planned} 计划</span> : null}
           </a>
         ))}
-        <div className="rail-foot"><SyncBadge /></div>
+        <div className="rail-foot">
+          <button type="button" className="nav-link kb-open" onClick={() => setHelp(true)} title="键盘快捷键（?）" aria-keyshortcuts="?" data-shortcut-open>
+            <kbd>?</kbd><span>键盘快捷键</span>
+          </button>
+          <SyncBadge />
+        </div>
       </nav>
 
       <main className="main" id="main" tabIndex={-1} style={{ outline: "none" }}>
@@ -115,8 +218,27 @@ export default function App() {
         <a href="#/gallery" aria-current={NAV[1].match(path) ? "page" : undefined}><Icon name="gallery" />图库</a>
         <a href="#/add" className="tab-add" aria-label="添加图纸"><span className="plus"><Icon name="plus" /></span></a>
         <a href="#/inventory" aria-current={NAV[2].match(path) ? "page" : undefined}><Icon name="box" />库存</a>
-        <a href="#/shopping" aria-current={NAV[3].match(path) ? "page" : undefined}><Icon name="cart" />采购</a>
+        <button type="button" className="tab-more" aria-haspopup="dialog" aria-current={moreMatch(path) ? "page" : undefined} onClick={() => setMore(true)}><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true"><circle cx="5.5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="18.5" cy="12" r="1.7" /></svg>更多</button>
       </nav>
+      {more ? (
+        <Sheet title="更多" onClose={() => setMore(false)} footer={<SyncLine />}>
+          <ul className="more-list">
+            {MORE.map((m) => {
+              const item = moreItem(m.href);
+              return (
+                <li key={m.href}>
+                  <a className="more-row" href={m.href} aria-current={item.match(path) ? "page" : undefined}>
+                    <Icon name={item.icon} />
+                    <span className="more-text"><b>{item.label}</b><small>{m.desc}</small></span>
+                    <Icon name="chevron" size={16} />
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        </Sheet>
+      ) : null}
+      {help ? <ShortcutHelp head={route.parts[0]} onClose={() => setHelp(false)} /> : null}
       <ToastHost />
     </div>
   );

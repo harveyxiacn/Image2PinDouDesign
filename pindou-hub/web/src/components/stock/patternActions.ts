@@ -51,6 +51,7 @@ export async function bulkSetVerified(ids: string[], verified = true): Promise<s
 export async function bulkDelete(ids: string[]): Promise<string> {
   const originals = pick(ids);
   if (!originals.length) return "";
+  if (originals.length > 3 && !window.confirm(`删除 ${originals.length} 张图纸？删除后可在提示里撤销`)) return "";
   await softDelete("patterns", originals.map((p) => p.id));
   const m = `已删除 ${originals.length} 张图纸`;
   toast(m, { label: "撤销", run: () => { void restore(originals); } });

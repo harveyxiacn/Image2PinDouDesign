@@ -3,14 +3,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Bead, Icon, Sheet, fmt, toast, DiffNumber, prefersReducedMotion, useRoute } from "../components/ui";
 import { useData, putRecords } from "../lib/db";
-import { countsToCsv, demandByCode, isActive, shoppingList, stockByCode, type ShoppingRow } from "../lib/inventory";
+import { countsToCsv, demandByCode, isActive, needAfterStock, shoppingList, stockByCode, withLoss as applyLoss, type ShoppingRow } from "../lib/inventory";
 import { colorOf } from "../lib/palette";
-import { totalOf } from "../lib/model";
+import { totalOf, type LastOrder } from "../lib/model";
+import { setLastOrder } from "../lib/lastOrder";
 import { excludeForTag, shareText } from "../lib/stockview";
 import { commitPurchase } from "../components/stock/actions";
+import { PriceNote } from "../components/stock/PriceNote";
+import { allocatePrices, parseFen } from "../lib/pricing";
 import { copyText, downloadText } from "../components/stock/download";
 import {
-  addPacks, applyPlanToEdits, buildPurchasePlans, estimateCostForRows, formatMoney, formatPacks, optimizePacks, type PurchasePlan, type PurchasePlanItem
+  addPacks, applyPlanToEdits, buildPurchasePlans, estimateCostForRows, formatMD, formatMoney, formatPacks, makeOrderSnapshot, optimizePacks, orderIsFresh, orderSummary, pendingOrder,
+  type PurchasePlan, type PurchasePlanItem
 } from "../lib/purchase";
 import "./Shopping.css";
 
@@ -42,6 +46,16 @@ export default function Shopping() {
   const [includeLow, setIncludeLow] = useState(true);
   const [edits, setEdits] = useState<Record<string, number>>({});
   const [receive, setReceive] = useState(false);
+  const [openRows, setOpenRows] = useState<Set<string>>(new Set());
+  const [kept, setKept] = useState(0);
+  const prefsRef = useRef(data.prefs);
+  prefsRef.current = data.prefs;
+  const order = pendingOrder(data.prefs.lastOrder);
+  useEffect(() => {
+    if (!kept) return;
+    const t = window.setTimeout(() => setKept(0), 8000);
+    return () => window.clearTimeout(t);
+  }, [kept]);
 
   const prefs = useMemo(() => ({ ...data.prefs, lossRate: Math.max(0, Number(loss) || 0) / 100, packSize: Math.max(1, Math.round(Number(pack)) || 1) }), [data.prefs, loss, pack]);
   const inventoryReady = !!data.prefs.inventoryStartedAt || data.txns.some((t) => !t.deleted);
@@ -49,7 +63,7 @@ export default function Shopping() {
   const demand = useMemo(() => demandByCode(data.patterns, (p) => isActive(p) && (!onlyVerified || !!p.verifiedAt) && !excluded.has(p.id)), [data.patterns, onlyVerified, excluded]);
   const need = useMemo(() => {
     const out: Record<string, number> = {};
-    for (const [code, n] of Object.entries(demand)) out[code] = Math.ceil(n * (1 + prefs.lossRate));
+    for (const [code, n] of Object.entries(demand)) out[code] = applyLoss(n, prefs.lossRate);
     return out;
   }, [demand, prefs.lossRate]);
   const packOf = (code: string) => Math.max(1, Math.round(packSizes[code] ?? prefs.packSize));
@@ -65,7 +79,8 @@ export default function Shopping() {
   const withLoss = totalOf(need);
   const colorCount = Object.keys(demand).filter((code) => (demand[code] ?? 0) > 0).length;
   const shortfallTotal = rows.filter((r) => r.reason === "shortfall").reduce((sum, r) => sum + qtyOf(r.code, r.buy), 0);
-  const surplus = Math.max(0, shortfallTotal - withLoss);
+  // 整包多出 = 每个缺货行实际买的 − 真正的缺口（已扣库存）
+  const surplus = rows.filter((r) => r.reason === "shortfall").reduce((sum, r) => sum + Math.max(0, qtyOf(r.code, r.buy) - r.shortfall), 0);
   // 应用方案后，套装价不能按“每色单买”重算；只有用户改过数量才回退到逐色报价。
   const planItems = applied?.items.filter((item) => item.totalBeads > 0) ?? [];
   const planUnchanged = !!applied && planItems.every((item) => (edits[item.code] ?? 0) === item.totalBeads);
@@ -92,7 +107,7 @@ export default function Shopping() {
   const splitHint = useMemo(() => {
     if (applied || tagsInPlan.length < 2 || Object.keys(stock).length) return null;
     const base = scoped.filter((p) => !manual.has(p.id));
-    const costFor = (d: Record<string, number>) => estimateCostForRows(Object.entries(d).map(([code, n]) => ({ code, qty: Math.ceil(n * (1 + prefs.lossRate)) }))).cost;
+    const costFor = (d: Record<string, number>) => estimateCostForRows(Object.entries(d).map(([code, n]) => ({ code, qty: applyLoss(n, prefs.lossRate) }))).cost;
     // 按“主标签”分组，保证每张图纸只算一次（多标签的图纸不会被重复计入）
     const groups = new Map<string, typeof base>();
     for (const p of base) {
@@ -106,16 +121,29 @@ export default function Shopping() {
 
   // ?plan= 从采购方案页带入：把每色购买量写进 edits；用户手动改损耗/包装/标签后清除。
   const planId = route.query.get("plan");
-  const plans = useMemo(() => (planId ? buildPurchasePlans(need, demand) : []), [planId, need, demand]);
+  // 采购方案页若选了 ¥1.50 的 1200 颗装，带 p1200 参数过来，保证金额一致
+  const p1200 = route.query.get("p1200") === "1.5" ? 1.5 : 1.26;
+  const planNeed = useMemo(() => needAfterStock(demand, inventoryReady ? stock : {}, prefs.lossRate), [demand, stock, inventoryReady, prefs.lossRate]);
+  const plans = useMemo(() => (planId ? buildPurchasePlans(planNeed, demand, p1200) : []), [planId, planNeed, demand, p1200]);
+  // 每个 planId 只应用一次：之后 plans 因勾选图纸等重算，不能覆盖用户手动改过的数量
+  const appliedPlanId = useRef<string | null>(null);
   useEffect(() => {
-    if (planCleared || !planId) return;
+    if (planCleared) { appliedPlanId.current = null; return; }
+    if (!planId || !data.ready || appliedPlanId.current === planId) return;
     const plan = plans.find((p) => p.id === planId);
     if (!plan) return;
+    appliedPlanId.current = planId;
     setEdits(applyPlanToEdits(plan));
     setApplied(plan);
     setMode("pack");
-  }, [planId, plans, planCleared]);
+  }, [planId, plans, planCleared, data.ready]);
   const resetEdits = () => { setEdits({}); setApplied(null); setPlanCleared(true); };
+  // 改损耗率/默认包装只会重算“没手动改过”的行；手动填的数量是绝对值，可以原样保留。
+  // 已应用的采购方案是按旧损耗算的整体，不再成立，仍然清除。
+  const keepManualEdits = () => {
+    if (applied) { resetEdits(); return; }
+    setKept(Object.keys(edits).length);
+  };
 
   // 买回来后：库存变了而从清单里消失的行，留 900ms 打上“已买到”再收起
   const [ghosts, setGhosts] = useState<Array<{ row: ShoppingRow; at: number }>>([]);
@@ -140,7 +168,15 @@ export default function Shopping() {
   const toggle = (id: string) => setManual((cur) => { const n = new Set(cur); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const pickTag = (t: string) => { setOnlyTag(t); setManual(new Set()); setEdits({}); setApplied(null); setPlanCleared(true); };
   const toggleVerified = (on: boolean) => { setOnlyVerified(on); setManual(new Set()); setEdits({}); setApplied(null); setPlanCleared(true); };
-  const copy = async () => toast((await copyText(shareText(items))) ? "已复制采购文本" : "复制失败，请手动选择文字");
+  const copy = async () => {
+    const ok = await copyText(shareText(items));
+    toast(ok ? "已复制采购文本" : "复制失败，请手动选择文字");
+    if (!ok) return;
+    // 同时保存下单快照：到货后可以按“当时下的单”入库
+    try { await setLastOrder(prefsRef.current, makeOrderSnapshot(items, { planId: applied?.id, cost: cost.cost })); } catch { toast("下单快照没保存成功，入库时请按当前清单"); }
+  };
+  const clearOrder = async () => { try { await setLastOrder(prefsRef.current, null); toast("已清除下单记录"); } catch { toast("清除失败，请重试"); } };
+  const toggleRow = (code: string) => setOpenRows((cur) => { const n = new Set(cur); if (n.has(code)) n.delete(code); else n.add(code); return n; });
   const csv = () => {
     const out = rows.map((r) => {
       const qty = qtyOf(r.code, r.buy);
@@ -175,6 +211,14 @@ export default function Shopping() {
         </div>
       ) : null}
 
+      {order ? (
+        <div className="notice shop-order-note" role="status">
+          <span>已下单 {formatMD(order.at)} · {orderSummary(order).colors} 色 {fmt(orderSummary(order).beads)} 颗{order.cost !== undefined ? ` · ${formatMoney(order.cost)}` : ""}</span>
+          <span className="spacer" />
+          <button type="button" className="btn btn-sm btn-ghost" onClick={clearOrder}>清除</button>
+        </div>
+      ) : null}
+
       <section className="panel shop-hero pegboard" aria-label="采购汇总">
         <div className="shop-hero-main">
           <div className="label">清单合计（{mode === "net" ? "净需求" : "整包"}）</div>
@@ -182,7 +226,7 @@ export default function Shopping() {
           <div className="shop-kpis">
             <span>净需求 <b className="num">{fmt(net)}</b> 颗 · {colorCount} 色</span>
             <span>含损耗 <b className="num">{fmt(withLoss)}</b> 颗</span>
-            <span>整包多出 <b className="num">{fmt(surplus)}</b> 颗{withLoss ? `（${Math.round((surplus / withLoss) * 100)}%）` : ""}</span>
+            <span>整包多出 <b className="num">{fmt(surplus)}</b> 颗{shortfallTotal ? `（${Math.round((surplus / shortfallTotal) * 100)}%）` : ""}</span>
             <span>{planUnchanged ? "方案成本" : "预计成本"} <b className="num">{formatMoney(cost.cost)}</b></span>
           </div>
         </div>
@@ -244,9 +288,10 @@ export default function Shopping() {
             <button type="button" aria-pressed={mode === "net"} onClick={() => { setMode("net"); setEdits({}); setApplied(null); setPlanCleared(true); }}>按净需求买</button>
           </div>
           <div className="shop-ctl">
-            <label className="field"><span>损耗率（%）</span><input className="input num" type="number" inputMode="decimal" min={0} value={loss} onChange={(e) => { setLoss(e.target.value); resetEdits(); }} /></label>
-            <label className="field"><span>默认包装（颗/包）</span><input className="input num" type="number" inputMode="numeric" min={1} value={pack} onChange={(e) => { setPack(e.target.value); resetEdits(); }} disabled={mode === "net"} /></label>
+            <label className="field"><span>损耗率（%）</span><input className="input num" type="number" inputMode="decimal" min={0} value={loss} onChange={(e) => { setLoss(e.target.value); keepManualEdits(); }} /></label>
+            <label className="field"><span>默认包装规格（颗/包）</span><input className="input num" type="number" inputMode="numeric" min={1} value={pack} onChange={(e) => { setPack(e.target.value); keepManualEdits(); }} disabled={mode === "net"} /></label>
           </div>
+          {kept > 0 && !applied ? <p className="meta shop-kept" role="status">已保留你手动改过的 {kept} 个数量</p> : null}
           <p className="meta">{mode === "pack" ? "按整包向上取整，多出的整包会显示在顶部。" : "按实际缺口买，不按整包取整；成本仍按下单时的整包报价估算。"}</p>
           <label className="row" style={{ minHeight: 28 }}><input className="shop-check" type="checkbox" checked={includeLow} onChange={(e) => setIncludeLow(e.target.checked)} />包含补货提醒（库存低于最低库存的色号）</label>
           <label className="row" style={{ minHeight: 28 }}><input className="shop-check" type="checkbox" checked={onlyVerified} onChange={(e) => toggleVerified(e.target.checked)} disabled={!verifiedCount} />只算已核对（{verifiedCount} 张）</label>
@@ -257,8 +302,8 @@ export default function Shopping() {
 
       {view.length ? (
         <section className="panel">
-          <div className="table-wrap">
-            <table className="table">
+          <div className="table-wrap shop-wrap">
+            <table className="table shop-table">
               <thead><tr><th>色号</th><th className="r">需要(含损耗)</th><th className="r">库存</th><th className="r">缺口</th><th className="r">建议购买</th>{showPackCol ? <th className="r">包装(颗/包)</th> : null}<th className="r">{planUnchanged && applied?.setOffer ? "补充包成本" : "预计成本"}</th><th>原因</th></tr></thead>
               <tbody>
                 {view.map(({ row: r, done }) => {
@@ -272,16 +317,17 @@ export default function Shopping() {
                   const item = planUnchanged ? planItemByCode.get(r.code) : undefined;
                   const est = rowCost(r.code, qty);
                   const costTitle = item ? (item.setCovered ? `套装覆盖 1200 颗；补充包 ${formatPacks(item.packs)}` : `补充包 ${formatPacks(item.packs)}`) : formatPacks(est.packs);
+                  const open = openRows.has(r.code);
                   return (
-                    <tr key={r.code}>
-                      <td><span className="bead-code"><Bead code={r.code} /><span className="code">{r.code}</span></span></td>
-                      <td className="r">{r.needWithLoss ? fmt(r.needWithLoss) : "—"}</td>
-                      <td className="r">{fmt(r.stock)}</td>
-                      <td className="r" style={{ color: r.shortfall ? "var(--iron-ink)" : undefined }}>{r.shortfall ? fmt(r.shortfall) : "—"}</td>
-                      <td className="r"><input className="input num shop-buy" type="number" inputMode="numeric" min={0} aria-label={`${r.code} 建议购买`} value={qty} onChange={(e) => setEdits((cur) => ({ ...cur, [r.code]: Math.max(0, Math.round(Number(e.target.value)) || 0) }))} /></td>
-                      {showPackCol ? <td className="r"><input className="input num shop-pack" type="number" inputMode="numeric" min={1} aria-label={`${r.code} 包装规格`} value={packOf(r.code)} onChange={(e) => { const n = Math.max(1, Math.round(Number(e.target.value)) || 1); setPackSizes((cur) => ({ ...cur, [r.code]: n })); setEdits({}); }} /></td> : null}
-                      <td className="r" title={costTitle}>{formatMoney(est.cost)}</td>
-                      <td>{r.reason === "shortfall" ? <span className="chip chip-iron">{inventoryReady ? "缺货" : "未入库"}</span> : <span className="chip chip-amber">补货</span>}</td>
+                    <tr key={r.code} className="shop-row" data-open={open}>
+                      <td className="shop-c-code"><span className="bead-code"><Bead code={r.code} /><span className="code">{r.code}</span></span><button type="button" className="btn btn-sm btn-ghost shop-more" aria-expanded={open} aria-label={`${r.code} 库存和包装规格`} onClick={() => toggleRow(r.code)}>{open ? "收起" : "更多"}</button></td>
+                      <td className="r shop-c-need" data-label="需要(含损耗)">{r.needWithLoss ? fmt(r.needWithLoss) : "—"}</td>
+                      <td className="r shop-c-stock" data-label="库存">{fmt(r.stock)}</td>
+                      <td className="r shop-c-short" data-zero={!r.shortfall} style={{ color: r.shortfall ? "var(--iron-ink)" : undefined }}>{r.shortfall ? fmt(r.shortfall) : "—"}</td>
+                      <td className="r shop-c-buy"><input className="input num shop-buy" type="number" inputMode="numeric" min={0} aria-label={`${r.code} 建议购买`} value={qty} onChange={(e) => setEdits((cur) => ({ ...cur, [r.code]: Math.max(0, Math.round(Number(e.target.value)) || 0) }))} /></td>
+                      {showPackCol ? <td className="r shop-c-pack" data-label="包装规格"><input className="input num shop-pack" type="number" inputMode="numeric" min={1} aria-label={`${r.code} 包装规格`} value={packOf(r.code)} onChange={(e) => { const n = Math.max(1, Math.round(Number(e.target.value)) || 1); setPackSizes((cur) => ({ ...cur, [r.code]: n })); setEdits({}); }} /></td> : null}
+                      <td className="r shop-c-cost" title={costTitle}>{formatMoney(est.cost)}</td>
+                      <td className="shop-c-why" data-label="原因">{r.reason === "shortfall" ? <span className="chip chip-iron">{inventoryReady ? "缺货" : "未入库"}</span> : <span className="chip chip-amber">补货</span>}</td>
                     </tr>
                   );
                 })}
@@ -302,19 +348,30 @@ export default function Shopping() {
       )}
 
       <div className="sr-only" role="status" aria-live="polite">{say}</div>
-      {receive ? <ReceiveSheet items={items} onClose={() => setReceive(false)} onDone={() => setEdits({})} remaining={Math.max(0, rows.length)} /> : null}
+      {receive ? <ReceiveSheet items={items} order={order} onClose={() => setReceive(false)} remaining={Math.max(0, rows.length)} onDone={async (source) => {
+        setEdits({});
+        // 按下单快照入库成功后，标记已入库，不再提示
+        if (source === "order" && order) { try { await setLastOrder(prefsRef.current, { ...order, receivedAt: Date.now() }); } catch { /* 入库已成功；快照标记失败可手动清除 */ } }
+      }} /> : null}
     </div>
   );
 }
 
-function ReceiveSheet({ items, onClose, onDone, remaining }: { items: Array<{ code: string; qty: number }>; onClose: () => void; onDone: () => void; remaining: number }) {
-  const [rows, setRows] = useState(items.map((i) => ({ ...i, on: true, q: String(i.qty) })));
+type ReceiveSource = "order" | "current";
+const receiveRows = (list: Array<{ code: string; qty: number }>) => list.map((i) => ({ ...i, on: true, q: String(i.qty), amt: "" }));
+
+function ReceiveSheet({ items, order, onClose, onDone, remaining }: { items: Array<{ code: string; qty: number }>; order: LastOrder | null; onClose: () => void; onDone: (source: ReceiveSource) => void | Promise<void>; remaining: number }) {
+  // 有未入库且 60 天内的下单快照时默认按它入库；也可以切回当前清单
+  const [source, setSource] = useState<ReceiveSource>(order && orderIsFresh(order) ? "order" : "current");
+  const [rows, setRows] = useState(() => receiveRows(source === "order" && order ? order.items : items));
+  const pickSource = (next: ReceiveSource) => { setSource(next); setRows(receiveRows(next === "order" && order ? order.items : items)); };
   const [total, setTotal] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Array<{ code: string; qty: number }> | null>(null);
-  const chosen = rows.filter((r) => r.on).map((r) => ({ code: r.code, qty: Math.round(Number(r.q)) || 0 })).filter((r) => r.qty > 0);
+  const chosen = rows.filter((r) => r.on).map((r) => ({ code: r.code, qty: Math.round(Number(r.q)) || 0, amount: parseFen(r.amt) !== undefined ? Number(r.amt) : undefined })).filter((r) => r.qty > 0);
   const sum = chosen.reduce((a, r) => a + r.qty, 0);
+  const alloc = allocatePrices(chosen.map((r) => ({ qty: r.qty, fen: parseFen(r.amount) })), parseFen(total));
   const doneBtn = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (result) doneBtn.current?.focus(); }, [result]);
 
@@ -337,26 +394,34 @@ function ReceiveSheet({ items, onClose, onDone, remaining }: { items: Array<{ co
     <Sheet title="买回来了 → 入库" onClose={onClose} footer={
       <>
         <button className="btn" onClick={onClose}>取消</button>
-        <button className="btn btn-iron" disabled={!chosen.length || busy} onClick={async () => { setBusy(true); try { await commitPurchase(chosen, { note, totalPrice: Number(total) || undefined }); onDone(); setResult(chosen); } finally { setBusy(false); } }}>
+        <button className="btn btn-iron" disabled={!chosen.length || busy} onClick={async () => { setBusy(true); try { await commitPurchase(chosen, { note, totalPrice: parseFen(total) !== undefined ? Number(total) : undefined }); await onDone(source); setResult(chosen); } finally { setBusy(false); } }}>
           入库 {chosen.length} 色 · {fmt(sum)} 颗
         </button>
       </>
     }>
       <div className="stack">
+        {order ? (
+          <div className="seg shop-source" role="group" aria-label="入库依据">
+            <button type="button" aria-pressed={source === "order"} onClick={() => pickSource("order")}>按 {formatMD(order.at)} 的下单清单入库</button>
+            <button type="button" aria-pressed={source === "current"} onClick={() => pickSource("current")}>按当前清单</button>
+          </div>
+        ) : null}
         <p className="meta">按实际收到的数量修改；没到货的色号取消勾选。</p>
         <div className="sk-rows">
           {rows.map((r, i) => (
-            <div className="sk-tick-row" key={r.code}>
+            <div className="sk-tick-row sk-row-p" key={r.code} data-receive-row={r.code}>
               <input type="checkbox" checked={r.on} aria-label={`${r.code} 已到货`} onChange={(e) => setRows((cur) => cur.map((x, j) => (j === i ? { ...x, on: e.target.checked } : x)))} />
-              <span className="bead-code"><Bead code={r.code} /><span className="code">{r.code}</span><span className="meta">{colorOf(r.code)?.nameZh}</span></span>
-              <input className="input num" type="number" inputMode="numeric" min={0} aria-label={`${r.code} 数量`} value={r.q} disabled={!r.on} onChange={(e) => setRows((cur) => cur.map((x, j) => (j === i ? { ...x, q: e.target.value } : x)))} />
+              <span className="bead-code sk-c-bead"><Bead code={r.code} /><span className="code">{r.code}</span><span className="meta">{colorOf(r.code)?.nameZh}</span></span>
+              <input className="input num sk-c-qty" type="number" inputMode="numeric" min={0} aria-label={`${r.code} 数量`} value={r.q} disabled={!r.on} onChange={(e) => setRows((cur) => cur.map((x, j) => (j === i ? { ...x, q: e.target.value } : x)))} />
+              <input className="input num sk-c-amt" type="number" inputMode="decimal" min={0} step="0.01" aria-label={`${r.code} 这一行的金额（元，选填）`} placeholder="金额 元" data-row-amount value={r.amt} disabled={!r.on} onChange={(e) => setRows((cur) => cur.map((x, j) => (j === i ? { ...x, amt: e.target.value } : x)))} />
             </div>
           ))}
         </div>
         <div className="grid-2" style={{ gap: 12 }}>
-          <label className="field"><span>总价（元，选填）</span><input className="input num" type="number" inputMode="decimal" min={0} value={total} onChange={(e) => setTotal(e.target.value)} /></label>
+          <label className="field"><span>订单总价（元，选填）</span><input className="input num" type="number" inputMode="decimal" min={0} step="0.01" value={total} onChange={(e) => setTotal(e.target.value)} placeholder="没填金额的行按颗数分" data-receive-total /></label>
           <label className="field"><span>备注（选填）</span><input className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="如：淘宝订单" /></label>
         </div>
+        <PriceNote alloc={alloc} beads={sum} />
       </div>
     </Sheet>
   );

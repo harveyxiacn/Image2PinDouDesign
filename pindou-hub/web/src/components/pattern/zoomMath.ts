@@ -50,3 +50,31 @@ export function viewportRect(v: View, boxW: number, boxH: number): { l: number; 
   const t = Math.max(0, Math.min(1 - h, (hs / 2 - boxH / 2 - v.y) / hs));
   return { l, t, w, h };
 }
+
+// ---------- 格子图（按格子像素大小缩放、靠滚动平移）的手势函数 ----------
+/** 滚轮 / 触控板缩放：格子边长（整数像素）。变化太小时至少 ±1，不会卡住；结果夹在 [min,max]。deltaMode 1 = 按行滚动的鼠标。 */
+export function wheelZoomCell(cell: number, deltaY: number, deltaMode: number, min: number, max: number): number {
+  if (!deltaY) return Math.max(min, Math.min(max, cell));
+  const raw = cell * Math.exp(-deltaY * (deltaMode === 1 ? 0.05 : 0.0022));
+  let next = Math.round(raw);
+  if (next === cell) next = cell + (deltaY < 0 ? 1 : -1);
+  return Math.max(min, Math.min(max, next));
+}
+
+/** 这次按下是不是“平移”：鼠标中键，或按住空格的左键。 */
+export function isPanGesture(button: number, spaceHeld: boolean): boolean {
+  return button === 1 || (button === 0 && spaceHeld);
+}
+
+/**
+ * 双指手势：开始时记下两指中点下的内容坐标 pin（单位：格），之后每一帧让这个内容点跟着当前中点走。
+ * 返回容器应有的 scrollLeft / scrollTop（不小于 0）。缩放与双指平移因此合成一个动作。
+ */
+export function pinScroll(pin: { cx: number; cy: number }, cell: number, mx: number, my: number): { left: number; top: number } {
+  return { left: Math.max(0, pin.cx * cell - mx), top: Math.max(0, pin.cy * cell - my) };
+}
+
+/** 滚动位置 + 容器内某点 → 内容坐标（单位：格） */
+export function contentPoint(scrollLeft: number, scrollTop: number, px: number, py: number, cell: number): { cx: number; cy: number } {
+  return { cx: (scrollLeft + px) / cell, cy: (scrollTop + py) / cell };
+}

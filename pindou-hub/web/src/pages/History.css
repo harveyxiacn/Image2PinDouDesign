@@ -31,3 +31,9 @@
 @keyframes hist-open { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .hist-detail { animation: none; } .hist-caret { transition: none; } }
 @media (pointer: coarse) { .hist-top .btn-sm { min-height: 44px; } }
+
+/* 补填/修改一批入库的价格 */
+.hist-price { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 6px; }
+.hist-price .field { flex: 1 1 160px; min-width: 0; }
+.hist-price-note { flex-basis: 100%; margin: 0; }
+.hist-price-btn { margin-top: 4px; min-height: 44px; }

@@ -8,7 +8,7 @@ import BatchPanel from "../components/pattern/BatchPanel";
 import { batchStore, enqueue } from "../components/pattern/batchRunner";
 import StitchPanel from "../components/pattern/StitchPanel";
 import MultiChoice from "../components/pattern/MultiChoice";
-import type { BatchItem } from "../lib/batch";
+import { readBatchStatus, type BatchItem } from "../lib/batch";
 import GeneratePanel from "../components/pattern/GeneratePanel";
 import ManualPanel from "../components/pattern/ManualPanel";
 import "./AddPattern.css";
@@ -57,7 +57,7 @@ export default function AddPattern() {
   const openReview = (it: BatchItem) => {
     // notchart / 无结果的条目没有可用 seed：直接按单张重新识别
     const seed: RecognizeSeed | null = it.result && it.state === "done"
-      ? { result: it.result, name: it.name, tags: it.tag, status: "idea", verifiedAt: it.verifiedAt } : null;
+      ? { result: it.result, name: it.name, tags: it.tag, status: readBatchStatus(), verifiedAt: it.verifiedAt } : null;
     setReview({ id: it.id, file: it.file, seed: seed ?? (null as unknown as RecognizeSeed) });
   };
   const clear = () => { setFile(null); if (imageId) navigate(`/add?mode=${mode}`); };

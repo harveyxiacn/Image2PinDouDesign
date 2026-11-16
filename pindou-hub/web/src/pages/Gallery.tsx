@@ -201,7 +201,7 @@ export default function Gallery() {
         ) : (
           <>
             <div className="ga-filters">
-              <input className="input" type="search" placeholder="搜索名称或标签" value={q} onChange={(e) => setQ(e.target.value)} aria-label="搜索" />
+              <input className="input" type="search" placeholder="搜索名称或标签" title="搜索（按 / 跳到这里）" data-quick-search value={q} onChange={(e) => setQ(e.target.value)} aria-label="搜索" />
               <select className="select" value={status} onChange={(e) => setStatus(e.target.value as PatternStatus | "all")} aria-label="状态">
                 <option value="all">全部状态</option>
                 {(Object.keys(STATUS_LABEL) as PatternStatus[]).map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}

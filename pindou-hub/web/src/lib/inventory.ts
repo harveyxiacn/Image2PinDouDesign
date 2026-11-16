@@ -28,6 +28,24 @@ export function demandByCode(patterns: Pattern[], filter: (p: Pattern) => boolea
   return demand;
 }
 
+/** 含损耗向上取整。1e-9 容差避免浮点误差多买一颗：100 × (1 + 0.1) = 110.00000000000001 → 仍是 110。 */
+export function withLoss(n: number, rate: number): number {
+  const base = Number.isFinite(n) ? n : 0;
+  const r = Math.max(0, Number.isFinite(rate) ? rate : 0);
+  return Math.max(0, Math.ceil(base * (1 + r) - 1e-9));
+}
+
+/** 含损耗需求 − 现有库存（负库存按 0），扣完为 0 的色号不返回。供采购方案使用。 */
+export function needAfterStock(demand: Counts, stock: Counts, lossRate: number): Counts {
+  const out: Counts = {};
+  const loss = Math.max(0, lossRate || 0);
+  for (const [code, n] of Object.entries(demand)) {
+    const left = withLoss(n, loss) - Math.max(0, stock[code] ?? 0);
+    if (left > 0) out[code] = left;
+  }
+  return out;
+}
+
 export type ShoppingRow = {
   code: string;
   need: number;
@@ -49,13 +67,13 @@ export function shoppingList(stock: Counts, demand: Counts, prefs: SharedPrefs, 
   for (const code of codes) {
     const need = demand[code] ?? 0;
     const have = stock[code] ?? 0;
-    const needWithLoss = need > 0 ? Math.ceil(need * (1 + Math.max(0, prefs.lossRate))) : 0;
+    const needWithLoss = need > 0 ? withLoss(need, prefs.lossRate) : 0;
     const shortfall = Math.max(0, needWithLoss - Math.max(0, have));
     const floor = prefs.minStock[code] ?? prefs.lowStock;
     if (shortfall > 0) {
       rows.push({ code, need, needWithLoss, stock: have, shortfall, buy: Math.ceil(shortfall / pack) * pack, reason: "shortfall" });
-    } else if (includeLowStock && have - needWithLoss < floor && have > 0 && floor > 0) {
-      // 已经在库存里的色号（说明常用），扣除计划用量后低于最低库存 → 补一包。
+    } else if (includeLowStock && have - needWithLoss < floor && have >= 0 && floor > 0) {
+      // 已经在库存里的色号（有过流水，说明常用；用到 0 也要提醒），扣除计划用量后低于最低库存 → 补一包。
       const gap = floor - (have - needWithLoss);
       rows.push({ code, need, needWithLoss, stock: have, shortfall: 0, buy: Math.ceil(gap / pack) * pack, reason: "low" });
     }

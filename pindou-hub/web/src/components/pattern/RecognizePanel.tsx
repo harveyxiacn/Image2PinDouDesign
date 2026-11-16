@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { analyzePattern } from "../../lib/recognize/assistant";
 import type { AnalyzeResult, AssistantStep, Rect } from "../../lib/recognize/types";
 import { enhanceInWorker, type EnhanceResult } from "../../lib/enhance";
@@ -12,6 +12,7 @@ import { ALL_CODES, colorOf, normalizeCode } from "../../lib/palette";
 import { countMatrixColors, countsEqual, matrixDiffCount, matrixEqual, normalizeMatrix, paintCells, replaceCode, type BrushSize, type MatrixCell } from "../../lib/matrixEdit";
 import { DiffNumber, Icon, fmt, navigate, prefersReducedMotion, toast } from "../ui";
 import ImageDrop from "./ImageDrop";
+import { useLeaveGuard } from "./useLeaveGuard";
 import CaptureTips, { TipsList } from "./CaptureTips";
 import AnalysisImage, { type ImageView } from "./AnalysisImage";
 import EnhanceCard, { loadHdMode, saveHdMode, type EnhState, type HdMode } from "./EnhanceCard";
@@ -22,6 +23,7 @@ import MatrixView, { type MatrixTool } from "./MatrixView";
 import { createPattern } from "./save";
 import "./pattern.css";
 import "./stitch.css";
+import "./recognize-bar.css";
 
 type Pixels = Awaited<ReturnType<typeof loadPixelSource>>;
 type Ai = { counts: Counts; notes?: string; model: string };
@@ -117,6 +119,10 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const [tipsOpen, setTipsOpen] = useState(false);
   const [sizeDismissed, setSizeDismissed] = useState<AnalyzeResult | null>(null);
   const [ranForced, setRanForced] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [formInView, setFormInView] = useState(true);
+  const saveWrap = useRef<HTMLDivElement>(null);
   const colsInput = useRef<HTMLInputElement>(null);
   const stitchInput = useRef<HTMLInputElement>(null);
   const enhRef = useRef<EnhanceResult | null>(null);
@@ -201,8 +207,11 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
     return true;
   }, []);
 
+  // 重新识别会清掉结果与手工改过的格子：有改动时先确认
+  const confirmDiscardEdits = () => !matrixDirty || window.confirm("重新识别会丢掉对格子的修改，继续吗？");
   const setHdMode = (m: HdMode) => {
     if (m === hdMode) return;
+    if (!confirmDiscardEdits()) return;
     setHdModeState(m); modeRef.current = m; saveHdMode(m);
     const px = pixelsRef.current;
     if (!px || seedRef.current) return;
@@ -262,8 +271,9 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   };
 
-  const rerun = () => void run({ region, ocr, cellCodes, bgEmpty, cols, rows });
+  const rerun = () => { if (confirmDiscardEdits()) void run({ region, ocr, cellCodes, bgEmpty, cols, rows }); };
   const rerunWithSize = (sz: { cols: number; rows: number }) => {
+    if (!confirmDiscardEdits()) return;
     setCols(String(sz.cols)); setRows(String(sz.rows));
     void run({ region, ocr, cellCodes, bgEmpty, cols: String(sz.cols), rows: String(sz.rows) });
   };
@@ -327,6 +337,21 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
     } catch (e) { toast(e instanceof Error ? e.message : "保存失败"); setSaving(false); }
   };
 
+  // 所有 hook 必须在下面的提前 return 之前：否则选图前后 hook 数量不同，React 会直接报错（#310）
+  const notChart = !!result && result.isChart === false && !forceChart;
+  useLeaveGuard(!!result && !savedOk && (matrixDirty || !countsEqual(counts, result.counts)));
+  const settingsChanged = !ocr || !cellCodes || !bgEmpty || cols.trim() !== "" || rows.trim() !== "";
+  useEffect(() => { if (settingsChanged) setSettingsOpen(true); }, [settingsChanged]);
+  const showSave = !!result && !notChart;
+  // 底部保存条：页面里的保存按钮在视野内时不显示，滚走后才出现
+  useEffect(() => {
+    const btn = showSave ? saveWrap.current?.querySelector(".pt-save") : null;
+    if (!btn || typeof IntersectionObserver === "undefined") { setFormInView(!btn); return; }
+    const io = new IntersectionObserver(([e]) => setFormInView(!!e?.isIntersecting));
+    io.observe(btn);
+    return () => io.disconnect();
+  }, [showSave]);
+
   if (!file) {
     return (
       <div className="stack">
@@ -346,7 +371,6 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
   const conf = result ? Math.round(result.confidence * 100) : 0;
   const colorConf = result?.colorMatch != null ? Math.round(result.colorMatch * 100) : null;
   const cellPct = result?.cellCoverage != null ? Math.round(result.cellCoverage * 100) : null;
-  const notChart = !!result && result.isChart === false && !forceChart;
   const pick = (code: string) => setFocus((f) => (f === code ? null : code));
   const gridCols = result?.grid?.grid.cols ?? 0;
   const gridRows = result?.grid?.grid.rows ?? 0;
@@ -469,10 +493,32 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
     present.sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0) || a.localeCompare(b));
     return [...present, ...ALL_CODES.filter((code) => !set.has(code))];
   })();
+  const reviewReasons = result ? reviewReasonsFor(result) : [];
+  const verdictOk = !!result && result.confidence >= 0.9 && reviewReasons.length === 0;
+  const focusSaveName = () => { const i = saveWrap.current?.querySelector<HTMLInputElement>("input"); i?.scrollIntoView({ block: "center" }); i?.focus(); };
   const checks = result ? headerChecks(result) : [];
   const bgCount = result?.grid?.backgroundCells ?? 0;
   // 尺寸存疑提示：识别中、用户已手动指定尺寸、或点过“尺寸没错”时不显示（换新结果自动恢复）
   const sizeAsk = result && !notChart && !running && !ranForced && sizeDismissed !== result ? checkSize(result) : null;
+  const noticeNodes: { key: string; sev: number; node: ReactNode }[] = [];
+  if (result) {
+    if (result.method === "none") noticeNodes.push({ key: "none", sev: 5, node: <div key="none" className="notice iron" style={{ margin: 12 }}>没有读到图例，也没能确定网格。可以框选图纸区域、手动填列数和行数后重新识别，或直接在下表手动添加。</div> });
+    if (cap && capBad) noticeNodes.push({ key: "capbad", sev: 4, node: <div key="capbad" className="notice iron" style={{ margin: 12 }}><b>网格可能过细：</b>网格 {cap.cols}×{cap.rows} 最多 {fmt(cap.capacity)} 格，却数出 {fmt(cap.total)} 颗。请核对列数 / 行数，或手动改小后重新识别。</div> });
+    if (sizeAsk) noticeNodes.push({ key: "size", sev: 3, node: (
+      <div key="size" className="notice st-hint" role="status" data-testid="size-check" style={{ margin: 12 }}>
+        <span><b>请确认尺寸：</b>{sizeAsk.reason}。</span>
+        <span className="row">
+          {sizeAsk.suggested ? <button type="button" className="btn btn-sm btn-primary" onClick={() => rerunWithSize(sizeAsk.suggested!)}>按 {sizeAsk.suggested.cols}×{sizeAsk.suggested.rows} 重新识别</button> : null}
+          <button type="button" className="btn btn-sm" onClick={() => { setSettingsOpen(true); setTimeout(() => colsInput.current?.focus(), 0); }}>手动修改</button>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={() => setSizeDismissed(result)}>尺寸没错</button>
+        </span>
+      </div>
+    ) });
+    if (mismatches) noticeNodes.push({ key: "mismatch", sev: 2, node: <div key="mismatch" className="notice" style={{ margin: 12 }}>有 {mismatches} 个色号的图例数量和网格数出来的有差异{comparable && comparable !== mismatches ? `，其中 ${comparable} 个双方都读到了数字、可以直接对比` : ""}（高亮行）。请对照原图核对。</div> });
+    if (result.paletteWarning) noticeNodes.push({ key: "palette", sev: 1, node: <div key="palette" className="notice" role="note" style={{ margin: 12 }}><b>色号体系提示：</b>{result.paletteWarning}</div> });
+  }
+  const noticeList = [...noticeNodes].sort((x, y) => y.sev - x.sev);
+  const noticeShown = noticeList.length > 3 ? 2 : noticeList.length;
   return (
     <div className="ap-grid">
       <section className="stack">
@@ -547,14 +593,19 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
             <span className="spacer" />
             <button className="btn btn-sm btn-ghost" onClick={requestClear}>{clearLabel}</button>
           </div>
-          <label className="pt-check"><input type="checkbox" checked={ocr} onChange={(e) => setOcr(e.target.checked)} />读取图例（OCR，需要几秒）</label>
-          <label className="pt-check"><input type="checkbox" checked={cellCodes} onChange={(e) => setCellCodes(e.target.checked)} />读取格内色号（图纸每格印了色号时更准，白色豆也不会漏）</label>
-          <label className="pt-check"><input type="checkbox" checked={bgEmpty} onChange={(e) => setBgEmpty(e.target.checked)} />背景格不计数</label>
-          <div className="row">
-            <label className="field" style={{ width: 84 }}><span>列数</span><input ref={colsInput} className="input num" inputMode="numeric" placeholder="自动" value={cols} onChange={(e) => setCols(e.target.value)} /></label>
-            <label className="field" style={{ width: 84 }}><span>行数</span><input className="input num" inputMode="numeric" placeholder="自动" value={rows} onChange={(e) => setRows(e.target.value)} /></label>
-            <button className="btn btn-primary" style={{ alignSelf: "flex-end" }} onClick={rerun} disabled={running || !pixels}>{running ? "识别中…" : "重新识别"}</button>
-          </div>
+          <details className="rc-settings" open={settingsOpen} onToggle={(e) => setSettingsOpen((e.currentTarget as HTMLDetailsElement).open)}>
+            <summary>识别设置{settingsChanged ? <span className="chip chip-amber">已调整</span> : null}</summary>
+            <div className="stack rc-settings-body">
+              <label className="pt-check"><input type="checkbox" checked={ocr} onChange={(e) => setOcr(e.target.checked)} />读取图上的文字（色号、数量，需要几秒）</label>
+              <label className="pt-check"><input type="checkbox" checked={cellCodes} onChange={(e) => setCellCodes(e.target.checked)} />读取格子里印的色号<span className="meta">（每格印了色号时更准，白色豆也不会漏）</span></label>
+              <label className="pt-check"><input type="checkbox" checked={bgEmpty} onChange={(e) => setBgEmpty(e.target.checked)} />不统计背景格</label>
+              <div className="row">
+                <label className="field" style={{ width: 84 }}><span>列数</span><input ref={colsInput} className="input num" inputMode="numeric" placeholder="自动" value={cols} onChange={(e) => setCols(e.target.value)} /></label>
+                <label className="field" style={{ width: 84 }}><span>行数</span><input className="input num" inputMode="numeric" placeholder="自动" value={rows} onChange={(e) => setRows(e.target.value)} /></label>
+              </div>
+            </div>
+          </details>
+          <div className="row"><span className="spacer" /><button className="btn" onClick={rerun} disabled={running || !pixels}>{running ? "识别中…" : "重新识别"}</button></div>
         </div>
         <div className="panel panel-pad">
           <div className="row" style={{ marginBottom: 6 }}><Icon name="sparkle" /><b>豆探</b><span className="meta">图纸助手</span></div>
@@ -583,23 +634,27 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
               <h3>识别结果</h3>
               <div className="row">
                 <span className="chip">{result.method === "none" ? "未识别到用量" : `采用：${METHOD_LABEL[result.method]}`}</span>
+                <span className={`chip ${verdictOk ? "chip-leaf" : "chip-amber"}`} data-testid="verdict-chip">
+                  {verdictOk ? "可直接用" : "建议对照原图核对"}
+                  {result.cellCodesRead && result.cellCodeStats ? <span className="sr-only">格内色号 {result.cellCodeStats.cells != null && result.cellCodeStats.cellsTotal != null ? `${fmt(result.cellCodeStats.cells)}/${fmt(result.cellCodeStats.cellsTotal)} 格（${cellPct}%）` : `${result.cellCodeStats.read}/${result.cellCodeStats.clusters} 色`}</span> : null}
+                </span>
+              </div>
+            </div>
+            <details className="rc-basis">
+              <summary>查看依据</summary>
+              <div className="row">
                 {colorConf != null ? <span className={`chip ${colorConf >= 80 ? "chip-leaf" : colorConf >= 50 ? "chip-amber" : "chip-iron"}`} title="只看格子颜色与色卡的吻合度，不含图例数字差异">颜色匹配 {colorConf}%</span> : null}
                 {result.cellCodesRead && result.cellCodeStats ? <span className="chip chip-leaf" title={`读出了 ${result.cellCodeStats.read}/${result.cellCodeStats.clusters} 个颜色的格内色号，校正 ${result.cellCodeStats.overrides} 个颜色匹配`}>格内色号 {result.cellCodeStats.cells != null && result.cellCodeStats.cellsTotal != null ? `${fmt(result.cellCodeStats.cells)}/${fmt(result.cellCodeStats.cellsTotal)} 格（${cellPct}%）` : `${result.cellCodeStats.read}/${result.cellCodeStats.clusters} 色`}</span> : null}
                 <span className={`chip ${conf >= 80 ? "chip-leaf" : conf >= 50 ? "chip-amber" : "chip-iron"}`} title="综合颜色、图例差异、图上标注与网格容量；有疑点时最高 69%">整体可信度 {conf}%</span>
               </div>
-            </div>
-            {result.method === "none" ? <div className="notice iron" style={{ margin: 12 }}>没有读到图例，也没能确定网格。可以框选图纸区域、手动填列数和行数后重新识别，或直接在下表手动添加。</div> : null}
-            {sizeAsk ? (
-              <div className="notice st-hint" role="status" data-testid="size-check" style={{ margin: 12 }}>
-                <span><b>请确认尺寸：</b>{sizeAsk.reason}。</span>
-                <span className="row">
-                  {sizeAsk.suggested ? <button type="button" className="btn btn-sm btn-primary" onClick={() => rerunWithSize(sizeAsk.suggested!)}>按 {sizeAsk.suggested.cols}×{sizeAsk.suggested.rows} 重新识别</button> : null}
-                  <button type="button" className="btn btn-sm" onClick={() => colsInput.current?.focus()}>手动修改</button>
-                  <button type="button" className="btn btn-sm btn-ghost" onClick={() => setSizeDismissed(result)}>尺寸没错</button>
-                </span>
-              </div>
+            </details>
+            {noticeList.slice(0, noticeShown).map((n) => n.node)}
+            {noticeList.length > noticeShown ? (
+              <details className="rc-more">
+                <summary>还有 {noticeList.length - noticeShown} 条提示</summary>
+                {noticeList.slice(noticeShown).map((n) => n.node)}
+              </details>
             ) : null}
-            {result.paletteWarning ? <div className="notice" role="note" style={{ margin: 12 }}><b>色号体系提示：</b>{result.paletteWarning}</div> : null}
             {checks.length ? (
               <div className="pt-header" aria-label="图上标注核对">
                 <span className="label">图上标注</span>
@@ -614,8 +669,6 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
               </div>
             ) : null}
             {cap ? <p className="meta" style={{ padding: "8px 12px 0" }}>网格 {cap.cols}×{cap.rows}，最多 {fmt(cap.capacity)} 格；最终数出 <b className="num">{fmt(cap.total)}</b> 颗。</p> : null}
-            {capBad ? <div className="notice iron" style={{ margin: 12 }}><b>网格可能过细：</b>网格 {cap!.cols}×{cap!.rows} 最多 {fmt(cap!.capacity)} 格，却数出 {fmt(cap!.total)} 颗。请核对列数 / 行数，或手动改小后重新识别。</div> : null}
-            {mismatches ? <div className="notice" style={{ margin: 12 }}>有 {mismatches} 个色号的图例数量和网格数出来的有差异{comparable && comparable !== mismatches ? `，其中 ${comparable} 个双方都读到了数字、可以直接对比` : ""}（高亮行）。请对照原图核对。</div> : null}
             {result.legend?.statedTotal != null ? <p className="meta" style={{ padding: "8px 12px 0" }}>图上标注的总数 {fmt(result.legend.statedTotal)}，当前合计 <DiffNumber value={totalOf(counts)} /></p> : null}
             {matrix ? <p className="meta" style={{ padding: "8px 12px 0" }}>{editing ? "点一个色号选为“原色”，再用上方整色按钮替换或删除；数量随格子改动增减。" : "点一个色号，图上只亮出它的格子。"}</p> : null}
             <CountsEditor counts={counts} onChange={setCounts} diff={diff} checks={codeChecks} stagger readOnly={editing}
@@ -644,12 +697,23 @@ export default function RecognizePanel({ file, onFile, onClear, onGenerate, seed
         ) : null}
 
         {result && !notChart ? (
-          <div className="panel panel-pad">
+          <div className="panel panel-pad" ref={saveWrap}>
             {hdBlob ? <label className="pt-check" style={{ marginBottom: 8 }}><input type="checkbox" checked={useHdSource} onChange={(e) => setUseHdSource(e.target.checked)} />用高清版作为原图（图库里保存放大后的图）</label> : null}
             {matrixDirty ? <div className="notice st-hint" role="status" style={{ marginBottom: 8 }}>已手动修改 {fmt(changedCells)} 格；保存时会保留修改后的矩阵，用量也会按改动增减。</div> : null}
             <label className="pt-check" style={{ marginBottom: 8 }}><input type="checkbox" checked={verified} onChange={(e) => setVerified(e.target.checked)} />我已对照原图核对（保存后标为「已核对」）</label>
             {onVerified ? <div className="row" style={{ marginBottom: 8 }}><button type="button" className="btn btn-sm" onClick={() => onVerified?.(editedPayload())}><Icon name="check" size={14} />标为已核对，返回队列</button><span className="meta">{matrixDirty || !countsEqual(counts, result.counts) ? "修改会一并带回批量队列" : "不会保存，回到队列后可继续批量保存"}</span></div> : null}
-            <SaveForm defaultName={seed?.name || (file.name || "").replace(/\.[^.]+$/, "") || "新图纸"} defaultTags={seed?.tags} defaultStatus={seed?.status} busy={saving} success={savedOk} disabled={!Object.keys(counts).length} onSave={save} />
+            <SaveForm defaultName={seed?.name || (file.name || "").replace(/\.[^.]+$/, "") || "新图纸"} defaultTags={seed?.tags} defaultStatus={seed?.status} busy={saving} success={savedOk} disabled={!Object.keys(counts).length} formId="recognize-save-form" onNameChange={setSaveName} onSave={save} />
+          </div>
+        ) : null}
+
+        {showSave && !formInView ? (
+          <div className="rc-savebar" role="region" aria-label="保存图纸">
+            <div className="rc-savebar-info">
+              <span className="rc-savebar-name" title={saveName}>{saveName || "未命名图纸"}</span>
+              <button type="button" className="btn btn-sm btn-ghost" onClick={focusSaveName}>改名</button>
+              <span className={`chip ${verified ? "chip-leaf" : ""}`}>{verified ? "已核对" : "未核对"}</span>
+            </div>
+            <button className="btn btn-iron rc-savebar-btn" type="submit" form="recognize-save-form" data-success={savedOk ? "true" : undefined} disabled={saving || savedOk || !Object.keys(counts).length}>{savedOk ? "已保存" : saving ? "保存中…" : "保存到图库"}</button>
           </div>
         ) : null}
       </section>

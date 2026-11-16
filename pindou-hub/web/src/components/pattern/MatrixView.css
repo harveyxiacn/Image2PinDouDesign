@@ -1,0 +1,4 @@
+/* 格子图交互：按住空格 / 鼠标中键时是“抓手”；拖动时不选中文字、不弹出长按菜单。 */
+.pt-matrix-scroll { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.pt-matrix-scroll[data-panning="true"],
+.pt-matrix-scroll[data-panning="true"]:active { cursor: grab !important; }

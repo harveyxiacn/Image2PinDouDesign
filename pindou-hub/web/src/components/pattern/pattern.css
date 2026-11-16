@@ -179,3 +179,6 @@
 
 /* 与图例用量核对的小标签 */
 .pt-check-chip { margin-left: 6px; white-space: nowrap; }
+/* 拼豆图工具条：显示色号开关靠右，触控目标 ≥ 40px */
+.pt-codes-toggle { margin-left: auto; min-height: 40px; }
+.pt-matrix-tools .btn { min-height: 40px; min-width: 40px; }

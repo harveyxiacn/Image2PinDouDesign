@@ -3,19 +3,24 @@ import type { Counts, Pattern, Txn, TxnKind } from "./model";
 import { totalOf, uid } from "./model";
 import type { PatternStatus } from "./model";
 import { compareCodes } from "./inventory";
+import { allocatePrices, parseFen, unitFromFen } from "./pricing";
 
 export type Normalizer = (input: string) => string | null;
 
 // ---------- 粘贴解析：“A1 1000, B3×500\nH7=2000” ----------
-export type ParsedRow = { code: string; qty: number };
+/** amount：这一行自己的金额（元），可选；粘贴文本里写成 “A1 1200 ¥1.26” 或 “A1 1200 1.26元”。 */
+export type ParsedRow = { code: string; qty: number; amount?: number };
 export type ParseResult = { rows: ParsedRow[]; errors: string[] };
 
-const ENTRY = /([A-Za-z]{1,2}\s*\d{1,2})\s*[x×*:=：]?\s*(\d{1,7})/g;
+// 色号后必须有分隔（空白或 x×*:=：）才算数量，避免把 "A12" 拆成 A1×2、"H19" 拆成 H1×9
+// 数量后可跟金额：“¥1.26” 或 “1.26元”（单独的数字不算金额，避免和下一个色号的数量混淆）
+const ENTRY = /([A-Za-z]{1,2}\s*\d{1,2})(?!\d)(?:\s*[x×*:=：]\s*|\s+)(\d{1,7})(?:\s*¥\s*(\d+(?:\.\d+)?)|\s*(\d+(?:\.\d+)?)\s*元)?/g;
 
 /** 解析粘贴文本。重复色号数量相加；认不出的色号放进 errors（原样文本）。 */
 export function parseBatchText(input: string, normalize: Normalizer): ParseResult {
   const text = input.normalize("NFKC").replace(/[，；、;]/g, ",").replace(/(?<![A-Za-z\d])(\d{1,3}),(\d{3})(?!\d)/g, "$1$2");
   const map = new Map<string, number>();
+  const amounts = new Map<string, number>();
   const errors: string[] = [];
   let covered = text;
   for (const match of text.matchAll(ENTRY)) {
@@ -25,28 +30,40 @@ export function parseBatchText(input: string, normalize: Normalizer): ParseResul
     if (!code) { errors.push(match[1].replace(/\s+/g, "").toUpperCase()); continue; }
     if (!(qty > 0)) continue;
     map.set(code, (map.get(code) ?? 0) + qty);
+    const amount = Number(match[3] ?? match[4]);
+    if (amount > 0) amounts.set(code, (amounts.get(code) ?? 0) + amount);
   }
   // 剩下带字母/数字的零碎也提示（例如只有色号没有数量）
   for (const leftover of covered.split(/[\s,]+/)) {
     if (/[A-Za-z0-9]/.test(leftover) && !errors.includes(leftover.toUpperCase())) errors.push(leftover.toUpperCase());
   }
-  return { rows: [...map].map(([code, qty]) => ({ code, qty })), errors };
+  return { rows: [...map].map(([code, qty]) => (amounts.has(code) ? { code, qty, amount: Math.round(amounts.get(code)! * 100) / 100 } : { code, qty })), errors };
 }
 
 // ---------- 入库流水 ----------
 export type PurchaseOpts = { device: string; note?: string; totalPrice?: number; at?: number; batchId?: string };
 
-/** 一批入库 → 同一 batchId 的 purchase 流水；填了总价则按颗数均摊成单价。 */
+/**
+ * 一批入库 → 同一 batchId 的 purchase 流水。
+ * 价格规则见 lib/pricing.ts 的 allocatePrices：行自填金额优先，订单总价的余额按颗数分给没填的行；
+ * 存进流水的仍是单价（元/颗）= 该行金额 ÷ 颗数。
+ */
 export function purchaseTxns(rows: ParsedRow[], opts: PurchaseOpts): Txn[] {
   const at = opts.at ?? Date.now();
   const batchId = opts.batchId ?? uid("b");
   const valid = rows.filter((r) => r.qty > 0);
-  const sum = valid.reduce((a, r) => a + r.qty, 0);
-  const unit = opts.totalPrice && opts.totalPrice > 0 && sum > 0 ? Math.round((opts.totalPrice / sum) * 100000) / 100000 : undefined;
-  return valid.map((r) => ({
+  const alloc = allocatePrices(valid.map((r) => ({ qty: Math.round(r.qty), fen: parseFen(r.amount) })), parseFen(opts.totalPrice));
+  return valid.map((r, i) => ({
     id: uid("t"), code: r.code, delta: Math.round(r.qty), kind: "purchase" as const, batchId,
-    unitPrice: unit, note: opts.note?.trim() || undefined, device: opts.device, at, updatedAt: at
+    unitPrice: unitFromFen(alloc.fen[i], Math.round(r.qty)), note: opts.note?.trim() || undefined, device: opts.device, at, updatedAt: at
   }));
+}
+
+/** 给已有的一批入库流水补填/修改总价：按颗数分摊（合计恰好等于总价）；fen 为空 = 清除价格。只改 purchase 且 delta>0 的行。 */
+export function repriceTxns(txns: Txn[], fen: number | undefined, now: number): Txn[] {
+  const rows = txns.filter((t) => t.kind === "purchase" && t.delta > 0);
+  const alloc = allocatePrices(rows.map((t) => ({ qty: t.delta })), fen);
+  return rows.map((t, i) => ({ ...t, unitPrice: unitFromFen(alloc.fen[i], t.delta), updatedAt: Math.max(now, t.updatedAt + 1) }));
 }
 
 // ---------- 采购文本 ----------

@@ -62,7 +62,7 @@ async function shot(name) {
 }
 
 const AUDIT = `(() => {
-  const name = (el) => (el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.value || '').trim();
+  const name = (el) => (el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.value || el.textContent || '').trim();
   const visible = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
   const issues = [];
   document.querySelectorAll('button, a[href], [role=button]').forEach((el) => { if (visible(el) && !name(el) && !el.querySelector('img[alt]:not([alt=""])')) issues.push('unnamed ' + el.tagName + ' ' + (el.className || '')); });
@@ -160,7 +160,8 @@ try {
     if (msg.id && pending.has(msg.id)) { const p = pending.get(msg.id); pending.delete(msg.id); msg.error ? p.rej(new Error(msg.error.message)) : p.res(msg.result); return; }
     if (msg.method === "Runtime.exceptionThrown") errors.push({ type: "exception", text: msg.params.exceptionDetails.exception?.description ?? msg.params.exceptionDetails.text });
     if (msg.method === "Runtime.consoleAPICalled" && msg.params.type === "error") errors.push({ type: "console", text: msg.params.args.map((a) => a.value ?? a.description).join(" ") });
-    if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") errors.push({ type: "log", text: `${msg.params.entry.text} ${msg.params.entry.url ?? ""}` });
+    // tesseract 的 chi_sim 训练数据带有 LSTM-only 内核不认识的旧引擎参数，加载时会打印 "Warning: Parameter not found: …"，无害，不算错误
+    if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error" && !/^Warning: Parameter not found: /.test(msg.params.entry.text ?? "")) errors.push({ type: "log", text: `${msg.params.entry.text} ${msg.params.entry.url ?? ""}` });
   };
   await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable"); await send("DOM.enable");
   await setViewport(1366, 900);
@@ -204,7 +205,7 @@ try {
     await sleep(800);
     await shot("04-recognize-result");
     recognizedText = await evaluate("document.querySelector('main').innerText");
-    if (!/格内色号 \d+\/\d+ 色/.test(recognizedText)) throw new Error("in-cell code chip missing");
+    if (!/格内色号 [\d,]+\/[\d,]+ (色|格)/.test(recognizedText)) throw new Error("in-cell code chip missing");
     if (!recognizedText.includes("11,128")) throw new Error("total 11,128 not shown");
     return recognizedText.match(/读取格内色号[^\n]*\n[^\n]*/)?.[0] ?? recognizedText.slice(0, 400);
   });
@@ -376,6 +377,49 @@ try {
     return recognizedHash;
   });
 
+  // ---- 图库详情：编辑格子（橡皮点击 + 拖动）→ 保存 → 用量减少且变为未核对；色号标注 ----
+  await step("gallery detail: erase cells, save, codes toggle", async () => {
+    await go(recognizedHash || "#/gallery");
+    await waitFor(`[...document.querySelectorAll('button')].some(b => b.innerText.trim().startsWith('编辑格子'))`, 15000, "编辑格子 button");
+    const totalOf = () => evaluate(`(() => { const m = (document.querySelector('.pd-controls')?.innerText ?? '').match(/([\\d,]+) 颗/); return m ? Number(m[1].replace(/,/g, '')) : -1; })()`);
+    const before = await totalOf();
+    await clickText("编辑格子");
+    await waitFor(`document.querySelector('.me .me-bar [aria-pressed="true"]')?.innerText.trim() === '橡皮'`, 10000, "editor open with eraser");
+    const wrapRect = async () => evaluate(`(() => { const w = document.querySelector('.me .pt-matrix-scroll'); w.scrollIntoView({block:'center'}); const r = w.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; })()`);
+    await sleep(300);
+    const r = await wrapRect();
+    const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    await clickAt(cx, cy); // 单点
+    for (const dy of [-12, 0, 12]) { // 三条拖动
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: cx - 40, y: cy + dy });
+      await send("Input.dispatchMouseEvent", { type: "mousePressed", x: cx - 40, y: cy + dy, button: "left", buttons: 1, clickCount: 1 });
+      for (let i = 1; i <= 8; i++) await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: cx - 40 + i * 10, y: cy + dy, button: "left", buttons: 1 });
+      await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: cx + 40, y: cy + dy, button: "left", buttons: 0, clickCount: 1 });
+    }
+    await sleep(300);
+    const footer = await evaluate(`document.querySelector('.me-foot')?.innerText ?? ''`);
+    if (!/已改 \d+ 格/.test(footer)) throw new Error(`no cells erased: ${footer}`);
+    await clickText("保存修改");
+    await waitFor(`!document.querySelector('.me')`, 15000, "editor closed after save");
+    await sleep(600);
+    const after = await totalOf();
+    const page = await evaluate(`document.querySelector('main').innerText`);
+    if (!(after >= 0 && before >= 0 && after < before)) throw new Error(`total not decreased: ${before} -> ${after}`);
+    if (!page.includes("标为已核对")) throw new Error("pattern not shown as unverified");
+    if (!/已手动修改 \d+ 格/.test(page)) throw new Error("review reason missing");
+    // 色号标注
+    const on = await evaluate(`(() => { const i = document.querySelector('.pt-codes-toggle input'); if (!i) return null; if (!i.checked) i.click(); return true; })()`);
+    if (!on) throw new Error("显示色号 toggle missing");
+    for (let i = 0; i < 25; i++) {
+      if (await evaluate(`document.querySelector('.pt-matrix')?.dataset.codes === 'on'`)) break;
+      await evaluate(`document.querySelector('.pt-matrix-tools button[aria-label="放大"]').click()`);
+      await sleep(150);
+    }
+    await waitFor(`document.querySelector('.pt-matrix')?.dataset.codes === 'on'`, 5000, "data-codes=on after zoom");
+    await shot("05b-pattern-codes");
+    return `total ${before} -> ${after}; codes on`;
+  });
+
   // ---- 生成图纸 ----
   await step("generate pattern from photo", async () => {
     await go("#/add?mode=generate");
@@ -481,7 +525,7 @@ try {
     await waitFor(`document.querySelectorAll('.bt-item').length === 3 && ![...document.querySelectorAll('.bt-item')].some(i => ['waiting','running'].includes(i.dataset.state))`, 900000, "queue settled");
     await sleep(600);
     await shot("19-batch-done");
-    const states = await evaluate(`[...document.querySelectorAll('.bt-item')].map(i => i.querySelector('.bt-name').innerText + ':' + i.dataset.state + (i.dataset.review === 'true' ? '(review)' : ''))`);
+    const states = await evaluate(`[...document.querySelectorAll('.bt-item')].map(i => (i.querySelector('.bt-name')?.value ?? i.querySelector('.bt-name')?.innerText ?? '') + ':' + i.dataset.state + (i.dataset.review === 'true' ? '(review)' : ''))`);
     const live = await evaluate(`document.querySelector('.bt-wrap [role=status]')?.innerText ?? ''`);
     if (!sawBar) throw new Error("no progress bar");
     if (!live) throw new Error("live region stayed empty");
@@ -492,9 +536,9 @@ try {
   await step("batch: non-chart offers generate; save all", async () => {
     const gen = await evaluate(`[...document.querySelectorAll('.bt-item[data-state=notchart] button')].some(b => b.innerText.includes('用它生成图纸'))`);
     if (!gen) throw new Error("no 用它生成图纸 on the non-chart row");
-    // 真实引擎下若全部被标“需要检查”，“全部保存”是禁用的：改点第一行的“仍然保存”
-    const allEnabled = await evaluate(`[...document.querySelectorAll('button')].some(b => b.innerText.trim() === '全部保存到图库' && !b.disabled)`);
-    if (allEnabled) await clickText("全部保存到图库"); else await clickText("仍然保存");
+    // 批量页底部的主按钮：“全部保存为计划拼 / 全部保存为收藏”（带检查提示的项也一并保存，标为未核对）
+    const clicked = await evaluate(`(() => { const b = [...document.querySelectorAll('button')].find(b => /^全部保存为/.test(b.innerText.trim()) && !b.disabled); if (!b) return false; b.click(); return true; })()`);
+    if (!clicked) throw new Error("no enabled 全部保存为… button");
     await waitFor(`document.querySelectorAll('.bt-item[data-saved=true]').length >= 1`, 60000, "items saved");
     await sleep(500);
     await shot("20-batch-saved");
@@ -624,14 +668,14 @@ try {
     return "hint shown and expands tips";
   });
 
-  for (const [hash, name] of [["#/", "08-dashboard"], ["#/gallery", "09-gallery"], ["#/gallery?tab=images", "10-images"], ["#/shopping", "11-shopping"], ["#/history", "12-history"], ["#/settings", "13-settings"]]) {
+  for (const [hash, name] of [["#/", "08-dashboard"], ["#/gallery", "09-gallery"], ["#/gallery?tab=images", "10-images"], ["#/shopping", "11-shopping"], ["#/purchase", "11b-purchase"], ["#/insights", "11c-insights"], ["#/history", "12-history"], ["#/settings", "13-settings"]]) {
     await step(`page ${hash}`, async () => { await go(hash); await shot(name); await noHorizontalScroll(hash); return (await evaluate("document.querySelector('main').innerText")).slice(0, 300); });
   }
 
 
   // ---- 第 8 阶段证据：无障碍与交互 ----
   const auditAll = [];
-  for (const hash of ["#/", "#/gallery", "#/inventory", "#/shopping", "#/history", "#/settings", "#/add?mode=recognize", "#/add?mode=generate", "#/add?mode=manual", "#/add?mode=batch"]) {
+  for (const hash of ["#/", "#/gallery", "#/inventory", "#/shopping", "#/purchase", "#/insights", "#/history", "#/settings", "#/add?mode=recognize", "#/add?mode=generate", "#/add?mode=manual", "#/add?mode=batch"]) {
     await go(hash);
     const issues = await evaluate(AUDIT);
     auditAll.push(...issues.map((i) => `${hash}: ${i}`));
@@ -658,11 +702,176 @@ try {
     if (!back.includes("批量入库")) throw new Error("focus did not return to trigger: " + back);
     return "trap ok · closed · focus back on 批量入库";
   });
+  // ---- 第 3 波：入库价格 / 补货预告 / 快捷键 ----
+  const setInput = (selector, value) => evaluate(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(String(value))}); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
+  await step("price: batch stock-in with a row price in the text and an order total", async () => {
+    await go("#/inventory");
+    await clickText("批量入库");
+    await waitFor(`document.querySelector('.sheet textarea')`, 5000, "batch sheet");
+    if (!(await setInput('.sheet textarea', 'C3 1200 ¥1.26, C5 500, C7 500'))) throw new Error("textarea missing");
+    await sleep(300);
+    await clickText("加入下面的列表", ".sheet button");
+    await sleep(500);
+    const rows = await evaluate(`document.querySelectorAll('[data-batch-row]').length`);
+    if (rows !== 3) throw new Error("expected 3 rows, got " + rows);
+    if (!(await setInput('[data-batch-total]', '3.26'))) throw new Error("order total input missing");
+    await sleep(400);
+    const summary = await evaluate(`document.querySelector('[data-price-summary]')?.innerText ?? ''`);
+    const rowAmounts = await evaluate(`JSON.stringify([...document.querySelectorAll('[data-row-amount]')].map((i) => [i.value, i.placeholder]))`);
+    if (await evaluate(`!!document.querySelector('[data-price-warning]')`)) throw new Error("unexpected price warning: " + summary);
+    await shot("40-batch-price");
+    const btn = await evaluate(`(() => { const b = [...document.querySelectorAll('.sheet button')].find(b => /^入库 \\d/.test(b.innerText.trim()) && !b.disabled); if (!b) return null; b.click(); return b.innerText; })()`);
+    if (!btn) throw new Error("confirm button not found");
+    await sleep(1200);
+    await go("#/history");
+    const hist = await evaluate(`document.querySelector('main').innerText`);
+    if (!hist.includes("3.26")) throw new Error("history does not show ¥3.26: " + hist.slice(0, 300));
+    const edit = await evaluate(`document.querySelectorAll('[data-hist-price]').length`);
+    if (!edit) throw new Error("no 补填价格 button in history");
+    await evaluate(`document.querySelector('[data-hist-price]').click()`);
+    await waitFor(`document.querySelector('[data-hist-price-edit] input')`, 3000, "price edit form");
+    await shot("41-history-price");
+    return `rows ${rowAmounts} · ${summary.replace(/\s+/g, " ").slice(0, 120)} · edit buttons ${edit}`;
+  });
+  await step("price: over-allocated rows show a warning", async () => {
+    await go("#/inventory");
+    await clickText("批量入库");
+    await waitFor(`document.querySelector('.sheet textarea')`, 5000, "batch sheet");
+    await setInput('.sheet textarea', 'C3 1200 ¥5, C5 500');
+    await sleep(300);
+    await clickText("加入下面的列表", ".sheet button");
+    await sleep(400);
+    await setInput('[data-batch-total]', '2');
+    await sleep(400);
+    const warn = await evaluate(`document.querySelector('[data-price-warning="over"]')?.innerText ?? ''`);
+    await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await sleep(500);
+    await evaluate(`[...document.querySelectorAll('button')].find((b) => /放弃|不保存|确定|离开/.test(b.innerText))?.click()`);
+    await sleep(300);
+    if (!warn) throw new Error("no over-allocation warning");
+    return warn.replace(/\s+/g, " ").slice(0, 100);
+  });
+  await step("forecast: panel, horizon selector, method line, dashboard card", async () => {
+    await go("#/insights");
+    await waitFor(`document.querySelector('[data-forecast-panel]')`, 8000, "forecast panel");
+    await evaluate(`document.querySelector('[data-horizon="3"]')?.click()`);
+    await sleep(400);
+    const pressed = await evaluate(`document.querySelector('[data-horizon="3"]')?.getAttribute('aria-pressed')`);
+    if (pressed !== "true") throw new Error("horizon 3 not pressed: " + pressed);
+    const how = await evaluate(`document.querySelector('[data-forecast-how]')?.innerText ?? ''`);
+    const rows = await evaluate(`JSON.stringify([...document.querySelectorAll('[data-forecast-row]')].slice(0, 5).map((r) => r.dataset.code + ':' + r.dataset.status))`);
+    const thin = await evaluate(`!!document.querySelector('[data-forecast-thin]')`);
+    await evaluate(`document.querySelector('[data-forecast-panel]').scrollIntoView({ block: 'start' })`);
+    await shot("42-forecast");
+    await go("#/");
+    const card = await evaluate(`!!document.querySelector('[data-forecast-card]')`);
+    return `rows ${rows} · thin=${thin} · card=${card} · ${how.replace(/\s+/g, " ").slice(0, 100)}`;
+  });
+  await step("shortcuts: ? opens help, Esc closes, / focuses search, g then i goes to inventory", async () => {
+    await go("#/gallery");
+    await evaluate(`document.activeElement?.blur?.()`);
+    await pressKey("?");
+    await waitFor(`document.querySelector('[data-shortcut-help]')`, 4000, "shortcut help sheet");
+    await shot("43-shortcut-help");
+    await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await waitFor(`!document.querySelector('[data-shortcut-help]')`, 4000, "help closed");
+    await evaluate(`document.activeElement?.blur?.()`);
+    await pressKey("/");
+    await sleep(300);
+    const focused = await evaluate(`!!document.activeElement?.matches?.('[data-quick-search], input[type=search]')`);
+    if (!focused) throw new Error("/ did not focus search: " + await evaluate("document.activeElement?.tagName"));
+    const typed = await evaluate(`document.activeElement.value`);
+    if (typed.includes("/")) throw new Error("the / character was typed into the search box");
+    await evaluate(`document.activeElement?.blur?.()`);
+    await pressKey("g"); await sleep(100); await pressKey("i");
+    await sleep(900);
+    const hash = await evaluate("location.hash");
+    if (!hash.startsWith("#/inventory")) throw new Error("g i went to " + hash);
+    return "help ok · / focuses search · g i → " + hash;
+  });
+  await step("price: single-colour stock-in asks what was paid", async () => {
+    await go("#/inventory");
+    const opened = await evaluate(`(() => { const el = [...document.querySelectorAll('main button, main [role=button]')].find((b) => /\\bA26\\b/.test(b.innerText)); if (!el) return false; el.scrollIntoView({ block: 'center' }); el.click(); return true; })()`);
+    if (!opened) throw new Error("no A26 control on the inventory page");
+    await waitFor(`document.querySelector('[data-buy-paid]')`, 5000, "paid field");
+    await evaluate(`document.querySelector('[data-pack="1200"]')?.click()`);
+    await sleep(200);
+    await setInput('[data-buy-paid]', '1.26');
+    await sleep(300);
+    const derived = await evaluate(`document.querySelector('[data-buy-derived]')?.innerText ?? ''`);
+    await shot("44-code-sheet-price");
+    await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await sleep(400);
+    if (!/1\.05/.test(derived)) throw new Error("derived price text: " + derived);
+    return derived.replace(/\s+/g, " ");
+  });
   checks.push({ check: "token contrast (light)", ok: true, detail: JSON.stringify(await evaluate(CONTRAST)) });
   await setViewport(390, 844, true);
-  for (const [hash, name] of [["#/", "m1-dashboard"], ["#/inventory", "m2-inventory"], ["#/add?mode=recognize", "m3-add"], ["#/add?mode=batch", "m8-batch"], ["#/gallery", "m4-gallery"], ["#/shopping", "m5-shopping"], ["#/settings", "m6-settings"]]) {
+  for (const [hash, name] of [["#/", "m1-dashboard"], ["#/inventory", "m2-inventory"], ["#/add?mode=recognize", "m3-add"], ["#/add?mode=batch", "m8-batch"], ["#/gallery", "m4-gallery"], ["#/shopping", "m5-shopping"], ["#/purchase", "m5b-purchase"], ["#/insights", "m5c-insights"], ["#/settings", "m6-settings"]]) {
     await step(`mobile ${hash}`, async () => { await go(hash); await shot(name); await noHorizontalScroll(hash); return "ok"; });
   }
+
+  await step("mobile: 更多 sheet reaches 采购方案 / 数据洞察 / 记录 / 设置", async () => {
+    await go("#/");
+    await evaluate(`document.querySelector('.tab-more').click()`);
+    await waitFor(`document.querySelector('.sheet-backdrop')`, 5000, "更多 sheet");
+    const labels = await evaluate(`[...document.querySelectorAll('.sheet-backdrop a.more-row')].map(a => a.getAttribute('href') + ' ' + (a.textContent || '').trim().slice(0, 12))`);
+    for (const h of ["#/shopping", "#/purchase", "#/insights", "#/history", "#/settings"]) if (!labels.some((l) => l.startsWith(h + " "))) throw new Error(`更多 sheet lacks ${h}: ${labels.join(" | ")}`);
+    await shot("m9-more-sheet");
+    await evaluate(`document.querySelector('.sheet-backdrop a[href="#/insights"]').click()`);
+    await sleep(900);
+    const state = await evaluate(`({ hash: location.hash, sheet: !!document.querySelector('.sheet-backdrop'), cur: document.querySelector('.tab-more')?.getAttribute('aria-current') })`);
+    if (state.hash !== "#/insights" || state.sheet || state.cur !== "page") throw new Error(JSON.stringify(state));
+    return labels.join(" | ");
+  });
+  await step("mobile: 拼装模式 from pattern detail (finish colour, undo, row mode, board sheet, resume)", async () => {
+    if (!recognizedHash) throw new Error("no saved pattern");
+    await go(recognizedHash);
+    await waitFor(`[...document.querySelectorAll('button')].some(b => /^(开始拼|继续拼)/.test(b.innerText.trim()))`, 15000, "开始拼 button");
+    await evaluate(`[...document.querySelectorAll('button')].find(b => /^(开始拼|继续拼)/.test(b.innerText.trim())).click()`);
+    await waitFor(`location.hash.startsWith('#/build/') && document.querySelector('[data-build-root]')`, 15000, "build page");
+    await sleep(500);
+    const read = () => evaluate(`(() => { const r = document.querySelector('[data-build-root]'); return { board: r.dataset.buildBoard, color: r.dataset.buildColor, progress: Number(r.dataset.buildProgress), chip: document.querySelector('[data-build-chip]')?.innerText ?? '', chrome: !!document.querySelector('.tabbar') && getComputedStyle(document.querySelector('.tabbar')).display !== 'none' }; })()`);
+    const s0 = await read();
+    if (s0.board !== "1" || !s0.color || s0.progress !== 0) throw new Error("bad initial state " + JSON.stringify(s0));
+    if (s0.chrome) throw new Error("tab bar still visible in build mode");
+    await noHorizontalScroll("build mode");
+    await shot("m10-build");
+    await evaluate(`document.querySelector('[data-build-finish]').click()`);
+    await sleep(400);
+    const s1 = await read();
+    if (s1.board === s0.board && s1.color === s0.color) {
+      const dbg = await evaluate(`JSON.stringify({ ds: { ...document.querySelector('[data-build-root]').dataset }, btn: document.querySelector('[data-build-finish]')?.outerHTML.slice(0, 200), txt: document.querySelector('[data-build-root]').innerText.slice(0, 300) })`);
+      throw new Error("finish colour did not advance " + JSON.stringify(s1) + " :: " + dbg);
+    }
+    await evaluate(`document.querySelector('[data-build-undo]').click()`);
+    await sleep(300);
+    const s2 = await read();
+    if (s2.color !== s0.color || s2.board !== s0.board) throw new Error("undo did not restore " + JSON.stringify(s2));
+    await evaluate(`document.querySelector('[data-build-finish]').click()`);
+    await sleep(300);
+    await evaluate(`document.querySelector('[data-build-mode-toggle]').click()`);
+    await waitFor(`document.querySelector('[data-build-row]')`, 5000, "row strip");
+    const rowText = await evaluate(`document.querySelector('[data-build-row]').innerText`);
+    await evaluate(`document.querySelector('[data-build-mode-toggle]').click()`);
+    await evaluate(`document.querySelector('[data-build-board-open]').click()`);
+    await waitFor(`document.querySelector('[data-build-board-btn="2"]')`, 5000, "board map");
+    await shot("m11-build-boards");
+    await evaluate(`document.querySelector('[data-build-board-btn="2"]').click()`);
+    await sleep(400);
+    const s3 = await read();
+    if (s3.board !== "2") throw new Error("board did not switch " + JSON.stringify(s3));
+    await sleep(2200); // 等防抖保存
+    await evaluate(`location.reload()`);
+    await waitFor(`document.querySelector('[data-build-root]')`, 30000, "build page after reload");
+    await sleep(600);
+    const s4 = await read();
+    if (s4.board !== "2") throw new Error("position not restored after reload " + JSON.stringify(s4));
+    return `start ${s0.color} → ${s1.color} (${s1.progress}%); row "${rowText.slice(0, 40)}"; resumed board ${s4.board} ${s4.progress}%`;
+  });
 
   await step("mobile 390: zoomed recognition preview, inspector, pinch, no overflow; dark + desktop-dark shots", async () => {
     await go("#/add?mode=recognize");

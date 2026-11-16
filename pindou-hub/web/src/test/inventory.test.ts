@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareCodes, consumeTxns, demandByCode, readiness, shoppingList, stockByCode, stocktakeTxn } from "../lib/inventory";
+import { compareCodes, consumeTxns, demandByCode, needAfterStock, readiness, shoppingList, stockByCode, stocktakeTxn, withLoss } from "../lib/inventory";
 import { DEFAULT_PREFS, type Pattern, type Txn } from "../lib/model";
 import { sha256Fallback } from "../lib/images";
 
@@ -55,6 +55,32 @@ describe("inventory ledger", () => {
     expect(new Set(txns.map((t) => t.batchId)).size).toBe(1);
     expect(stocktakeTxn("A1", 950, 1000, "dev")!.delta).toBe(-50);
     expect(stocktakeTxn("A1", 1000, 1000, "dev")).toBeNull();
+  });
+
+  it("reminds about a colour that was consumed down to exactly zero", () => {
+    const prefs = { ...DEFAULT_PREFS, lossRate: 0, packSize: 500, lowStock: 200 };
+    const stock = stockByCode([txn("A1", 1000), txn("A1", -1000)]);
+    expect(stock).toEqual({ A1: 0 });
+    expect(shoppingList(stock, {}, prefs, true)).toEqual([expect.objectContaining({ code: "A1", reason: "low", buy: 500 })]);
+    expect(shoppingList(stock, {}, prefs, false)).toEqual([]);
+    // 负库存（记账误差）不触发
+    expect(shoppingList({ A1: -5 }, {}, prefs, true)).toEqual([]);
+  });
+
+  it("needAfterStock deducts stock after loss, clamps negatives and drops covered colours", () => {
+    const demand = { A1: 1000, B3: 500, H7: 100, C2: 50 };
+    expect(needAfterStock(demand, {}, 0.1)).toEqual({ A1: 1100, B3: 550, H7: 110, C2: 55 });
+    expect(needAfterStock(demand, { A1: 300, B3: 550, H7: 900, C2: -40 }, 0.1)).toEqual({ A1: 800, C2: 55 });
+    expect(needAfterStock({ A1: 10 }, { A1: 5 }, -1)).toEqual({ A1: 5 });
+  });
+
+  it("withLoss rounds up without floating-point over-buy", () => {
+    expect(withLoss(100, 0.1)).toBe(110);
+    expect(withLoss(1000, 0.05)).toBe(1050);
+    expect(withLoss(7, 0.05)).toBe(8);
+    expect(withLoss(0, 0.1)).toBe(0);
+    expect(withLoss(50, 0.1)).toBe(55);
+    expect(withLoss(10, -1)).toBe(10);
   });
 
   it("sorts codes by series then number", () => {

@@ -17,7 +17,7 @@ export type BatchItem = {
   result?: AnalyzeResult;
   error?: string;
   savedId?: string;
-  /** 图库里已经有同一张图（SHA-256 相同） */
+  /** 图库里已经有同一张图（内容完全相同） */
   duplicateImageId?: string;
   /** 用户点过“仍然识别”，本次跳过查重 */
   force?: boolean;
@@ -64,7 +64,7 @@ export function baseName(name: string): string {
   return name.replace(/\.[^.]+$/, "") || name;
 }
 
-/** 文件名像内容哈希（32/40/64 位十六进制）：导入后应该提示改成可读的名字。 */
+/** 文件名是一串乱码（像 32/40/64 位十六进制哈希）：导入后应该提示改成可读的名字。 */
 export function isHashName(name: string): boolean {
   return /^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$/i.test(baseName(name));
 }
@@ -171,7 +171,7 @@ export function reduceBatch(items: BatchItem[], a: BatchAction): BatchItem[] {
     });
     case "duplicate": return patch(a.id, (it) => (it.state === "waiting" || it.state === "running" ? { ...it, state: "duplicate", duplicateImageId: a.imageId } : it));
     case "fail": return patch(a.id, (it) => (it.state === "running" ? { ...it, state: "failed", error: a.error } : it));
-    case "name": return patch(a.id, (it) => ({ ...it, name: a.name.trim() || it.name }));
+    case "name": return patch(a.id, (it) => ({ ...it, name: a.name })); // 原样保存输入（可清空、可含空格），保存时再 savedName()
     case "edited": return patch(a.id, (it) => {
       if (it.state !== "done") return it;
       const c = classify(a.result);
@@ -228,6 +228,11 @@ export function summarize(items: BatchItem[]): BatchSummary {
   return s;
 }
 
+/** 保存到图库用的名称：去掉首尾空白；清空了就退回文件名。 */
+export function savedName(it: { name: string; file: { name: string } }): string {
+  return it.name.trim() || baseName(it.file.name).trim() || "未命名图纸";
+}
+
 /** 屏幕阅读器播报：某张识别结束时的一句话 */
 export function announceFor(it: BatchItem): string {
   const n = it.name;
@@ -237,4 +242,24 @@ export function announceFor(it: BatchItem): string {
   if (it.state === "failed") return `${n} 识别失败`;
   if (it.state === "cancelled") return `${n} 已取消`;
   return "";
+}
+
+// ---------- 批量保存后的状态（记住上次选择；默认“计划拼”，与单张保存一致） ----------
+export const BATCH_STATUS_KEY = "ph.batch.status";
+export function readBatchStatus(): "planned" | "idea" {
+  try { return globalThis.localStorage?.getItem(BATCH_STATUS_KEY) === "idea" ? "idea" : "planned"; } catch { return "planned"; }
+}
+export function writeBatchStatus(s: "planned" | "idea"): void {
+  try { globalThis.localStorage?.setItem(BATCH_STATUS_KEY, s); } catch { /* 隐私模式 / 存储被禁：忽略 */ }
+}
+
+export type BatchFilter = "all" | "review" | "notchart" | "saved";
+/** 队列筛选：需检查 = 识别完成、带检查提示、尚未保存也未核对。 */
+export function matchesFilter(it: BatchItem, f: BatchFilter): boolean {
+  switch (f) {
+    case "all": return true;
+    case "review": return it.state === "done" && it.review && !it.savedId && !it.verifiedAt;
+    case "notchart": return it.state === "notchart" && !it.savedId;
+    case "saved": return !!it.savedId;
+  }
 }
