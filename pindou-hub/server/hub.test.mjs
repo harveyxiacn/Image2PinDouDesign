@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import http from "node:http";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import crypto from "node:crypto";
 import os from "node:os";
@@ -39,6 +40,23 @@ test("pairing: wrong code rejected, right code returns token, API needs token", 
   assert.equal((await ok.json()).token, config.token);
   const local = await (await fetch(`${base}/api/local-token`)).json();
   assert.equal(local.token, config.token, "loopback page gets token automatically");
+});
+
+// 只用 http.request：fetch 不让改 Host 头
+const rawGet = (pathname, headers) => new Promise((resolve, reject) => {
+  const req = http.request({ host: "127.0.0.1", port, path: pathname, headers }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode)); });
+  req.on("error", reject);
+  req.end();
+});
+
+test("local token: other web origins and rebinding hosts are refused", async () => {
+  assert.equal(await rawGet("/api/local-token", { origin: "https://evil.example" }), 403, "cross-origin page");
+  assert.equal(await rawGet("/api/local-token", { host: `evil.example:${port}` }), 403, "DNS rebinding host");
+  assert.equal(await rawGet("/api/local-token", { origin: `http://localhost:${port}`, host: `localhost:${port}` }), 200, "same-machine page");
+  // 没 build 过 dist 时静态路由统一 503，两种情况都不能是 200 / 崩溃
+  assert.ok([400, 503].includes(await rawGet("/%E0%A4%A", {})), "malformed path does not crash");
+  assert.ok([403, 503].includes(await rawGet("/..%2Fdist-evil/x.js", {})), "no sibling-directory escape");
+  assert.equal((await fetch(`${base}/api/ping`)).status, 200, "hub still up");
 });
 
 test("two devices converge through the hub; blobs are hash-checked", async () => {

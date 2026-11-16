@@ -79,6 +79,18 @@ function isLoopback(req) {
   return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
 }
 
+/** 浏览器请求的 Host / Origin 都必须是本机：挡住“任意网页 fetch 127.0.0.1 读令牌”和 DNS rebinding。 */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+function hostnameOf(value) {
+  try { return new URL(value.includes("://") ? value : `http://${value}`).hostname; } catch { return ""; }
+}
+function sameMachinePage(req) {
+  if (!isLoopback(req)) return false;
+  if (!LOOPBACK_HOSTS.has(hostnameOf(String(req.headers.host ?? "")))) return false;
+  const origin = req.headers.origin;
+  return !origin || LOOPBACK_HOSTS.has(hostnameOf(String(origin)));
+}
+
 function safeEqual(a, b) {
   const left = Buffer.from(String(a ?? ""));
   const right = Buffer.from(String(b ?? ""));
@@ -115,8 +127,8 @@ async function readBody(req, limit) {
   return Buffer.concat(chunks);
 }
 
-async function readJson(req) {
-  const raw = await readBody(req, MAX_JSON);
+async function readJson(req, limit = MAX_JSON) {
+  const raw = await readBody(req, limit);
   try { return JSON.parse(raw.toString("utf8") || "{}"); } catch { throw Object.assign(new Error("JSON 格式错误"), { status: 400 }); }
 }
 
@@ -142,9 +154,10 @@ function serveStatic(req, res, urlPath) {
     res.end("Web 界面尚未构建：请先在 pindou-hub 目录运行 npm run build。API 已可用。");
     return;
   }
-  let rel = decodeURIComponent(urlPath).replace(/^\/+/, "");
+  let rel;
+  try { rel = decodeURIComponent(urlPath).replace(/^\/+/, ""); } catch { res.writeHead(400).end(); return; }
   let file = path.resolve(DIST_DIR, rel || "index.html");
-  if (!file.startsWith(DIST_DIR)) { res.writeHead(403).end(); return; }
+  if (file !== DIST_DIR && !file.startsWith(DIST_DIR + path.sep)) { res.writeHead(403).end(); return; }
   if (!existsSync(file) || statSync(file).isDirectory()) {
     if (path.extname(rel)) { res.writeHead(404).end(); return; }
     file = path.join(DIST_DIR, "index.html");
@@ -156,7 +169,14 @@ function serveStatic(req, res, urlPath) {
     "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache"
   });
   if (req.method === "HEAD") { res.end(); return; }
-  createReadStream(file).pipe(res);
+  pipeFile(file, res);
+}
+
+/** 文件在发送途中被删（如 Hub 运行时重新 build）不能让进程崩溃 */
+function pipeFile(file, res) {
+  const stream = createReadStream(file);
+  stream.on("error", () => { res.destroy(); });
+  stream.pipe(res);
 }
 
 async function putBlob(req, res, id) {
@@ -165,7 +185,7 @@ async function putBlob(req, res, id) {
   if (digest !== id) { sendJson(res, 400, { error: "内容哈希与 id 不一致" }); return; }
   const file = path.join(BLOB_DIR, id);
   if (!existsSync(file)) {
-    const tmp = `${file}.${process.pid}.tmp`;
+    const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
     const handle = await open(tmp, "w");
     try { await handle.writeFile(body); await handle.sync(); } finally { await handle.close(); }
     try { renameSync(tmp, file); } catch (error) { await unlink(tmp).catch(() => {}); if (!existsSync(file)) throw error; }
@@ -179,7 +199,7 @@ function getBlob(req, res, id) {
   const size = statSync(file).size;
   res.writeHead(200, { "content-type": "application/octet-stream", "content-length": size, "cache-control": "private, max-age=31536000, immutable" });
   if (req.method === "HEAD") { res.end(); return; }
-  createReadStream(file).pipe(res);
+  pipeFile(file, res);
 }
 
 let aiCache = { at: 0, value: null };
@@ -244,14 +264,14 @@ async function handle(req, res) {
   }
   if (p === "/api/local-token") {
     // 只有在 Hub 本机上打开的页面能直接拿到令牌；局域网其他设备必须输入配对码。
-    if (!isLoopback(req)) { sendJson(res, 403, { error: "仅限本机" }); return; }
+    if (!sameMachinePage(req)) { sendJson(res, 403, { error: "仅限本机" }); return; }
     sendJson(res, 200, { token: config.token, pairCode: config.pairCode, name: config.name, addresses: lanAddresses() });
     return;
   }
   if (p === "/api/pair" && req.method === "POST") {
     const ip = req.socket.remoteAddress ?? "?";
     if (pairLimited(ip)) { sendJson(res, 429, { error: "尝试次数过多，请 1 分钟后再试" }); return; }
-    const body = await readJson(req);
+    const body = await readJson(req, 4096); // 未登录接口：小上限
     if (!safeEqual(String(body.code ?? "").trim(), config.pairCode)) {
       pairFailures.get(ip)?.push(Date.now());
       sendJson(res, 401, { error: "配对码不正确" });
